@@ -66,7 +66,7 @@ class BOSS_PSO:
                 np.load('boss_grid_with_continuum/' + self.gridpoint_to_filename(self.teff_gridpoints3[t], self.m_h_gridpoints3[m], self.logg_gridpoints3[l])) * 1e5
             ).to(device=self.device)
 
-    def gridpoint_to_filename(self, teff, m_h, logg) -> str:
+    def gridpoint_to_filename(self, teff:float, m_h:float, logg:float) -> str:
         result = 'l' + ('m' if m_h < -1e-3 else 'p') + '00'
         result += (f'{m_h:.2f}').split('.')[1] + '_'
         result += preface_char(str(int(np.rint(teff))), 5) + '_'
