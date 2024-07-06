@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 from General.StringUtils import preface_char
-from General.MathUtils import vsini_kernel, interp_tensor
+from General.MathUtils import vsini_kernel, interp_tensor, map_range
 
 torch.set_grad_enabled(False)
 
@@ -65,7 +65,6 @@ class BOSS_PSO:
             self.model_grid3[t,m,l] = torch.from_numpy(
                 np.load('boss_grid_with_continuum/' + self.gridpoint_to_filename(self.teff_gridpoints3[t], self.m_h_gridpoints3[m], self.logg_gridpoints3[l])) * 1e5
             ).to(device=self.device)
-        print(self.model_grid1.size())
 
     def gridpoint_to_filename(self, teff, m_h, logg):
         result = 'l' + ('m' if m_h < -1e-3 else 'p') + '00'
@@ -328,13 +327,10 @@ class BOSS_PSO:
         
         # Interpolate model
         model = self.interpolate(params[0], params[1], params[2])
-        print(model.size())
         # Perform vsini convolution
         model = model.unsqueeze(0).unsqueeze(0)
-        print(model.size())
         kernel = torch.from_numpy(vsini_kernel(params[3])).unsqueeze(0).unsqueeze(0).to(device=self.device)
         model = F.conv1d(model, kernel, padding='same').squeeze()
-        print(model.size())
 
         #region Perform resolution convolution
         # =========================================================================================
@@ -357,8 +353,6 @@ class BOSS_PSO:
 
         # Convolution
         model_padded = model_padded.unfold(0, kernel_size, 1)  # Shape: (batch_size, kernel_size)
-        print(model_padded.size())
-        print(kernels.size())
         model = (model_padded * kernels).sum(dim=1)
         #endregion Perform resolution convolution =================================================
 
@@ -367,6 +361,52 @@ class BOSS_PSO:
         wl_shifted = self.observed[:,0] * (1.0 - params[4] / 299_792.458)
         return interp_tensor(wl_shifted, self.wl, model)
     
+    def fit_continuum(self, model):
+        # Cutting spectrum into partially overlapping chunks
+        n_chunks = 5
+        overlap = 0.2 # 0 = no overlap, 0.5 = max overlap
+        chunks_startstop = torch.zeros(size=(n_chunks, 2), dtype=torch.int32)
+        for i in range(n_chunks):
+            start = torch.clamp(map_range(i - overlap, 0, n_chunks, self.observed[0,0], self.observed[-1,0]), self.observed[0,0], self.observed[-1,0])
+            stop = torch.clamp(map_range(i + 1 + overlap, 0, n_chunks, self.observed[0,0], self.observed[-1,0]), self.observed[0,0], self.observed[-1,0])
+            chunks_startstop[i, 0] = torch.le(self.observed[:,0], start).sum().item()
+            chunks_startstop[i, 1] = min(torch.le(self.observed[:,0], stop).sum().item(), len(self.observed) - 1)
+        
+        # Fitting a polynomial to each chunk
+        porder = 8
+        #pfits = torch.zeros((n_chunks, porder+1), device=self.device)
+        pvals = torch.zeros((n_chunks, len(self.observed)), device=self.device)
+        y = self.observed[:,1] / model
+        for c in range(n_chunks):
+            wl_remap = ((self.observed[:,0] - self.observed[chunks_startstop[c][0],0])
+                        / (self.observed[chunks_startstop[c][1],0] - self.observed[chunks_startstop[c][0],0]) * 2 - 1)
+
+            # Polynomial fit
+            powers = torch.arange(porder+1)
+            wl_pow = torch.pow(wl_remap.unsqueeze(dim=0), powers.unsqueeze(dim=1))
+            b = (y[chunks_startstop[c][0]:chunks_startstop[c][1]] * wl_pow[:,chunks_startstop[c][0]:chunks_startstop[c][1]]).sum(dim=1)
+            
+            powers = torch.arange(2*porder+1)
+            A = torch.pow(wl_remap[chunks_startstop[c][0]:chunks_startstop[c][1]].unsqueeze(dim=0), powers.unsqueeze(dim=1)).sum(dim=1).unfold(0, porder+1, 1)
+            
+            coef = torch.matmul(torch.inverse(A), b)
+
+            # Evaluate polynomial
+            pvals[c] = (wl_pow * coef.unsqueeze(dim=1)).sum(dim=0)
+        
+        # Blend polynomials
+        for c in range(1, n_chunks):
+            mask = torch.sin(torch.clamp((self.observed[:,0] - self.observed[chunks_startstop[c-1][1],0])
+                                         / (self.observed[chunks_startstop[c][0],0] - self.observed[chunks_startstop[c-1][1],0])
+                                         * 1.4 - 0.2, 0, 1) * np.pi/2)**2
+            pvals[c-1] *= mask
+            pvals[c] *= 1-mask
+        
+        return pvals.sum(dim=0)
+
     def calculate_cost(self, params):
         model = self.produce_model(params)
+        model *= self.fit_continuum(model)
+        return torch.mean(((model - self.observed[:,1]) / self.observed[:,2]) ** 2)
+        
 

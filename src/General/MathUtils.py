@@ -2,6 +2,16 @@ import numpy as np
 import torch
 
 
+def map_range(
+    x: float,
+    from_low: float,
+    from_high: float,
+    to_low: float,
+    to_high: float
+) -> float:
+    return (x - from_low) / (from_high - from_low) * (to_high - to_low) + to_low
+
+
 def gaussian(x, x0, a, sigma):
     return a * np.exp(-0.5 * (x - x0) ** 2 / sigma**2)
 
