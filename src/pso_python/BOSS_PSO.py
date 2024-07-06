@@ -66,14 +66,14 @@ class BOSS_PSO:
                 np.load('boss_grid_with_continuum/' + self.gridpoint_to_filename(self.teff_gridpoints3[t], self.m_h_gridpoints3[m], self.logg_gridpoints3[l])) * 1e5
             ).to(device=self.device)
 
-    def gridpoint_to_filename(self, teff, m_h, logg):
+    def gridpoint_to_filename(self, teff, m_h, logg) -> str:
         result = 'l' + ('m' if m_h < -1e-3 else 'p') + '00'
         result += (f'{m_h:.2f}').split('.')[1] + '_'
         result += preface_char(str(int(np.rint(teff))), 5) + '_'
         result += preface_char((f'{logg:.1f}').replace('.', ''), 3) + '0.npy'
         return result
 
-    def physical_to_internal(self, params:torch.Tensor):
+    def physical_to_internal(self, params:torch.Tensor) -> torch.Tensor:
         result = params.clone()
         if len(result.shape) == 1:
             result[0] = torch.log10(result[0])
@@ -85,7 +85,7 @@ class BOSS_PSO:
             raise ValueError("Number of dimensions of input should be 1 or 2!")
         return result
         
-    def internal_to_physical(self, params:torch.Tensor):
+    def internal_to_physical(self, params:torch.Tensor) -> torch.Tensor:
         result = params.clone()
         if len(result.shape) == 1:
             result[0] = 10 ** result[0]
@@ -97,7 +97,7 @@ class BOSS_PSO:
             raise ValueError("Number of dimensions of input should be 1 or 2!")
         return result
 
-    def within_bounds(self, params):
+    def within_bounds(self, params) -> bool:
         if params[0] > 25750 and params[2] < 3.3:
             return False
         if params[0] > 10000 and params[2] < 3.0:
@@ -309,10 +309,10 @@ class BOSS_PSO:
         
         return result
 
-    def set_observed(self, observed:np.ndarray):
+    def set_observed(self, observed:np.ndarray) -> None:
         self.observed = torch.from_numpy(observed).to(device=self.device)
 
-    def create_gaussian_kernels(self, size:int):
+    def create_gaussian_kernels(self, size:int) -> torch.Tensor:
         sigmas = 61402.18438872159 / interp_tensor(self.wl, self.observed[:,0], self.observed[:,3])
         x = torch.arange(-size // 2 + 1., size // 2 + 1., device=self.device)
         x = x.view(1, -1)  # Shape: (1, kernel_size)
@@ -321,7 +321,7 @@ class BOSS_PSO:
         kernels = kernels / kernels.sum(dim=1, keepdim=True)
         return kernels
 
-    def produce_model(self, params, check_if_within_bounds=True):
+    def produce_model(self, params, check_if_within_bounds=True) -> torch.Tensor:
         if check_if_within_bounds and not self.within_bounds(params):
             raise ValueError("Parameters not within bounds!")
         
@@ -361,7 +361,7 @@ class BOSS_PSO:
         wl_shifted = self.observed[:,0] * (1.0 - params[4] / 299_792.458)
         return interp_tensor(wl_shifted, self.wl, model)
     
-    def fit_continuum(self, model):
+    def fit_continuum(self, model) -> torch.Tensor:
         # Cutting spectrum into partially overlapping chunks
         n_chunks = 5
         overlap = 0.2 # 0 = no overlap, 0.5 = max overlap
@@ -404,9 +404,9 @@ class BOSS_PSO:
         
         return pvals.sum(dim=0)
 
-    def calculate_cost(self, params):
+    def calculate_cost(self, params) -> float:
         model = self.produce_model(params)
         model *= self.fit_continuum(model)
-        return torch.mean(((model - self.observed[:,1]) / self.observed[:,2]) ** 2)
+        return torch.mean(((model - self.observed[:,1]) / self.observed[:,2]) ** 2).item()
         
 
