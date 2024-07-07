@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Generator, Optional, Sequence, overload
 
 import numpy as np
-from spectrum import (
+from spectrum.spectrum import (
     ObservedSpectra,
     ObservedSpectrum,
     ResampledObservedSpectra,

@@ -11,6 +11,7 @@ def sobol_sample(
 ) -> np.ndarray:
     """'
     Each sample is an array of length 4 containing [Teff, M, logg, vsini].
+    If round is True, the values are rounded to integers in Teff and vsini and two decimals in M and logg.
     """
     samples = Sobol(4, seed=seed).random_base2(int(np.rint(np.log2(n))))
     samples[:, 0] = np.clip(
@@ -50,7 +51,8 @@ def sobol_sample_no_vsini(
     seed=None,
 ) -> np.ndarray:
     """'
-    Each sample is an array of length 4 containing [Teff, M, logg, vsini].
+    Each sample is an array of length 4 containing [Teff, M, logg, vsini]. vsini is kept fixed.
+    If round is True, the values are rounded to integers in Teff and vsini and two decimals in M and logg.
     """
     samples = np.zeros((n, 4))
     samples[:, :3] = Sobol(3, seed=seed).random_base2(int(np.rint(np.log2(n))))

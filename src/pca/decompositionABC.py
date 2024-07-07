@@ -4,15 +4,16 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
-from MELCHIORS.MELCHIORS_Utils import LoadedSpectrum
-from pca.spectrum import Labels, Spectra, Spectrum, TrainingData
+from pca.labels import Labels
+from pca.training_data import TrainingData, RegressorTraining
+from spectrum.spectrum import Spectra, Spectrum
 
 
 class DimensionalityReducer(ABC):
 
     @abstractmethod
     def train(
-        self, training: TrainingData[Spectra]
+        self, training: TrainingData
     ) -> TrainedDimensionalityReducer: ...
 
 
@@ -28,7 +29,6 @@ class TrainedDimensionalityReducer(ABC):
         self.training_coefficients = training_coefficients
         self.training_labels = training_labels
 
-    
     def transform_single(self, spectrum: Spectrum) -> np.ndarray:
         spectra = Spectra(self.wl, np.array([spectrum.flux]))
         return self.transform(spectra)[0]
@@ -44,13 +44,13 @@ class TrainedDimensionalityReducer(ABC):
     def inverse_transform(self, coefficients: np.ndarray) -> Spectra: ...
 
     def get_regressor_training(
-        self, training_data: TrainingData[Spectra]
-    ) -> TrainingData[np.ndarray]:
-        return TrainingData(self.transform(training_data.x), training_data.labels)
+        self, training_data: TrainingData
+    ) -> RegressorTraining:
+        return RegressorTraining(self.transform(training_data.x), training_data.labels)
 
     @property
-    def regressor_training(self) -> TrainingData[np.ndarray]:
-        return TrainingData(self.training_coefficients, self.training_labels)
+    def regressor_training(self) -> RegressorTraining:
+        return RegressorTraining(self.training_coefficients, self.training_labels)
 
 
 class TrainedNMFABC(TrainedDimensionalityReducer):
@@ -63,7 +63,7 @@ class TrainedNMFABC(TrainedDimensionalityReducer):
     def wl(self) -> np.ndarray: ...
 
     def resample_spec_and_get_components(
-        self, spec: LoadedSpectrum
+        self, spec: Spectrum
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         wl_min = np.max([self.wl[0], spec.wl[0]])
         wl_max = np.min([self.wl[-1], spec.wl[-1]])

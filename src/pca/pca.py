@@ -5,7 +5,7 @@ from sklearn import decomposition
 
 from pca.decompositionABC import DimensionalityReducer, TrainedDimensionalityReducer
 from pca.labels import Labels
-from pca.spectrum import Spectra, Spectrum
+from spectrum.spectrum import Spectra, Spectrum
 from pca.training_data import TrainingData
 
 
@@ -14,7 +14,7 @@ class PCA(DimensionalityReducer):
     def __init__(self, n_components: int, **kwargs) -> None:
         self.pca = decomposition.PCA(n_components=n_components, **kwargs)
 
-    def train(self, training_data: TrainingData[Spectra]) -> TrainedPCA:
+    def train(self, training_data: TrainingData) -> TrainedPCA:
         coefficients = self.pca.fit_transform(training_data.x.array)
         return TrainedPCA(
             self.pca, training_data.x.wl, coefficients, training_data.labels

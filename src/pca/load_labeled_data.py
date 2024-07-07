@@ -1,33 +1,21 @@
 from multiprocessing import Pool
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from astropy.io import fits  # type: ignore
 from tqdm.auto import tqdm
-from abc import ABC, abstractmethod
+
 from definitions import HERMESNET, PROJECT_ROOT
-from Literature.simbad_data import SimbadData
-from nmf.observed_data import (
-    ObservedLabel,
-    ObservedLabels,
-    ObservedSpectra,
-    ObservedTrainingData,
-)
-from typing import Optional, Literal
-from pca.spectrum import (
-    Label,
-    Labels,
-    ObservedSpectra,
-    ObservedSpectrum,
-    TrainingData,
-    Spectra,
-    Spectrum,
-)
+from pca.labels import Label, Labels, ObservedLabel, ObservedLabels
+from pca.training_data import ObservedTrainingData, TrainingData
+from spectrum.spectrum import ObservedSpectra, ObservedSpectrum, Spectra, Spectrum
 
 LABEL_FILE = PROJECT_ROOT / "src/nmf/training_labels_final.txt"
 
 
 def read_spectrum(path: Path) -> ObservedSpectrum:
+    """Read a HERMES fits file."""
     with fits.open(path) as image:
         flux = image[0].data  # type: ignore
         wl = np.exp(
@@ -44,29 +32,32 @@ def read_spectrum(path: Path) -> ObservedSpectrum:
 
 
 def read_labels(file: Path) -> ObservedLabels:
+    """
+    Read derived labels corresponding to a list of spectra.
+    The file is in txt format with columns:
+    unseq, Teff, dTeff, mh, dmh, logg, dlogg, vsini, dvsini, rv, drv
+    """
     labels = np.loadtxt(file, delimiter=" ")[:, :12]
     labels[:, 11] = 0
     return ObservedLabels(labels)
 
 
 class LabelHandlerFits:
-    def __init__(self, spectra_dir: Optional[Path]):
-        self.simbad_data = SimbadData()
+    """Helper classs"""
+    def __init__(self, spectra_dir: Path):
         self.spectra_dir = spectra_dir
 
     def __call__(self, label: ObservedLabel) -> tuple[ObservedSpectrum, ObservedLabel]:
         index = int(label.unseq)
-        if self.spectra_dir is None:
-            file = Path(self.simbad_data[str(index)].filepath())
-        else:
-            file = (
-                self.spectra_dir
-                / f"{index:08d}_HRF_OBJ_ext_CosmicsRemoved_log_merged_c.fits"
-            )
+        file = (
+            self.spectra_dir
+            / f"{index:08d}_HRF_OBJ_ext_CosmicsRemoved_log_merged_c.fits"
+        )
         return (read_spectrum(file), label)
 
 
 class ObservedLabelHandlerNpy:
+    """Helper classs"""
     def __init__(self, spectra_dir: Path, filetype: str):
         self.spectra_dir = spectra_dir
         self.filetype = filetype
@@ -86,6 +77,7 @@ class ObservedLabelHandlerNpy:
 
 
 class SynthLabelHandlerNpy:
+    """Helper classs"""
     def __init__(self, spectra_dir: Path, filetype: str):
         self.spectra_dir = spectra_dir
         self.filetype = filetype
@@ -98,6 +90,7 @@ class SynthLabelHandlerNpy:
 
 
 class SynthNoiseLabelHandlerNpy:
+    """Helper classs"""
     def __init__(self, spectra_dir: Path, filetype: str):
         self.spectra_dir = spectra_dir
         self.filetype = filetype
@@ -119,13 +112,17 @@ class SynthNoiseLabelHandlerNpy:
 
 
 def load_training_fits(
+    spectra_dir: Path,
     label_file=LABEL_FILE,
-    spectra_dir=None,
     min_n: int = 0,
     max_n: int = -1,
     n_cores=None,
     silent=False,
 ) -> ObservedTrainingData:
+    """
+    Load observed training data from a file with labels and directory with the spectra fits files.
+    The unseq values in the first column of the label file should match the fits filenames.
+    """
     labels = read_labels(label_file)[min_n:max_n]
     handle = LabelHandlerFits(spectra_dir)
     if n_cores == 1:
@@ -158,6 +155,13 @@ def load_observed_npy(
     n_cores=None,
     silent=False,
 ) -> ObservedTrainingData:
+    """
+    Load observed training data from a file with labels and directory
+    with the spectra converted to npy format.
+    The unseq values in the first column of the label file should match the npy filenames.
+    Every spectrum should have an 00000000_wl.npy file with the wavelength array
+    and 00000000.npy file with the flux array.
+    """
     labels = read_labels(label_file).filter_unseq(
         train_labels if group == "train" else test_labels
     )
@@ -187,7 +191,8 @@ def load_synthetic_npy(
     filetype: str = "synth",
     n_cores=None,
     silent=False,
-) -> TrainingData[Spectra]:
+) -> TrainingData:
+    
     labels = read_labels(label_file).filter_unseq(
         train_labels if group == "train" else test_labels
     )
@@ -261,7 +266,7 @@ class NewFileHandler:
 
 def load_new_synth_training(
     location, min_n: int = 0, max_n: int = -1, n_cores=None, silent=False
-) -> TrainingData[Spectra]:
+) -> TrainingData:
     dir_ = Path(location)
     all_files = sort_files([f for f in dir_.glob("*.npy") if f.name != "wl.npy"])
     rng = np.random.default_rng(123)
@@ -289,7 +294,7 @@ def load_new_synth_training(
 
 def load_all_synth_training(
     location, group: Literal["train", "test"], n_cores=None, silent=False
-) -> TrainingData[Spectra]:
+) -> TrainingData:
     dir_ = Path(location)
     wl = np.load(dir_ / "wl.npy")
     spectra: list[Spectrum] = []

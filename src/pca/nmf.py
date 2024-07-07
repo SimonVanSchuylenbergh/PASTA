@@ -4,10 +4,10 @@ import numpy as np
 from rust_nmf import RegularNMF as RegularRustNMF  # type: ignore
 from rust_nmf import RegularNMFFitter  # type: ignore
 
-from pca.decomposition import TrainedPCA
+from pca.pca import TrainedPCA
 from pca.decompositionABC import DimensionalityReducer, TrainedNMFABC
 from pca.labels import Labels
-from pca.spectrum import ObservedSpectra, Spectra
+from spectrum.spectrum import ObservedSpectra, Spectra
 from pca.training_data import TrainingData
 
 
@@ -18,7 +18,7 @@ class RegularNMF(DimensionalityReducer):
 
     def train(
         self,
-        training_data: TrainingData[Spectra],
+        training_data: TrainingData,
         iterations=1000,
         shift_mean=False,
         parallelize_loop=True,
@@ -37,7 +37,7 @@ class RegularNMF(DimensionalityReducer):
 
     def train_fixed_weight(
         self,
-        training_data: TrainingData[Spectra],
+        training_data: TrainingData,
         W: np.ndarray,
         iterations=1000,
         shift_mean=False,
@@ -58,7 +58,7 @@ class RegularNMF(DimensionalityReducer):
 
     def train_with_guess(
         self,
-        training_data: TrainingData[Spectra],
+        training_data: TrainingData,
         H: np.ndarray,
         W: np.ndarray,
         iterations=1000,
