@@ -1,0 +1,36 @@
+[package]
+name = "pasta"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[lib]
+name = "normalization"
+crate-type = ["cdylib"]
+
+[dependencies]
+npy = "0.4.0"
+nalgebra = "0.32.4"
+rayon = "1.9.0"
+lru = "0.12.3"
+rand="0.8.5"
+argmin = { version = "0.10.0", features = ["rayon"]}
+argmin-math = { version = "0.4.0", features = ["nalgebra_v0_32"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+itertools = "0.9.0"
+indicatif = "0.17.8"
+realfft = "3.3.0"
+iter_num_tools = "0.7.1"
+anyhow = "1.0.82"
+numpy = { version= "0.21.0", features = ["nalgebra"]}
+enum_dispatch = "0.3.13"
+
+[dependencies.pyo3]
+version = "0.21.1"
+features = ["abi3-py39", "multiple-pymethods"]
+
+[profile.release]
+debug = true
+#codegen-units = 1
+#lto = "fat"
