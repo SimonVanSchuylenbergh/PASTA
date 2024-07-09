@@ -407,6 +407,6 @@ class BOSS_PSO:
     def calculate_cost(self, params) -> float:
         model = self.produce_model(params)
         model *= self.fit_continuum(model)
-        return torch.mean(((model - self.observed[:,1]) / self.observed[:,2]) ** 2).item()
+        return torch.mean((model - self.observed[:,1])**2 / self.observed[:,2]).item()
         
 
