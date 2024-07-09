@@ -2,6 +2,8 @@ use crate::convolve_rv::{rot_broad_rv, WavelengthDispersion};
 use crate::cubic::cubic_3d;
 use anyhow::{bail, Context, Result};
 use argmin_math::ArgminRandom;
+use burn::tensor::backend::Backend;
+use burn::tensor::{Data, Tensor};
 use nalgebra as na;
 use npy::NpyData;
 use rand::Rng;
@@ -205,7 +207,6 @@ pub enum WlGrid {
 }
 
 impl WlGrid {
-
     pub fn n(&self) -> usize {
         match self {
             WlGrid::Linspace(_, _, n) => *n,
@@ -242,12 +243,12 @@ impl WlGrid {
     }
 }
 
-pub trait Interpolator: Send + Sync {
+pub trait Interpolator<E: Backend>: Send + Sync {
     type B: Bounds;
 
     fn synth_wl(&self) -> WlGrid;
     fn bounds(&self) -> &Self::B;
-    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<na::DVector<f64>>;
+    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor<E, 1>>;
     fn produce_model(
         &self,
         target_dispersion: &impl WavelengthDispersion,
@@ -256,7 +257,7 @@ pub trait Interpolator: Send + Sync {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<na::DVector<f64>>;
+    ) -> Result<Tensor<E, 1>>;
     fn produce_model_on_grid(
         &self,
         target_dispersion: &impl WavelengthDispersion,
@@ -265,7 +266,7 @@ pub trait Interpolator: Send + Sync {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<na::DVector<f64>>;
+    ) -> Result<Tensor<E, 1>>;
 }
 
 impl Bounds for SquareBounds {
@@ -343,7 +344,17 @@ pub trait SquareGridInterpolator: Send + Sync {
     fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<Cow<na::DVector<f64>>>;
 }
 
-impl<I: SquareGridInterpolator> Interpolator for I {
+pub fn nalgebra_to_tensor<E: Backend>(x: na::DVector<f64>) -> Tensor<E, 1> {
+    let device = Default::default();
+    Tensor::<E, 1>::from_data(Data::from(x.data.as_slice()).convert(), &device)
+}
+
+pub fn tensor_to_nalgebra<E: Backend>(x: Tensor<E, 1>) -> na::DVector<f64> {
+    let vec: Vec<f64> = x.into_data().convert().value;
+    na::DVector::from_vec(vec)
+}
+
+impl<E: Backend, I: SquareGridInterpolator> Interpolator<E> for I {
     type B = SquareBounds;
     fn synth_wl(&self) -> WlGrid {
         self.synth_wl()
@@ -351,7 +362,7 @@ impl<I: SquareGridInterpolator> Interpolator for I {
     fn bounds(&self) -> &SquareBounds {
         self.ranges()
     }
-    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<na::DVector<f64>> {
+    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor<E, 1>> {
         let InterpolInput {
             coord,
             xp,
@@ -359,7 +370,7 @@ impl<I: SquareGridInterpolator> Interpolator for I {
             shape,
         } = prepare_interpolate(self.ranges(), teff, m, logg)
             .context("prepare_interpolate error")?;
-        
+
         let local_4x4x4 = local_4x4x4_indices
             .into_iter()
             .map(|[i, j, k]| self.find_spectrum(i as usize, j as usize, k as usize))
@@ -392,7 +403,7 @@ impl<I: SquareGridInterpolator> Interpolator for I {
             interpolated[j + start] = cubic_3d(coord, &xp, &v, shape);
         }
 
-        Ok(interpolated)
+        Ok(nalgebra_to_tensor(interpolated))
     }
 
     fn produce_model(
@@ -403,12 +414,14 @@ impl<I: SquareGridInterpolator> Interpolator for I {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<na::DVector<f64>> {
-        let interpolated = self
-            .interpolate(teff, m, logg)
-            .context("Error during interpolation step.")?;
-        rot_broad_rv(interpolated, self.synth_wl(), target_dispersion, vsini, rv)
-            .context("Error during convolution/resampling step.")
+    ) -> Result<Tensor<E, 1>> {
+        let interpolated = tensor_to_nalgebra::<E>(
+            self.interpolate(teff, m, logg)
+                .context("Error during interpolation step.")?,
+        );
+        let broadened = rot_broad_rv(interpolated, self.synth_wl(), target_dispersion, vsini, rv)
+            .context("Error during convolution/resampling step.")?;
+        Ok(nalgebra_to_tensor::<E>(broadened))
     }
 
     fn produce_model_on_grid(
@@ -419,7 +432,7 @@ impl<I: SquareGridInterpolator> Interpolator for I {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<na::DVector<f64>> {
+    ) -> Result<Tensor<E, 1>> {
         let i = self
             .ranges()
             .teff
@@ -432,13 +445,14 @@ impl<I: SquareGridInterpolator> Interpolator for I {
             .try_get_index(logg)
             .context("logg not in grid")?;
         let spec = self.find_spectrum(i, j, k)?;
-        rot_broad_rv(
+        let broadened = rot_broad_rv(
             spec.into_owned(),
             self.synth_wl(),
             target_dispersion,
             vsini,
             rv,
-        )
+        )?;
+        Ok(nalgebra_to_tensor::<E>(broadened))
     }
 }
 
@@ -734,7 +748,7 @@ impl<I: SquareGridInterpolator> CompoundInterpolator<I> {
     }
 }
 
-impl<'a, I: SquareGridInterpolator> Interpolator for CompoundInterpolator<I> {
+impl<'a, E: Backend, I: SquareGridInterpolator> Interpolator<E> for CompoundInterpolator<I> {
     type B = CompoundBounds;
     fn synth_wl(&self) -> WlGrid {
         self.interpolators[0].synth_wl()
@@ -743,7 +757,7 @@ impl<'a, I: SquareGridInterpolator> Interpolator for CompoundInterpolator<I> {
         &self.bounds
     }
 
-    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<na::DVector<f64>> {
+    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor<E, 1>> {
         let i = self.choose_grid(teff, logg);
         self.interpolators[i].interpolate(teff, m, logg)
     }
@@ -756,7 +770,7 @@ impl<'a, I: SquareGridInterpolator> Interpolator for CompoundInterpolator<I> {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<na::DVector<f64>> {
+    ) -> Result<Tensor<E, 1>> {
         let i = self.choose_grid(teff, logg);
         self.interpolators[i].produce_model(target_dispersion, teff, m, logg, vsini, rv)
     }
@@ -768,7 +782,7 @@ impl<'a, I: SquareGridInterpolator> Interpolator for CompoundInterpolator<I> {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<na::DVector<f64>> {
+    ) -> Result<Tensor<E, 1>> {
         let i = self.choose_grid(teff, logg);
         self.interpolators[i].produce_model_on_grid(target_dispersion, teff, m, logg, vsini, rv)
     }

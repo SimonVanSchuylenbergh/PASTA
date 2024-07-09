@@ -1,18 +1,19 @@
 use crate::convolve_rv::WavelengthDispersion;
-use crate::interpolate::{Bounds, Interpolator, SquareGridInterpolator};
+use crate::interpolate::{tensor_to_nalgebra, Bounds, Interpolator};
 use crate::particleswarm;
 use anyhow::{anyhow, Context, Result};
 use argmin::core::observers::{Observe, ObserverMode};
 use argmin::core::{CostFunction, Error, Executor, PopulationState, State, KV};
 use argmin::solver::brent::BrentRoot;
+use burn::tensor::backend::Backend;
 use enum_dispatch::enum_dispatch;
 use nalgebra as na;
 use rayon::prelude::*;
 use serde::Serialize;
 use std::fs::File;
 use std::io::BufWriter;
+use std::marker::PhantomData;
 use std::path::PathBuf;
-
 /// Scale labels by this amount during fitting
 pub const SCALING: na::SVector<f64, 5> =
     na::SVector::<f64, 5>::new(10_000.0, 1.0, 1.0, 100.0, 100.0);
@@ -337,35 +338,53 @@ impl ContinuumFitter for FixedContinuum {
 pub struct ConstantContinuum();
 
 impl ContinuumFitter for ConstantContinuum {
-    fn fit_continuum(&self,observed_spectrum: &ObservedSpectrum,synthetic_spectrum: &nalgebra::DVector<f64>,) -> Result<(nalgebra::DVector<f64>,f64)> {
+    fn fit_continuum(
+        &self,
+        observed_spectrum: &ObservedSpectrum,
+        synthetic_spectrum: &nalgebra::DVector<f64>,
+    ) -> Result<(nalgebra::DVector<f64>, f64)> {
         let n = synthetic_spectrum.len();
-        let target = observed_spectrum.flux.component_div(&synthetic_spectrum);
+        let target = observed_spectrum.flux.component_div(synthetic_spectrum);
         let mean = target.iter().sum::<f64>() / n as f64;
         let continuum = nalgebra::DVector::from_element(n, mean);
         let residuals = &observed_spectrum.flux - synthetic_spectrum.component_mul(&continuum);
-        let chi2 = residuals.component_div(&observed_spectrum.var).dot(&residuals) / n as f64;
+        let chi2 = residuals
+            .component_div(&observed_spectrum.var)
+            .dot(&residuals)
+            / n as f64;
         Ok((continuum, chi2))
     }
 
-    fn fit_continuum_and_return_continuum(&self,observed_spectrum: &ObservedSpectrum,synthetic_spectrum: &nalgebra::DVector<f64>,) -> Result<nalgebra::DVector<f64>> {
+    fn fit_continuum_and_return_continuum(
+        &self,
+        observed_spectrum: &ObservedSpectrum,
+        synthetic_spectrum: &nalgebra::DVector<f64>,
+    ) -> Result<nalgebra::DVector<f64>> {
         let n = synthetic_spectrum.len();
-        let target = observed_spectrum.flux.component_div(&synthetic_spectrum);
+        let target = observed_spectrum.flux.component_div(synthetic_spectrum);
         let mean = target.iter().sum::<f64>() / n as f64;
         Ok(nalgebra::DVector::from_element(n, mean))
     }
 }
 
 /// Cost function used in the PSO fitting
-struct FitCostFunction<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
+struct FitCostFunction<
+    'a,
+    E: Backend,
+    I: Interpolator<E>,
+    T: WavelengthDispersion,
+    F: ContinuumFitter,
+> {
     interpolator: &'a I,
     target_dispersion: &'a T,
     observed_spectrum: &'a ObservedSpectrum,
     continuum_fitter: &'a F,
     parallelize: bool,
+    backend: PhantomData<E>, // Necessary to allow unused type parameter E
 }
 
-impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> CostFunction
-    for FitCostFunction<'a, I, T, F>
+impl<'a, E: Backend, I: Interpolator<E>, T: WavelengthDispersion, F: ContinuumFitter> CostFunction
+    for FitCostFunction<'a, E, I, T, F>
 {
     type Param = na::SVector<f64, 5>;
     type Output = f64;
@@ -382,7 +401,7 @@ impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> CostFunct
                 .produce_model(self.target_dispersion, teff, m, logg, vsini, rv)?;
         let (_, ls) = self
             .continuum_fitter
-            .fit_continuum(self.observed_spectrum, &synth_spec)?;
+            .fit_continuum(self.observed_spectrum, &tensor_to_nalgebra(synth_spec))?;
         Ok(ls)
     }
 
@@ -410,7 +429,13 @@ pub struct PSOSettings {
     pub delta: f64,
 }
 
-fn get_pso_fitter<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter>(
+fn get_pso_fitter<
+    'a,
+    E: Backend,
+    I: Interpolator<E>,
+    T: WavelengthDispersion,
+    F: ContinuumFitter,
+>(
     interpolator: &'a I,
     target_dispersion: &'a T,
     observed_spectrum: &'a ObservedSpectrum,
@@ -418,7 +443,7 @@ fn get_pso_fitter<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitt
     settings: &PSOSettings,
     parallelize: bool,
 ) -> Executor<
-    FitCostFunction<'a, I, T, F>,
+    FitCostFunction<'a, E, I, T, F>,
     particleswarm::ParticleSwarm<I::B, f64, rand::rngs::StdRng>,
     PopulationState<particleswarm::Particle<na::SVector<f64, 5>, f64>, f64>,
 > {
@@ -428,6 +453,7 @@ fn get_pso_fitter<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitt
         observed_spectrum,
         continuum_fitter,
         parallelize,
+        backend: PhantomData,
     };
     let bounds = interpolator.bounds().clone();
     let solver = particleswarm::ParticleSwarm::new(bounds, settings.num_particles)
@@ -499,8 +525,8 @@ impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 5>, f64>, 
     }
 }
 
-pub fn fit_pso(
-    interpolator: &impl Interpolator,
+pub fn fit_pso<E: Backend, I: Interpolator<E>>(
+    interpolator: &I,
     target_dispersion: &impl WavelengthDispersion,
     observed_spectrum: &ObservedSpectrum,
     continuum_fitter: &impl ContinuumFitter,
@@ -544,7 +570,8 @@ pub fn fit_pso(
         best_vsini,
         best_rv,
     )?;
-    let (continuum_params, _) = continuum_fitter.fit_continuum(observed_spectrum, &synth_spec)?;
+    let (continuum_params, _) =
+        continuum_fitter.fit_continuum(observed_spectrum, &tensor_to_nalgebra(synth_spec))?;
     let time = match result.state.time {
         Some(t) => t.as_secs_f64(),
         None => 0.0,
@@ -558,8 +585,8 @@ pub fn fit_pso(
     })
 }
 
-pub fn fit_continuum_bulk(
-    interpolator: &impl Interpolator,
+pub fn fit_continuum_bulk<E: Backend, I: Interpolator<E>>(
+    interpolator: &I,
     target_dispersion: &impl WavelengthDispersion,
     observed_spectrum: &ObservedSpectrum,
     labels: Vec<[f64; 5]>,
@@ -573,77 +600,20 @@ pub fn fit_continuum_bulk(
                 .ok()?;
 
             let (params, ls) = continuum_fitter
-                .fit_continuum(observed_spectrum, &synth_spec)
+                .fit_continuum(observed_spectrum, &tensor_to_nalgebra(synth_spec))
                 .ok()?;
             Some((params.data.into(), ls))
         })
         .collect()
 }
 
-pub fn uncertainty_derivative(
-    interpolator: &impl SquareGridInterpolator,
-    target_dispersion: &impl WavelengthDispersion,
-    observed_spectrum: &ObservedSpectrum,
-    continuum_fitter: &impl ContinuumFitter,
-    label: [f64; 5],
-    h: [f64; 5],
-) -> na::SMatrix<f64, 5, 5> {
-    let bounds = [
-        interpolator.ranges().teff.get_first_and_last(),
-        interpolator.ranges().m.get_first_and_last(),
-        interpolator.ranges().logg.get_first_and_last(),
-        (1.0, f64::MAX),
-        (f64::MIN, f64::MAX),
-    ];
-
-    let derivatives: Vec<na::DVector<f64>> = (0..5)
-        .map(|i| {
-            let evaluator = |j: i32| {
-                let mut new_label = label;
-                new_label[i] += h[i] * (j as f64);
-                let synth_spec = interpolator
-                    .produce_model(
-                        target_dispersion,
-                        new_label[0],
-                        new_label[1],
-                        new_label[2],
-                        new_label[3],
-                        new_label[4],
-                    )
-                    .unwrap();
-                continuum_fitter
-                    .fit_continuum_and_return_fit(observed_spectrum, &synth_spec)
-                    .unwrap()
-            };
-            if label[i] + 2.0 * h[i] > bounds[i].1 {
-                let fm2 = evaluator(-2);
-                let fm1 = evaluator(-1);
-                let f = evaluator(0);
-                (3.0 * f - 4.0 * fm1 + fm2) / (2.0 * h[i])
-            } else if label[i] - 2.0 * h[i] < bounds[i].0 {
-                let f = evaluator(0);
-                let fp1 = evaluator(1);
-                let fp2 = evaluator(2);
-                (-3.0 * f + 4.0 * fp1 - fp2) / (2.0 * h[i])
-            } else {
-                let fm2 = evaluator(-2);
-                let fm1 = evaluator(-1);
-                let fp1 = evaluator(1);
-                let fp2 = evaluator(2);
-                (-fm2 + 8.0 * fm1 - 8.0 * fp1 + fp2) / (12.0 * h[i])
-            }
-        })
-        .collect();
-    let precision_matrix = na::SMatrix::<f64, 5, 5>::from_fn(|k, l| {
-        (derivatives[k]
-            .component_mul(&derivatives[l])
-            .component_div(&observed_spectrum.var))
-        .sum()
-    });
-    precision_matrix.try_inverse().unwrap()
-}
-
-struct Chi2LandscapeFitCost<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
+struct Chi2LandscapeFitCost<
+    'a,
+    E: Backend,
+    I: Interpolator<E>,
+    T: WavelengthDispersion,
+    F: ContinuumFitter,
+> {
     interpolator: &'a I,
     target_dispersion: &'a T,
     observed_spectrum: &'a ObservedSpectrum,
@@ -652,10 +622,11 @@ struct Chi2LandscapeFitCost<'a, I: Interpolator, T: WavelengthDispersion, F: Con
     label_index: usize,
     target_value: f64,
     search_radius: f64,
+    backend: PhantomData<E>, // Necessary to allow unused type parameter E
 }
 
-impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> CostFunction
-    for Chi2LandscapeFitCost<'a, I, T, F>
+impl<'a, E: Backend, I: Interpolator<E>, T: WavelengthDispersion, F: ContinuumFitter> CostFunction
+    for Chi2LandscapeFitCost<'a, E, I, T, F>
 {
     type Param = f64;
     type Output = f64;
@@ -679,15 +650,15 @@ impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> CostFunct
             ))?;
         let (_, chi2) = self
             .continuum_fitter
-            .fit_continuum(self.observed_spectrum, &synth_spec)?;
+            .fit_continuum(self.observed_spectrum, &tensor_to_nalgebra(synth_spec))?;
         Ok(chi2 - self.target_value)
     }
 }
 
 /// Compute uncertainty in every label
 /// by finding the intersection points of the chi2 function with a target value.
-pub fn uncertainty_chi2(
-    interpolator: &impl Interpolator,
+pub fn uncertainty_chi2<E: Backend, I: Interpolator<E>>(
+    interpolator: &I,
     target_dispersion: &impl WavelengthDispersion,
     observed_spectrum: &ObservedSpectrum,
     continuum_fitter: &impl ContinuumFitter,
@@ -702,7 +673,8 @@ pub fn uncertainty_chi2(
         label[3],
         label[4],
     )?;
-    let (_, best_chi2) = continuum_fitter.fit_continuum(observed_spectrum, &best_synth_spec)?;
+    let (_, best_chi2) =
+        continuum_fitter.fit_continuum(observed_spectrum, &tensor_to_nalgebra(best_synth_spec))?;
     let observed_wavelength = target_dispersion.wavelength();
     let n_p = observed_wavelength.len();
     let first_wl = observed_wavelength[0];
@@ -720,6 +692,7 @@ pub fn uncertainty_chi2(
             label_index: i,
             target_value: target_chi,
             search_radius: search_radius[i],
+            backend: PhantomData,
         };
         let mut left_bound_label = label;
         left_bound_label[i] -= search_radius[i];
@@ -746,6 +719,7 @@ pub fn uncertainty_chi2(
             label_index: i,
             target_value: target_chi,
             search_radius: search_radius[i],
+            backend: PhantomData,
         };
         let mut right_bound_label = label;
         right_bound_label[i] += search_radius[i];

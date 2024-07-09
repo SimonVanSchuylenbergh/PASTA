@@ -121,7 +121,7 @@ impl VariableTargetDispersion {
             observed_wl: wavelength,
             synth_wl,
             kernels,
-            n: (kernel_size - 1) / 2 as usize,
+            n: (kernel_size - 1) / 2_usize,
         })
     }
 
@@ -254,7 +254,7 @@ pub fn ccf(
 ) -> Result<Vec<f64>> {
     let n = input_wl.len();
 
-    rvs.into_iter()
+    rvs.iter()
         .map(|rv| {
             let resampled =
                 shift_and_resample(model_spectrum_inverted, kernel_len, synth_wl, input_wl, *rv)?;
