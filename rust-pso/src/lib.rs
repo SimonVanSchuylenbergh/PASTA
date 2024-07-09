@@ -919,7 +919,7 @@ pub fn build_continuum(wl: Vec<f64>, pfits: Vec<Vec<f64>>) -> PyResult<Vec<f64>>
 }
 
 #[pymodule]
-fn normalization(_py: Python, m: &PyModule) -> PyResult<()> {
+fn pso(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<CachedInterpolator>()?;
     m.add_class::<OnDiskInterpolator>()?;
     m.add_class::<InMemInterpolator>()?;

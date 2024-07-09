@@ -186,8 +186,6 @@ fn prepare_interpolate(
     })
 }
 
-const N: usize = 500;
-
 pub trait Bounds: Clone {
     fn is_within_bounds(&self, param: na::SVector<f64, 5>) -> bool;
     fn clamp(&self, param: na::SVector<f64, 5>) -> na::SVector<f64, 5>;
@@ -371,39 +369,21 @@ impl<E: Backend, I: SquareGridInterpolator> Interpolator<E> for I {
         } = prepare_interpolate(self.ranges(), teff, m, logg)
             .context("prepare_interpolate error")?;
 
-        let local_4x4x4 = local_4x4x4_indices
+        // TODO: avoid unwrap
+        let vec_of_tensors = local_4x4x4_indices
             .into_iter()
-            .map(|[i, j, k]| self.find_spectrum(i as usize, j as usize, k as usize))
-            .collect::<Result<Vec<Cow<na::DVector<f64>>>>>()
-            .context("find_spectrum error")?;
-        // let local_4x4x4 = local_4x4x4?;
-        let model_length = local_4x4x4[0].len();
+            .map(|[i, j, k]| {
+                nalgebra_to_tensor(
+                    self.find_spectrum(i as usize, j as usize, k as usize)
+                        .unwrap()
+                        .into_owned(),
+                )
+            })
+            .collect::<Vec<Tensor<E, 1>>>();
+        // (4, 4, 4, N)
+        let local_4x4x4 = Tensor::stack::<2>(vec_of_tensors, 0).reshape([4, 4, 4, -1]);
 
-        let mut interpolated: na::DVector<f64> = na::DVector::zeros(model_length);
-        let mut m = na::SMatrix::<f64, N, 64>::zeros();
-        for i in 0..(model_length / N) {
-            let start = i * N;
-            for j in 0..64 {
-                m.set_column(j, &local_4x4x4[j].fixed_rows::<N>(start));
-            }
-            for j in 0..N {
-                let v = m.row(j).transpose();
-                interpolated[j + start] = cubic_3d(coord, &xp, &v, shape);
-            }
-        }
-        // Add remaining part
-        let start = (model_length / N) * N;
-        let remaining = model_length - start;
-        let mut m = na::Matrix::<f64, na::Dyn, na::Const<64>, _>::zeros(remaining);
-        for j in 0..64 {
-            m.set_column(j, &local_4x4x4[j].rows(start, remaining));
-        }
-        for j in 0..remaining {
-            let v = m.row(j).transpose();
-            interpolated[j + start] = cubic_3d(coord, &xp, &v, shape);
-        }
-
-        Ok(nalgebra_to_tensor(interpolated))
+        Ok(cubic_3d(coord, &xp, local_4x4x4, shape))
     }
 
     fn produce_model(
