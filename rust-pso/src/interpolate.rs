@@ -93,11 +93,11 @@ pub struct SquareBounds {
     pub rv: (f64, f64),
 }
 
-struct InterpolInput {
-    coord: [f64; 3],
-    xp: na::SVector<f64, 12>,
-    local_4x4x4_indices: [[isize; 3]; 64],
-    shape: [usize; 3],
+pub struct InterpolInput {
+    pub coord: [f64; 3],
+    pub xp: na::SVector<f64, 12>,
+    pub local_4x4x4_indices: [[isize; 3]; 64],
+    pub shape: [usize; 3],
 }
 
 fn get_indices(index: usize, range: &Range) -> Vec<isize> {
@@ -120,7 +120,7 @@ fn get_range(index: usize, range: &Range) -> Vec<f64> {
     }
 }
 
-fn prepare_interpolate(
+pub fn prepare_interpolate(
     ranges: &SquareBounds,
     teff: f64,
     m: f64,

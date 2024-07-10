@@ -10,16 +10,20 @@ mod particleswarm;
 use crate::fitting::ObservedSpectrum;
 use crate::interpolate::{Bounds, CompoundInterpolator};
 use anyhow::Result;
+use burn::tensor::Tensor;
 use convolve_rv::{oaconvolve, rot_broad_rv, WavelengthDispersion};
+use cubic::cubic_3d;
 use fitting::{fit_pso, uncertainty_chi2, ChunkFitter, ContinuumFitter};
 use interpolate::{
-    read_npy_file, tensor_to_nalgebra, Interpolator, Range, SquareGridInterpolator, WlGrid,
+    nalgebra_to_tensor, prepare_interpolate, read_npy_file, tensor_to_nalgebra, InterpolInput,
+    Interpolator, Range, SquareGridInterpolator, WlGrid,
 };
 use interpolators::{CachedInterpolator, InMemInterpolator, OnDiskInterpolator};
 use iter_num_tools::arange;
 use itertools::Itertools;
 use nalgebra as na;
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -48,33 +52,87 @@ pub fn main() -> Result<()> {
     let observed_spectrum = ObservedSpectrum { flux, var };
     let continuum_fitter = ChunkFitter::new(wl, 10, 8, 0.2);
 
+    let teff = 27000.0;
+    let m = 0.0;
+    let logg = 4.5;
+    let vsini = 100.0;
+    let rv = 0.0;
+
     let start = Instant::now();
     for _ in 0..100 {
         let _ = Interpolator::<Backend>::produce_model(
             &interpolator,
             &target_dispersion,
-            27000.0,
-            0.0,
-            4.5,
-            100.0,
-            0.0,
+            teff,
+            m,
+            logg,
+            vsini,
+            rv,
         );
     }
     println!("produce_model: {:?}", start.elapsed() / 100);
 
     let start = Instant::now();
     for _ in 0..100 {
-        let _ = Interpolator::<Backend>::interpolate(&interpolator, 27000.0, 0.0, 4.5);
+        let _ = Interpolator::<Backend>::interpolate(&interpolator, teff, m, logg);
     }
-    println!("interpolate: {:?}", start.elapsed() / 100);
-
-    let interpolated = tensor_to_nalgebra::<Backend, f64>(interpolator.interpolate(27000.0, 0.0, 4.5)?);
+    println!("  interpolate: {:?}", start.elapsed() / 100);
 
     let start = Instant::now();
     for _ in 0..100 {
-        let _ = rot_broad_rv(interpolated.clone(), wlGrid, &target_dispersion, 100.0, 0.0);
+        let InterpolInput {
+            coord,
+            xp,
+            local_4x4x4_indices,
+            shape,
+        } = prepare_interpolate(interpolator.ranges(), teff, m, logg)?;
+        let vec_of_tensors = local_4x4x4_indices
+            .into_iter()
+            .map(|[i, j, k]| {
+                nalgebra_to_tensor(
+                    interpolator
+                        .find_spectrum(i as usize, j as usize, k as usize)
+                        .unwrap()
+                        .into_owned(),
+                )
+            })
+            .collect::<Vec<Tensor<Backend, 1>>>();
+        // (4, 4, 4, N)
+        let local_4x4x4 = Tensor::stack::<2>(vec_of_tensors, 0).reshape([4, 4, 4, -1]);
     }
-    println!("rot_broad_rv: {:?}", start.elapsed() / 100);
+    println!("      prepare: {:?}", start.elapsed() / 100);
+
+    let InterpolInput {
+        coord,
+        xp,
+        local_4x4x4_indices,
+        shape,
+    } = prepare_interpolate(interpolator.ranges(), teff, m, logg)?;
+    let vec_of_tensors = local_4x4x4_indices
+        .into_iter()
+        .map(|[i, j, k]| {
+            nalgebra_to_tensor(
+                interpolator
+                    .find_spectrum(i as usize, j as usize, k as usize)
+                    .unwrap()
+                    .into_owned(),
+            )
+        })
+        .collect::<Vec<Tensor<Backend, 1>>>();
+    // (4, 4, 4, N)
+    let local_4x4x4 = Tensor::stack::<2>(vec_of_tensors, 0).reshape([4, 4, 4, -1]);
+    let start = Instant::now();
+    for _ in 0..100 {
+        let _ = cubic_3d(coord, &xp, local_4x4x4.clone(), shape);
+    }
+    println!("      interpolate: {:?}", start.elapsed() / 100);
+
+    let interpolated = tensor_to_nalgebra::<Backend, f64>(interpolator.interpolate(teff, m, logg)?);
+    let start = Instant::now();
+    for _ in 0..100 {
+        let _ = rot_broad_rv(interpolated.clone(), wlGrid, &target_dispersion, vsini, rv);
+    }
+    println!("  rot_broad_rv: {:?}", start.elapsed() / 100);
 
     let start = Instant::now();
     for _ in 0..100 {
@@ -85,17 +143,17 @@ pub fn main() -> Result<()> {
     let convolved_for_resolution = target_dispersion.convolve(interpolated.clone())?;
     let start = Instant::now();
     for _ in 0..100 {
-        let _ = oaconvolve(&convolved_for_resolution, 100.0, wlGrid);
+        let _ = oaconvolve(&convolved_for_resolution, vsini, wlGrid);
     }
     println!("convolve vsini: {:?}", start.elapsed() / 100);
 
     let synth_spec = tensor_to_nalgebra::<Backend, f64>(interpolator.produce_model(
         &target_dispersion,
-        27000.0,
-        0.0,
-        4.5,
-        100.0,
-        0.0,
+        teff,
+        m,
+        logg,
+        vsini,
+        rv,
     )?);
     let start = Instant::now();
     for _ in 0..100 {
