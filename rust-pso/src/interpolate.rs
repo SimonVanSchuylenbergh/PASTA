@@ -145,22 +145,35 @@ pub fn prepare_interpolate(
     let djs = get_indices(j, &ranges.m);
     let dks = get_indices(k, &ranges.logg);
 
-    let coord = [teff, m, logg];
-
     let teff_range = get_range(i, &ranges.teff);
     let m_range = get_range(j, &ranges.m);
     let logg_range = get_range(k, &ranges.logg);
 
     let mut xp = na::SVector::zeros();
+    let teff_min = teff_range.first().unwrap();
+    let teff_max = teff_range.last().unwrap();
+    let delta_teff = teff_max - teff_min;
+    let m_min = m_range.first().unwrap();
+    let m_max = m_range.last().unwrap();
+    let delta_m = m_max - m_min;
+    let logg_min = logg_range.first().unwrap();
+    let logg_max = logg_range.last().unwrap();
+    let delta_logg = logg_max - logg_min;
+
     for i in 0..teff_range.len() {
-        xp[i] = teff_range[i];
+        xp[i] = (teff_range[i] - teff_min) / delta_teff;
     }
     for i in 0..m_range.len() {
-        xp[i + 4] = m_range[i];
+        xp[i + 4] = (m_range[i] - m_min) / delta_m;
     }
     for i in 0..logg_range.len() {
-        xp[i + 8] = logg_range[i];
+        xp[i + 8] = (logg_range[i] - logg_min) / delta_logg;
     }
+    let coord = [
+        (teff - teff_min) / delta_teff,
+        (m - m_min) / delta_m,
+        (logg - logg_min) / delta_logg,
+    ];
 
     let shape = [dis.len(), djs.len(), dks.len()];
     let mut local_4x4x4_indices = [[0; 3]; 64];
