@@ -3,8 +3,8 @@ use crate::cubic::cubic_3d;
 use anyhow::{bail, Context, Result};
 use argmin_math::ArgminRandom;
 use burn::tensor::backend::Backend;
-use burn::tensor::{Data, Tensor};
-use nalgebra as na;
+use burn::tensor::{Data, Element, Tensor};
+use nalgebra::{self as na, Scalar};
 use npy::NpyData;
 use rand::Rng;
 use std::borrow::Cow;
@@ -347,8 +347,8 @@ pub fn nalgebra_to_tensor<E: Backend>(x: na::DVector<f64>) -> Tensor<E, 1> {
     Tensor::<E, 1>::from_data(Data::from(x.data.as_slice()).convert(), &device)
 }
 
-pub fn tensor_to_nalgebra<E: Backend>(x: Tensor<E, 1>) -> na::DVector<f64> {
-    let vec: Vec<f64> = x.into_data().convert().value;
+pub fn tensor_to_nalgebra<E: Backend, T: Element + Scalar>(x: Tensor<E, 1>) -> na::DVector<T> {
+    let vec: Vec<T> = x.into_data().convert().value;
     na::DVector::from_vec(vec)
 }
 
@@ -395,7 +395,7 @@ impl<E: Backend, I: SquareGridInterpolator> Interpolator<E> for I {
         vsini: f64,
         rv: f64,
     ) -> Result<Tensor<E, 1>> {
-        let interpolated = tensor_to_nalgebra::<E>(
+        let interpolated = tensor_to_nalgebra::<E, f64>(
             self.interpolate(teff, m, logg)
                 .context("Error during interpolation step.")?,
         );

@@ -12,9 +12,7 @@ fn quadratic_1d<E: Backend>(x: f64, xp: SVectorView<4, 12>, yp: Tensor<E, 2>) ->
     let x0 = xp[0];
     let x1 = xp[1];
     let x2 = xp[2];
-    // let y0 = yp[0];
-    // let y1 = yp[1];
-    // let y2 = yp[2];
+
     let device = yp.device();
     let y = yp.narrow(0, 0, 3);
 
@@ -22,10 +20,6 @@ fn quadratic_1d<E: Backend>(x: f64, xp: SVectorView<4, 12>, yp: Tensor<E, 2>) ->
     let col1_denom = 1.0 / (-x1 * x1 + x0 * x1 - x0 * x2 + x1 * x2);
     let col2_denom = 1.0 / (x2 * x2 + x0 * x1 - x0 * x2 - x1 * x2);
 
-    // let a = y0 * col0_denom - y1 * col1_denom + y2 * col2_denom;
-    // let b =
-    //     -y0 * (x1 + x2) * col0_denom + y1 * (x0 + x2) * col1_denom - y2 * (x0 + x1) * col2_denom;
-    // let c = y0 * x1 * x2 * col0_denom - y1 * x0 * x2 * col1_denom + y2 * x0 * x1 * col2_denom;
     let af = Tensor::from_floats(
         [col0_denom as f32, -col1_denom as f32, col2_denom as f32],
         &device,
@@ -51,7 +45,7 @@ fn quadratic_1d<E: Backend>(x: f64, xp: SVectorView<4, 12>, yp: Tensor<E, 2>) ->
     let b = (bf.unsqueeze_dim(1) * y.clone()).sum_dim(0).squeeze(0);
     let c = (cf.unsqueeze_dim(1) * y).sum_dim(0).squeeze(0);
 
-    a * x * x + b * x + c
+    a * (x * x) + b * x + c
 }
 
 fn cubic_1d<E: Backend>(x: f64, xp: SVectorView<4, 12>, yp: Tensor<E, 2>) -> Tensor<E, 1> {
@@ -59,96 +53,47 @@ fn cubic_1d<E: Backend>(x: f64, xp: SVectorView<4, 12>, yp: Tensor<E, 2>) -> Ten
     let x1 = xp[1];
     let x2 = xp[2];
     let x3 = xp[3];
-    // let y0 = yp[0];
-    // let y1 = yp[1];
-    // let y2 = yp[2];
-    // let y3 = yp[3];
 
-    let col0_denom = 1.0
-        / (x0 * x0 * x0 - x0 * x0 * x1 - x0 * x0 * x2 - x0 * x0 * x3
-            + x0 * x1 * x2
-            + x0 * x1 * x3
-            + x0 * x2 * x3
-            - x1 * x2 * x3);
-    let col1_denom = 1.0
-        / (-x1 * x1 * x1 + x1 * x1 * x0 + x1 * x1 * x2 + x1 * x1 * x3
-            - x0 * x1 * x2
-            - x0 * x1 * x3
-            + x0 * x2 * x3
-            - x1 * x2 * x3);
-    let col2_denom = 1.0
-        / (x2 * x2 * x2 - x2 * x2 * x0 - x2 * x2 * x1 - x2 * x2 * x3 + x0 * x1 * x2 - x0 * x1 * x3
-            + x0 * x2 * x3
-            + x1 * x2 * x3);
-    let col3_denom = 1.0
-        / (-x3 * x3 * x3 + x3 * x3 * x0 + x3 * x3 * x1 + x3 * x3 * x2 + x0 * x1 * x2
-            - x0 * x1 * x3
-            - x0 * x2 * x3
-            - x1 * x2 * x3);
+    let xsq = x * x;
+    let xcu = xsq * x;
 
-    // let a = y0 * col0_denom - y1 * col1_denom + y2 * col2_denom - y3 * col3_denom;
-    // let b = y0 * (-x1 - x2 - x3) * col0_denom
-    //     + y1 * (x0 + x2 + x3) * col1_denom
-    //     + y2 * (-x0 - x1 - x3) * col2_denom
-    //     + y3 * (x0 + x1 + x2) * col3_denom;
-    // let c = y0 * (x1 * x2 + x1 * x3 + x2 * x3) * col0_denom
-    //     + y1 * (-x0 * x2 - x0 * x3 - x2 * x3) * col1_denom
-    //     + y2 * (x0 * x1 + x0 * x3 + x1 * x3) * col2_denom
-    //     + y3 * (-x0 * x1 - x0 * x2 - x1 * x2) * col3_denom;
-    // let d = -y0 * x1 * x2 * x3 * col0_denom + y1 * x0 * x2 * x3 * col1_denom
-    //     - y2 * x0 * x1 * x3 * col2_denom
-    //     + y3 * x0 * x1 * x2 * col3_denom;
+    let col0_denom = x0 * x0 * x0 - x0 * x0 * x1 - x0 * x0 * x2 - x0 * x0 * x3
+        + x0 * x1 * x2
+        + x0 * x1 * x3
+        + x0 * x2 * x3
+        - x1 * x2 * x3;
+    let col1_denom =
+        -x1 * x1 * x1 + x1 * x1 * x0 + x1 * x1 * x2 + x1 * x1 * x3 - x0 * x1 * x2 - x0 * x1 * x3
+            + x0 * x2 * x3
+            - x1 * x2 * x3;
+    let col2_denom = x2 * x2 * x2 - x2 * x2 * x0 - x2 * x2 * x1 - x2 * x2 * x3 + x0 * x1 * x2
+        - x0 * x1 * x3
+        + x0 * x2 * x3
+        + x1 * x2 * x3;
+    let col3_denom = -x3 * x3 * x3 + x3 * x3 * x0 + x3 * x3 * x1 + x3 * x3 * x2 + x0 * x1 * x2
+        - x0 * x1 * x3
+        - x0 * x2 * x3
+        - x1 * x2 * x3;
 
     let device = yp.device();
-    let af = Tensor::from_floats(
-        [
-            col0_denom as f32,
-            -col1_denom as f32,
-            col2_denom as f32,
-            -col3_denom as f32,
-        ],
-        &device,
-    );
-    let bf = Tensor::from_floats(
-        [
-            (-(x1 + x2 + x3) * col0_denom) as f32,
-            ((x0 + x2 + x3) * col1_denom) as f32,
-            (-(x0 + x1 + x3) * col2_denom) as f32,
-            ((x0 + x1 + x2) * col3_denom) as f32,
-        ],
-        &device,
-    );
-    let cf = Tensor::from_floats(
-        [
-            ((x1 * x2 + x1 * x3 + x2 * x3) * col0_denom) as f32,
-            ((-x0 * x2 - x0 * x3 - x2 * x3) * col1_denom) as f32,
-            ((x0 * x1 + x0 * x3 + x1 * x3) * col2_denom) as f32,
-            ((-x0 * x1 - x0 * x2 - x1 * x2) * col3_denom) as f32,
-        ],
-        &device,
-    );
-    let df = Tensor::from_floats(
-        [
-            ((x1 * x2 * x3) * col0_denom) as f32,
-            ((-x0 * x2 * x3) * col1_denom) as f32,
-            ((x0 * x1 * x3) * col2_denom) as f32,
-            ((-x0 * x1 * x2) * col3_denom) as f32,
-        ],
-        &device,
-    );
+    let f0 = ((xcu - (x1 + x2 + x3) * xsq + (x1 * x2 + x1 * x3 + x2 * x3) * x - (x1 * x2 * x3))
+        / col0_denom) as f32;
+    let f1 = ((-xcu + (x0 + x2 + x3) * xsq - (x0 * x2 + x0 * x3 + x2 * x3) * x + (x0 * x2 * x3))
+        / col1_denom) as f32;
+    let f2 = ((xcu - (x0 + x1 + x3) * xsq + (x0 * x1 + x0 * x3 + x1 * x3) * x - (x0 * x1 * x3))
+        / col2_denom) as f32;
+    let f3 = ((-xcu + (x0 + x1 + x2) * xsq - (x0 * x1 + x0 * x2 + x1 * x2) * x + (x0 * x1 * x2))
+        / col3_denom) as f32;
 
-    let a = (af.unsqueeze_dim(1) * yp.clone()).sum_dim(0).squeeze(0);
-    let b = (bf.unsqueeze_dim(1) * yp.clone()).sum_dim(0).squeeze(0);
-    let c = (cf.unsqueeze_dim(1) * yp.clone()).sum_dim(0).squeeze(0);
-    let d = (df.unsqueeze_dim(1) * yp).sum_dim(0).squeeze(0);
+    let f = Tensor::from_floats([f0, f1, f2, f3], &device);
 
-    a * x * x * x + b * x * x + c * x + d
+    (f.unsqueeze_dim(1) * yp).sum_dim(0).squeeze(0)
 }
 
 fn cubic_2d<E: Backend>(
     x: [f64; 2],
     xp: SVectorView<8, 12>,
-    yp: Tensor<E, 3>, // was (16, 64)
+    yp: Tensor<E, 3>, // (4, 4, N)
     shape: [usize; 2],
 ) -> Tensor<E, 1> {
     let xp1d = xp.fixed_rows::<4>(4);
@@ -209,4 +154,5 @@ pub fn cubic_3d<E: Backend>(
     } else {
         panic!("OH NO PANIC!!! (First dimension of shape is neither 3 nor 4)")
     }
+    // yp.narrow(0, 0, 1).squeeze::<3>(0).narrow(0, 0, 1).squeeze::<2>(0).narrow(0, 0, 1).squeeze::<1>(0)
 }

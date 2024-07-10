@@ -268,7 +268,7 @@ macro_rules! implement_methods {
                 vsini: f64,
                 rv: f64,
             ) -> Bound<'a, PyArray<f64, Ix1>> {
-                let interpolated = tensor_to_nalgebra::<Backend>(
+                let interpolated = tensor_to_nalgebra::<Backend, f64>(
                     self.interpolator
                         .produce_model(&dispersion.0, teff, m, logg, vsini, rv)
                         .unwrap(),
@@ -316,7 +316,7 @@ macro_rules! implement_methods {
                     .into_par_iter()
                     .map(|(teff, m, logg, vsini, rv)| {
                         progress_bar.inc(1);
-                        tensor_to_nalgebra::<Backend>(
+                        tensor_to_nalgebra::<Backend, f64>(
                             self.interpolator
                                 .produce_model(&target_dispersion, teff, m, logg, vsini, rv)
                                 .unwrap(),
@@ -340,7 +340,7 @@ macro_rules! implement_methods {
                 vsini: f64,
                 rv: f64,
             ) -> PyResult<Vec<f64>> {
-                let out = tensor_to_nalgebra::<Backend>(
+                let out = tensor_to_nalgebra::<Backend, f64>(
                     self.interpolator
                         .produce_model_on_grid(&dispersion.0, teff, mh, logg, vsini, rv)
                         .unwrap(),
@@ -351,7 +351,7 @@ macro_rules! implement_methods {
             /// Interpolate in grid.
             /// Doesn't do convoluton, shifting and resampling.
             pub fn interpolate(&mut self, teff: f64, m: f64, logg: f64) -> PyResult<Vec<f64>> {
-                let interpolated = tensor_to_nalgebra::<Backend>(
+                let interpolated = tensor_to_nalgebra::<Backend, f64>(
                     self.interpolator.interpolate(teff, m, logg).unwrap(),
                 );
                 Ok(interpolated.iter().copied().collect())
@@ -369,7 +369,7 @@ macro_rules! implement_methods {
                 label: (f64, f64, f64, f64, f64),
             ) -> PyResult<Vec<f64>> {
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
-                let synth = tensor_to_nalgebra::<Backend>(
+                let synth = tensor_to_nalgebra::<Backend, f64>(
                     self.interpolator
                         .produce_model(&dispersion.0, label.0, label.1, label.2, label.2, label.4)
                         .unwrap(),
@@ -395,7 +395,7 @@ macro_rules! implement_methods {
                 label: [f64; 5],
             ) -> PyResult<Vec<f64>> {
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
-                let synth = tensor_to_nalgebra::<Backend>(
+                let synth = tensor_to_nalgebra::<Backend, f64>(
                     self.interpolator
                         .produce_model(
                             &dispersion.0,
@@ -429,7 +429,7 @@ macro_rules! implement_methods {
                 Ok(labels
                     .into_par_iter()
                     .map(|[teff, m, logg, vsini, rv]| {
-                        let synth_model = tensor_to_nalgebra::<Backend>(
+                        let synth_model = tensor_to_nalgebra::<Backend, f64>(
                             self.interpolator
                                 .produce_model(&dispersion.0, teff, m, logg, vsini, rv)
                                 .unwrap(),
@@ -457,7 +457,7 @@ macro_rules! implement_methods {
                 Ok(labels
                     .into_par_iter()
                     .map(|[teff, m, logg, vsini, rv]| {
-                        let synth_model = tensor_to_nalgebra::<Backend>(
+                        let synth_model = tensor_to_nalgebra::<Backend, f64>(
                             self.interpolator
                                 .produce_model(&dispersion.0, teff, m, logg, vsini, rv)
                                 .unwrap(),
@@ -494,7 +494,7 @@ macro_rules! implement_methods {
                         progress_bar.inc(1);
                         let obs = ObservedSpectrum::from_vecs(flux, var);
                         let target_dispersion = NoDispersionTarget(wl.into());
-                        let synth_model = tensor_to_nalgebra::<Backend>(
+                        let synth_model = tensor_to_nalgebra::<Backend, f64>(
                             self.interpolator
                                 .produce_model(&target_dispersion, teff, m, logg, vsini, rv)
                                 .unwrap(),
@@ -615,7 +615,7 @@ macro_rules! implement_methods {
                         let target_dispersion = NoDispersionTarget(wl.into());
                         let obs = ObservedSpectrum::from_vecs(flux, var);
                         let cont_fitter = ChunkFitter::new(target_dispersion.0.clone(), 5, 8, 0.2);
-                        let synth = tensor_to_nalgebra::<Backend>(
+                        let synth = tensor_to_nalgebra::<Backend, f64>(
                             self.interpolator
                                 .produce_model(
                                     &target_dispersion,

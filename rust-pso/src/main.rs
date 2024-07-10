@@ -68,7 +68,7 @@ pub fn main() -> Result<()> {
     }
     println!("interpolate: {:?}", start.elapsed() / 100);
 
-    let interpolated = tensor_to_nalgebra::<Backend>(interpolator.interpolate(27000.0, 0.0, 4.5)?);
+    let interpolated = tensor_to_nalgebra::<Backend, f64>(interpolator.interpolate(27000.0, 0.0, 4.5)?);
 
     let start = Instant::now();
     for _ in 0..100 {
@@ -89,7 +89,7 @@ pub fn main() -> Result<()> {
     }
     println!("convolve vsini: {:?}", start.elapsed() / 100);
 
-    let synth_spec = tensor_to_nalgebra::<Backend>(interpolator.produce_model(
+    let synth_spec = tensor_to_nalgebra::<Backend, f64>(interpolator.produce_model(
         &target_dispersion,
         27000.0,
         0.0,
