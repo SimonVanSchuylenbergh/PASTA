@@ -10,6 +10,7 @@ mod particleswarm;
 use crate::fitting::ObservedSpectrum;
 use crate::interpolate::{Bounds, CompoundInterpolator};
 use anyhow::Result;
+use burn::backend::wgpu::WgpuDevice;
 use burn::tensor::Tensor;
 use convolve_rv::{oaconvolve, rot_broad_rv, WavelengthDispersion};
 use cubic::cubic_3d;
@@ -28,9 +29,11 @@ use std::hint::black_box;
 use std::time::Instant;
 
 pub fn main() -> Result<()> {
-    // tch::set_num_threads(1);
+    tch::set_num_threads(1);
     type Backend = burn::backend::LibTorch;
-    let device = <Backend as burn::prelude::Backend>::Device::Mps;
+    let device = <Backend as burn::prelude::Backend>::Device::Cpu;
+    // type Backend = burn::backend::Wgpu;
+    // let device = burn::backend::wgpu::WgpuDevice::BestAvailable;
     let n = 200;
 
     let start = Instant::now();
@@ -102,7 +105,7 @@ pub fn main() -> Result<()> {
         // (4, 4, 4, N)
         let local_4x4x4 = Tensor::stack::<2>(vec_of_tensors.clone(), 0).reshape([4, 4, 4, -1]);
     }
-    println!("      prepare: {:?}", start.elapsed() / n);
+    println!("      stacking: {:?}", start.elapsed() / n);
 
     let InterpolInput {
         coord,
@@ -138,14 +141,14 @@ pub fn main() -> Result<()> {
     for _ in 0..n {
         let _ = target_dispersion.convolve(interpolated.clone());
     }
-    println!("convolve resolution: {:?}", start.elapsed() / n);
+    println!("      convolve resolution: {:?}", start.elapsed() / n);
 
     let convolved_for_resolution = target_dispersion.convolve(interpolated.clone())?;
     let start = Instant::now();
     for _ in 0..n {
         let _ = oaconvolve(&convolved_for_resolution, vsini, wl_grid);
     }
-    println!("convolve vsini: {:?}", start.elapsed() / n);
+    println!("      convolve vsini: {:?}", start.elapsed() / n);
 
     let synth_spec = tensor_to_nalgebra::<Backend, f64>(interpolator.produce_model(
         &target_dispersion,

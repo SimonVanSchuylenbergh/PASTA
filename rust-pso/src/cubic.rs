@@ -8,10 +8,15 @@ type SVectorView<'a, const N: usize, const M: usize> = na::Matrix<
     na::ViewStorage<'a, f64, na::Const<N>, na::Const<1>, na::Const<1>, na::Const<M>>,
 >;
 
+/// Interpolates a 1D quadratic function.
+/// x: coordinate compared to neighbors between 0 and 1
+/// xp: x coordinates of the 3 neighbors
+/// yp: Tensor with three model spectra (3, N)
 fn quadratic_1d<E: Backend>(x: f64, xp: SVectorView<4, 12>, yp: Tensor<E, 2>) -> Tensor<E, 1> {
-    let x0 = xp[0];
-    let x1 = xp[1];
-    let x2 = xp[2];
+    let x0 = xp[0]; // Should be 0
+    let x1 = xp[1]; 
+    let x2 = xp[2]; // Should be 1
+    println!("{}, {}, {}", x0, x1, x2);
 
     let xsq = x * x;
 
@@ -31,11 +36,15 @@ fn quadratic_1d<E: Backend>(x: f64, xp: SVectorView<4, 12>, yp: Tensor<E, 2>) ->
     (f.unsqueeze_dim(1) * y).sum_dim(0).squeeze(0)
 }
 
+/// Interpolates a 1D cubic function.
+/// x: coordinate compared to neighbors between 0 and 1
+/// xp: x coordinates of the 4 neighbors
+/// yp: Tensor with four model spectra (4, N)
 fn cubic_1d<E: Backend>(x: f64, xp: SVectorView<4, 12>, yp: Tensor<E, 2>) -> Tensor<E, 1> {
-    let x0 = xp[0];
+    let x0 = xp[0]; // Should be 0
     let x1 = xp[1];
     let x2 = xp[2];
-    let x3 = xp[3];
+    let x3 = xp[3]; // Should be 1
 
     let xsq = x * x;
     let xcu = xsq * x;
@@ -73,10 +82,15 @@ fn cubic_1d<E: Backend>(x: f64, xp: SVectorView<4, 12>, yp: Tensor<E, 2>) -> Ten
     (f.unsqueeze_dim(1) * yp).sum_dim(0).squeeze(0)
 }
 
+/// Interpolates a 2D cubic function.
+/// x: coordinate compared to neighbors, between 0 and 1, [m, logg]
+/// xp: x coordinates of the 8 neighbors
+/// yp: Tensor with 16 model spectra (4, 4, N)
+/// shape: Equals 3 or 4 for each dimension (quadratic or cubic)
 fn cubic_2d<E: Backend>(
     x: [f64; 2],
     xp: SVectorView<8, 12>,
-    yp: Tensor<E, 3>, // (4, 4, N)
+    yp: Tensor<E, 3>,
     shape: [usize; 2],
 ) -> Tensor<E, 1> {
     let xp1d = xp.fixed_rows::<4>(4);
@@ -107,11 +121,15 @@ fn cubic_2d<E: Backend>(
     }
 }
 
+/// Interpolates a 3D cubic function.
+/// coord: coordinate compared to neighbors, between 0 and 1, [teff, m, logg]
+/// xp: x coordinates of the 12 neighbors
+/// yp: Tensor with 64 model spectra (4, 4, 4, N)
 pub fn cubic_3d<E: Backend>(
-    coord: [f64; 3], // Coordinate compared to neighbors, between 0 and 1, [teff, m, logg]
-    xp: &na::SVector<f64, 12>, // x coordinates of the 3D grid
-    yp: Tensor<E, 4>, // (4, 4, 4, N) tensor of neighboring grid spectra
-    shape: [usize; 3], // 3 or 4 for each dimension (quadratic or cubic)
+    coord: [f64; 3],
+    xp: &na::SVector<f64, 12>,
+    yp: Tensor<E, 4>,
+    shape: [usize; 3],
 ) -> Tensor<E, 1> {
     // Subgrid in m, logg
     let subcoord: [f64; 2] = [coord[1], coord[2]];
