@@ -13,39 +13,22 @@ fn quadratic_1d<E: Backend>(x: f64, xp: SVectorView<4, 12>, yp: Tensor<E, 2>) ->
     let x1 = xp[1];
     let x2 = xp[2];
 
+    let xsq = x * x;
+
     let device = yp.device();
     let y = yp.narrow(0, 0, 3);
 
-    let col0_denom = 1.0 / (x0 * x0 - x0 * x1 - x0 * x2 + x1 * x2);
-    let col1_denom = 1.0 / (-x1 * x1 + x0 * x1 - x0 * x2 + x1 * x2);
-    let col2_denom = 1.0 / (x2 * x2 + x0 * x1 - x0 * x2 - x1 * x2);
+    let col0_denom = x0 * x0 - x0 * x1 - x0 * x2 + x1 * x2;
+    let col1_denom = -x1 * x1 + x0 * x1 - x0 * x2 + x1 * x2;
+    let col2_denom = x2 * x2 + x0 * x1 - x0 * x2 - x1 * x2;
 
-    let af = Tensor::from_floats(
-        [col0_denom as f32, -col1_denom as f32, col2_denom as f32],
-        &device,
-    );
-    let bf = Tensor::from_floats(
-        [
-            (-(x1 + x2) * col0_denom) as f32,
-            ((x0 + x2) * col1_denom) as f32,
-            (-(x0 + x1) * col2_denom) as f32,
-        ],
-        &device,
-    );
-    let cf = Tensor::from_floats(
-        [
-            (x1 * x2 * col0_denom) as f32,
-            (-x0 * x2 * col1_denom) as f32,
-            (x0 * x1 * col2_denom) as f32,
-        ],
-        &device,
-    );
+    let f0 = ((xsq - (x1 + x2) * x + x1 * x2) / col0_denom) as f32;
+    let f1 = ((-xsq + (x0 + x2) * x - x0 * x2) / col1_denom) as f32;
+    let f2 = ((xsq - (x0 + x1) * x + x0 * x1) / col2_denom) as f32;
 
-    let a = (af.unsqueeze_dim(1) * y.clone()).sum_dim(0).squeeze(0);
-    let b = (bf.unsqueeze_dim(1) * y.clone()).sum_dim(0).squeeze(0);
-    let c = (cf.unsqueeze_dim(1) * y).sum_dim(0).squeeze(0);
+    let f = Tensor::from_floats([f0, f1, f2], &device);
 
-    a * (x * x) + b * x + c
+    (f.unsqueeze_dim(1) * y).sum_dim(0).squeeze(0)
 }
 
 fn cubic_1d<E: Backend>(x: f64, xp: SVectorView<4, 12>, yp: Tensor<E, 2>) -> Tensor<E, 1> {
