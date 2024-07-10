@@ -286,7 +286,7 @@ macro_rules! implement_methods {
                 let target_dispersion = VariableTargetDispersion::new(
                     wl.into(),
                     &disp.into(),
-                    Interpolator::<Backend>::synth_wl(&self.interpolator).clone(),
+                    self.interpolator.synth_wl().clone(),
                 )
                 .unwrap();
                 let matrix = target_dispersion.get_kernels();
@@ -519,7 +519,7 @@ macro_rules! implement_methods {
                 parallelize: Option<bool>,
             ) -> PyResult<PyOptimizationResult> {
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
-                let result = fit_pso::<Backend, $interpolator_type>(
+                let result = fit_pso(
                     &self.interpolator,
                     &dispersion.0,
                     &observed_spectrum.into(),
@@ -545,7 +545,7 @@ macro_rules! implement_methods {
             ) -> [Option<(f64, f64)>; 5] {
                 let search_radius = search_radius.unwrap_or([2000.0, 0.3, 0.3, 40.0, 40.0]);
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
-                uncertainty_chi2::<Backend, $interpolator_type>(
+                uncertainty_chi2(
                     &self.interpolator,
                     &dispersion.0,
                     &observed_spectrum,
@@ -579,7 +579,7 @@ macro_rules! implement_methods {
                         let target_dispersion = NoDispersionTarget(wl.into());
                         let obs = ObservedSpectrum::from_vecs(flux, var);
                         let fitter = ChunkFitter::new(target_dispersion.0.clone(), 5, 8, 0.2);
-                        uncertainty_chi2::<Backend, $interpolator_type>(
+                        uncertainty_chi2(
                             &self.interpolator,
                             &target_dispersion,
                             &obs,
@@ -631,7 +631,7 @@ macro_rules! implement_methods {
                             .fit_continuum_and_return_continuum(&obs, &synth)
                             .unwrap();
                         let fixed_fitter = FixedContinuum::new(continuum);
-                        uncertainty_chi2::<Backend, $interpolator_type>(
+                        uncertainty_chi2(
                             &self.interpolator,
                             &target_dispersion,
                             &obs,
@@ -654,13 +654,15 @@ macro_rules! implement_methods {
                 vsini: f64,
                 rv: f64,
             ) -> bool {
-                Interpolator::<Backend>::bounds(&self.interpolator)
+                self.interpolator
+                    .bounds()
                     .is_within_bounds(na::Vector5::new(teff, m, logg, vsini, rv))
             }
 
             /// Clamp a set of labels to the bounds of the grid
             pub fn clamp(&self, teff: f64, m: f64, logg: f64, vsini: f64, rv: f64) -> [f64; 5] {
-                Interpolator::<Backend>::bounds(&self.interpolator)
+                self.interpolator
+                    .bounds()
                     .clamp(na::Vector5::new(teff, m, logg, vsini, rv))
                     .into()
             }
@@ -675,7 +677,8 @@ macro_rules! implement_methods {
                 rv: f64,
                 index: usize,
             ) -> f64 {
-                Interpolator::<Backend>::bounds(&self.interpolator)
+                self.interpolator
+                    .bounds()
                     .clamp_1d(na::Vector5::new(teff, m, logg, vsini, rv), index)
             }
         }
@@ -686,7 +689,7 @@ macro_rules! implement_methods {
 #[pyclass]
 #[derive(Clone)]
 pub struct OnDiskInterpolator {
-    interpolator: interpolators::OnDiskInterpolator,
+    interpolator: interpolators::OnDiskInterpolator<Backend>,
 }
 
 #[pymethods]
@@ -710,6 +713,7 @@ impl OnDiskInterpolator {
                 Range::new(logg_range),
                 vsini_range.unwrap_or((1.0, 600.0)),
                 rv_range.unwrap_or((-150.0, 150.0)),
+                Default::default(),
             ),
         }
     }
@@ -731,7 +735,7 @@ pub struct InMemInterpolator {
 /// Interpolator where all spectra have been loaded into memory.
 #[pyclass]
 pub struct LoadedInMemInterpolator {
-    interpolator: interpolators::InMemInterpolator,
+    interpolator: interpolators::InMemInterpolator<Backend>,
 }
 
 #[pymethods]
@@ -767,6 +771,7 @@ impl InMemInterpolator {
                 Range::new(self.logg_range.clone()),
                 self.vsini_range.unwrap_or((1.0, 600.0)),
                 self.rv_range.unwrap_or((-150.0, 150.0)),
+                Default::default(),
             ),
         }
     }
@@ -775,7 +780,7 @@ impl InMemInterpolator {
 #[pyclass]
 #[derive(Clone)]
 pub struct CachedInterpolator {
-    interpolator: interpolators::CachedInterpolator,
+    interpolator: interpolators::CachedInterpolator<Backend>,
 }
 
 #[pymethods]
@@ -801,6 +806,7 @@ impl CachedInterpolator {
                 vsini_range.unwrap_or((1.0, 600.0)),
                 rv_range.unwrap_or((-150.0, 150.0)),
                 lrucap.unwrap_or(4000),
+                Default::default(),
             ),
         }
     }
@@ -813,7 +819,7 @@ implement_methods!(CachedInterpolator, interpolators::CachedInterpolator);
 /// Compount Interpolator: uses multiple square grids of OnDiskInterpolator
 #[pyclass]
 pub struct OnDiskCompound {
-    interpolator: CompoundInterpolator<interpolators::OnDiskInterpolator>,
+    interpolator: CompoundInterpolator<interpolators::OnDiskInterpolator<Backend>>,
 }
 
 #[pymethods]
@@ -838,7 +844,7 @@ impl OnDiskCompound {
 
 #[pyclass]
 pub struct InMemCompound {
-    interpolator: CompoundInterpolator<interpolators::InMemInterpolator>,
+    interpolator: CompoundInterpolator<interpolators::InMemInterpolator<Backend>>,
 }
 
 #[pymethods]
@@ -863,7 +869,7 @@ impl InMemCompound {
 
 #[pyclass]
 pub struct CachedCompound {
-    interpolator: CompoundInterpolator<interpolators::CachedInterpolator>,
+    interpolator: CompoundInterpolator<interpolators::CachedInterpolator<Backend>>,
 }
 
 #[pymethods]

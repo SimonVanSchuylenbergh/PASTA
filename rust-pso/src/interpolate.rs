@@ -2,7 +2,7 @@ use crate::convolve_rv::{rot_broad_rv, WavelengthDispersion};
 use crate::cubic::cubic_3d;
 use anyhow::{bail, Context, Result};
 use argmin_math::ArgminRandom;
-use burn::tensor::backend::Backend;
+use burn::prelude::Backend;
 use burn::tensor::{Data, Element, Tensor};
 use nalgebra::{self as na, Scalar};
 use npy::NpyData;
@@ -11,16 +11,16 @@ use std::borrow::Cow;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub fn read_npy_file(file_path: PathBuf) -> Result<na::DVector<f64>> {
+pub fn read_npy_file(file_path: PathBuf) -> Result<Vec<f64>> {
     let mut file = std::fs::File::open(file_path.clone())
         .context(format!("Error loading {}", file_path.to_str().unwrap()))?;
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)?;
     let data: NpyData<f64> = NpyData::from_bytes(&buf)?;
-    Ok(na::DVector::from_iterator(data.len(), data))
+    Ok(data.to_vec())
 }
 
-pub fn read_spectrum(dir: &Path, teff: f64, m: f64, logg: f64) -> Result<na::DVector<f64>> {
+pub fn read_spectrum(dir: &Path, teff: f64, m: f64, logg: f64) -> Result<Vec<f64>> {
     // e.g. 00027_lm0050_07000_0350_0020_0000_Vsini_0000.npy
     let _teff = teff.round() as i32;
     let _m = (m * 100.0).round() as i32;
@@ -241,12 +241,14 @@ impl WlGrid {
     }
 }
 
-pub trait Interpolator<E: Backend>: Send + Sync {
+pub trait Interpolator: Send + Sync {
     type B: Bounds;
+    type E: Backend;
 
     fn synth_wl(&self) -> WlGrid;
     fn bounds(&self) -> &Self::B;
-    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor<E, 1>>;
+    fn device(&self) -> &<Self::E as Backend>::Device;
+    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor<Self::E, 1>>;
     fn produce_model(
         &self,
         target_dispersion: &impl WavelengthDispersion,
@@ -255,7 +257,7 @@ pub trait Interpolator<E: Backend>: Send + Sync {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor<E, 1>>;
+    ) -> Result<Tensor<Self::E, 1>>;
     fn produce_model_on_grid(
         &self,
         target_dispersion: &impl WavelengthDispersion,
@@ -264,7 +266,7 @@ pub trait Interpolator<E: Backend>: Send + Sync {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor<E, 1>>;
+    ) -> Result<Tensor<Self::E, 1>>;
 }
 
 impl Bounds for SquareBounds {
@@ -336,15 +338,17 @@ impl Bounds for SquareBounds {
     }
 }
 pub trait SquareGridInterpolator: Send + Sync {
+    type E: Backend;
+
     fn synth_wl(&self) -> WlGrid;
     fn ranges(&self) -> &SquareBounds;
+    fn device(&self) -> &<Self::E as Backend>::Device;
 
-    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<Cow<na::DVector<f64>>>;
+    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<Cow<Tensor<Self::E, 1>>>;
 }
 
-pub fn nalgebra_to_tensor<E: Backend>(x: na::DVector<f64>) -> Tensor<E, 1> {
-    let device = Default::default();
-    Tensor::<E, 1>::from_data(Data::from(x.data.as_slice()).convert(), &device)
+pub fn nalgebra_to_tensor<E: Backend>(x: na::DVector<f64>, device: &E::Device) -> Tensor<E, 1> {
+    Tensor::<E, 1>::from_data(Data::from(x.data.as_slice()).convert(), device)
 }
 
 pub fn tensor_to_nalgebra<E: Backend, T: Element + Scalar>(x: Tensor<E, 1>) -> na::DVector<T> {
@@ -352,15 +356,19 @@ pub fn tensor_to_nalgebra<E: Backend, T: Element + Scalar>(x: Tensor<E, 1>) -> n
     na::DVector::from_vec(vec)
 }
 
-impl<E: Backend, I: SquareGridInterpolator> Interpolator<E> for I {
+impl<I: SquareGridInterpolator> Interpolator for I {
     type B = SquareBounds;
+    type E = I::E;
     fn synth_wl(&self) -> WlGrid {
         self.synth_wl()
     }
     fn bounds(&self) -> &SquareBounds {
         self.ranges()
     }
-    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor<E, 1>> {
+    fn device(&self) -> &<Self::E as Backend>::Device {
+        self.device()
+    }
+    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor<Self::E, 1>> {
         let InterpolInput {
             coord,
             xp,
@@ -373,13 +381,11 @@ impl<E: Backend, I: SquareGridInterpolator> Interpolator<E> for I {
         let vec_of_tensors = local_4x4x4_indices
             .into_iter()
             .map(|[i, j, k]| {
-                nalgebra_to_tensor(
-                    self.find_spectrum(i as usize, j as usize, k as usize)
-                        .unwrap()
-                        .into_owned(),
-                )
+                self.find_spectrum(i as usize, j as usize, k as usize)
+                    .unwrap()
+                    .into_owned()
             })
-            .collect::<Vec<Tensor<E, 1>>>();
+            .collect::<Vec<Tensor<Self::E, 1>>>();
         // (4, 4, 4, N)
         let local_4x4x4 = Tensor::stack::<2>(vec_of_tensors, 0).reshape([4, 4, 4, -1]);
 
@@ -394,14 +400,14 @@ impl<E: Backend, I: SquareGridInterpolator> Interpolator<E> for I {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor<E, 1>> {
-        let interpolated = tensor_to_nalgebra::<E, f64>(
+    ) -> Result<Tensor<Self::E, 1>> {
+        let interpolated = tensor_to_nalgebra::<Self::E, f64>(
             self.interpolate(teff, m, logg)
                 .context("Error during interpolation step.")?,
         );
         let broadened = rot_broad_rv(interpolated, self.synth_wl(), target_dispersion, vsini, rv)
             .context("Error during convolution/resampling step.")?;
-        Ok(nalgebra_to_tensor::<E>(broadened))
+        Ok(nalgebra_to_tensor(broadened, self.device()))
     }
 
     fn produce_model_on_grid(
@@ -412,7 +418,7 @@ impl<E: Backend, I: SquareGridInterpolator> Interpolator<E> for I {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor<E, 1>> {
+    ) -> Result<Tensor<Self::E, 1>> {
         let i = self
             .ranges()
             .teff
@@ -426,13 +432,13 @@ impl<E: Backend, I: SquareGridInterpolator> Interpolator<E> for I {
             .context("logg not in grid")?;
         let spec = self.find_spectrum(i, j, k)?;
         let broadened = rot_broad_rv(
-            spec.into_owned(),
+            tensor_to_nalgebra(spec.into_owned()),
             self.synth_wl(),
             target_dispersion,
             vsini,
             rv,
         )?;
-        Ok(nalgebra_to_tensor::<E>(broadened))
+        Ok(nalgebra_to_tensor(broadened, self.device()))
     }
 }
 
@@ -728,16 +734,21 @@ impl<I: SquareGridInterpolator> CompoundInterpolator<I> {
     }
 }
 
-impl<'a, E: Backend, I: SquareGridInterpolator> Interpolator<E> for CompoundInterpolator<I> {
+impl<'a, I: SquareGridInterpolator> Interpolator for CompoundInterpolator<I> {
     type B = CompoundBounds;
+    type E = I::E;
+
     fn synth_wl(&self) -> WlGrid {
         self.interpolators[0].synth_wl()
     }
     fn bounds(&self) -> &CompoundBounds {
         &self.bounds
     }
+    fn device(&self) -> &<Self::E as Backend>::Device {
+        self.interpolators[0].device()
+    }
 
-    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor<E, 1>> {
+    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor<Self::E, 1>> {
         let i = self.choose_grid(teff, logg);
         self.interpolators[i].interpolate(teff, m, logg)
     }
@@ -750,7 +761,7 @@ impl<'a, E: Backend, I: SquareGridInterpolator> Interpolator<E> for CompoundInte
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor<E, 1>> {
+    ) -> Result<Tensor<Self::E, 1>> {
         let i = self.choose_grid(teff, logg);
         self.interpolators[i].produce_model(target_dispersion, teff, m, logg, vsini, rv)
     }
@@ -762,7 +773,7 @@ impl<'a, E: Backend, I: SquareGridInterpolator> Interpolator<E> for CompoundInte
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor<E, 1>> {
+    ) -> Result<Tensor<Self::E, 1>> {
         let i = self.choose_grid(teff, logg);
         self.interpolators[i].produce_model_on_grid(target_dispersion, teff, m, logg, vsini, rv)
     }

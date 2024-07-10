@@ -5,14 +5,12 @@ use anyhow::{anyhow, Context, Result};
 use argmin::core::observers::{Observe, ObserverMode};
 use argmin::core::{CostFunction, Error, Executor, PopulationState, State, KV};
 use argmin::solver::brent::BrentRoot;
-use burn::tensor::backend::Backend;
 use enum_dispatch::enum_dispatch;
 use nalgebra as na;
 use rayon::prelude::*;
 use serde::Serialize;
 use std::fs::File;
 use std::io::BufWriter;
-use std::marker::PhantomData;
 use std::path::PathBuf;
 /// Scale labels by this amount during fitting
 pub const SCALING: na::SVector<f64, 5> =
@@ -368,23 +366,16 @@ impl ContinuumFitter for ConstantContinuum {
 }
 
 /// Cost function used in the PSO fitting
-struct FitCostFunction<
-    'a,
-    E: Backend,
-    I: Interpolator<E>,
-    T: WavelengthDispersion,
-    F: ContinuumFitter,
-> {
+struct FitCostFunction<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
     interpolator: &'a I,
     target_dispersion: &'a T,
     observed_spectrum: &'a ObservedSpectrum,
     continuum_fitter: &'a F,
     parallelize: bool,
-    backend: PhantomData<E>, // Necessary to allow unused type parameter E
 }
 
-impl<'a, E: Backend, I: Interpolator<E>, T: WavelengthDispersion, F: ContinuumFitter> CostFunction
-    for FitCostFunction<'a, E, I, T, F>
+impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> CostFunction
+    for FitCostFunction<'a, I, T, F>
 {
     type Param = na::SVector<f64, 5>;
     type Output = f64;
@@ -429,13 +420,7 @@ pub struct PSOSettings {
     pub delta: f64,
 }
 
-fn get_pso_fitter<
-    'a,
-    E: Backend,
-    I: Interpolator<E>,
-    T: WavelengthDispersion,
-    F: ContinuumFitter,
->(
+fn get_pso_fitter<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter>(
     interpolator: &'a I,
     target_dispersion: &'a T,
     observed_spectrum: &'a ObservedSpectrum,
@@ -443,7 +428,7 @@ fn get_pso_fitter<
     settings: &PSOSettings,
     parallelize: bool,
 ) -> Executor<
-    FitCostFunction<'a, E, I, T, F>,
+    FitCostFunction<'a, I, T, F>,
     particleswarm::ParticleSwarm<I::B, f64, rand::rngs::StdRng>,
     PopulationState<particleswarm::Particle<na::SVector<f64, 5>, f64>, f64>,
 > {
@@ -453,7 +438,6 @@ fn get_pso_fitter<
         observed_spectrum,
         continuum_fitter,
         parallelize,
-        backend: PhantomData,
     };
     let bounds = interpolator.bounds().clone();
     let solver = particleswarm::ParticleSwarm::new(bounds, settings.num_particles)
@@ -525,7 +509,7 @@ impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 5>, f64>, 
     }
 }
 
-pub fn fit_pso<E: Backend, I: Interpolator<E>>(
+pub fn fit_pso<I: Interpolator>(
     interpolator: &I,
     target_dispersion: &impl WavelengthDispersion,
     observed_spectrum: &ObservedSpectrum,
@@ -585,7 +569,7 @@ pub fn fit_pso<E: Backend, I: Interpolator<E>>(
     })
 }
 
-pub fn fit_continuum_bulk<E: Backend, I: Interpolator<E>>(
+pub fn fit_continuum_bulk<I: Interpolator>(
     interpolator: &I,
     target_dispersion: &impl WavelengthDispersion,
     observed_spectrum: &ObservedSpectrum,
@@ -607,13 +591,7 @@ pub fn fit_continuum_bulk<E: Backend, I: Interpolator<E>>(
         .collect()
 }
 
-struct Chi2LandscapeFitCost<
-    'a,
-    E: Backend,
-    I: Interpolator<E>,
-    T: WavelengthDispersion,
-    F: ContinuumFitter,
-> {
+struct Chi2LandscapeFitCost<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
     interpolator: &'a I,
     target_dispersion: &'a T,
     observed_spectrum: &'a ObservedSpectrum,
@@ -622,11 +600,10 @@ struct Chi2LandscapeFitCost<
     label_index: usize,
     target_value: f64,
     search_radius: f64,
-    backend: PhantomData<E>, // Necessary to allow unused type parameter E
 }
 
-impl<'a, E: Backend, I: Interpolator<E>, T: WavelengthDispersion, F: ContinuumFitter> CostFunction
-    for Chi2LandscapeFitCost<'a, E, I, T, F>
+impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> CostFunction
+    for Chi2LandscapeFitCost<'a, I, T, F>
 {
     type Param = f64;
     type Output = f64;
@@ -657,7 +634,7 @@ impl<'a, E: Backend, I: Interpolator<E>, T: WavelengthDispersion, F: ContinuumFi
 
 /// Compute uncertainty in every label
 /// by finding the intersection points of the chi2 function with a target value.
-pub fn uncertainty_chi2<E: Backend, I: Interpolator<E>>(
+pub fn uncertainty_chi2<I: Interpolator>(
     interpolator: &I,
     target_dispersion: &impl WavelengthDispersion,
     observed_spectrum: &ObservedSpectrum,
@@ -692,7 +669,6 @@ pub fn uncertainty_chi2<E: Backend, I: Interpolator<E>>(
             label_index: i,
             target_value: target_chi,
             search_radius: search_radius[i],
-            backend: PhantomData,
         };
         let mut left_bound_label = label;
         left_bound_label[i] -= search_radius[i];
@@ -719,7 +695,6 @@ pub fn uncertainty_chi2<E: Backend, I: Interpolator<E>>(
             label_index: i,
             target_value: target_chi,
             search_radius: search_radius[i],
-            backend: PhantomData,
         };
         let mut right_bound_label = label;
         right_bound_label[i] += search_radius[i];

@@ -26,6 +26,7 @@ anyhow = "1.0.82"
 numpy = { version= "0.21.0", features = ["nalgebra"]}
 enum_dispatch = "0.3.13"
 burn = { version = "0.13.2", features = ["tch"]}
+tch = "^0.15.0"
 
 [dependencies.pyo3]
 version = "0.21.1"

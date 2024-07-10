@@ -2164,6 +2164,7 @@ dependencies = [
  "realfft",
  "serde",
  "serde_json",
+ "tch",
 ]
 
 [[package]]
