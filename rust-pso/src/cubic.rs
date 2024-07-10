@@ -11,17 +11,15 @@ type SVectorView<'a, const N: usize, const M: usize> = na::Matrix<
 /// Interpolates a 1D quadratic function.
 /// x: coordinate compared to neighbors between 0 and 1
 /// xp: x coordinates of the 3 neighbors
-/// yp: Tensor with three model spectra (3, N)
+/// yp: Tensor with three model spectra (4, N) (last row is thrown away)
 fn quadratic_1d<E: Backend>(x: f64, xp: SVectorView<4, 12>, yp: Tensor<E, 2>) -> Tensor<E, 1> {
     let x0 = xp[0]; // Should be 0
-    let x1 = xp[1]; 
+    let x1 = xp[1];
     let x2 = xp[2]; // Should be 1
-    println!("{}, {}, {}", x0, x1, x2);
 
     let xsq = x * x;
-
     let device = yp.device();
-    let y = yp.narrow(0, 0, 3);
+    let y = yp.narrow(0, 0, 3); // Throw away last row
 
     let col0_denom = x0 * x0 - x0 * x1 - x0 * x2 + x1 * x2;
     let col1_denom = -x1 * x1 + x0 * x1 - x0 * x2 + x1 * x2;
@@ -67,7 +65,6 @@ fn cubic_1d<E: Backend>(x: f64, xp: SVectorView<4, 12>, yp: Tensor<E, 2>) -> Ten
         - x0 * x2 * x3
         - x1 * x2 * x3;
 
-    let device = yp.device();
     let f0 = ((xcu - (x1 + x2 + x3) * xsq + (x1 * x2 + x1 * x3 + x2 * x3) * x - (x1 * x2 * x3))
         / col0_denom) as f32;
     let f1 = ((-xcu + (x0 + x2 + x3) * xsq - (x0 * x2 + x0 * x3 + x2 * x3) * x + (x0 * x2 * x3))
@@ -77,7 +74,7 @@ fn cubic_1d<E: Backend>(x: f64, xp: SVectorView<4, 12>, yp: Tensor<E, 2>) -> Ten
     let f3 = ((-xcu + (x0 + x1 + x2) * xsq - (x0 * x1 + x0 * x2 + x1 * x2) * x + (x0 * x1 * x2))
         / col3_denom) as f32;
 
-    let f = Tensor::from_floats([f0, f1, f2, f3], &device);
+    let f = Tensor::from_floats([f0, f1, f2, f3], &yp.device());
 
     (f.unsqueeze_dim(1) * yp).sum_dim(0).squeeze(0)
 }
@@ -93,8 +90,10 @@ fn cubic_2d<E: Backend>(
     yp: Tensor<E, 3>,
     shape: [usize; 2],
 ) -> Tensor<E, 1> {
+    // 1D subcoordinates
     let xp1d = xp.fixed_rows::<4>(4);
 
+    // Interpolate in logg
     let local1d = Tensor::stack(
         yp.iter_dim(0)
             .map(|t| {
@@ -111,6 +110,7 @@ fn cubic_2d<E: Backend>(
         0,
     );
 
+    // Interpolate in m
     let localxp = xp.fixed_rows::<4>(0);
     if shape[0] == 4 {
         cubic_1d(x[0], localxp, local1d)
@@ -135,8 +135,8 @@ pub fn cubic_3d<E: Backend>(
     let subcoord: [f64; 2] = [coord[1], coord[2]];
     let subshape: [usize; 2] = [shape[1], shape[2]];
     let xp2d = xp.fixed_rows::<8>(4);
-    // Interpolate in m, logg
-    // (4, N)
+
+    // Interpolate in logg and m
     let local1d = Tensor::stack(
         yp.iter_dim(0)
             .map(|t| {
@@ -145,15 +145,15 @@ pub fn cubic_3d<E: Backend>(
             })
             .collect(),
         0,
-    );
+    ); // (4, N) tensor
 
+    // Interpolate in teff
     let localxp = xp.fixed_rows::<4>(0);
     if shape[0] == 4 {
         cubic_1d(coord[0], localxp, local1d)
     } else if shape[0] == 3 {
         quadratic_1d(coord[0], localxp, local1d)
     } else {
-        panic!("OH NO PANIC!!! (First dimension of shape is neither 3 nor 4)")
+        panic!("First dimension of shape is neither 3 nor 4")
     }
-    // yp.narrow(0, 0, 1).squeeze::<3>(0).narrow(0, 0, 1).squeeze::<2>(0).narrow(0, 0, 1).squeeze::<1>(0)
 }
