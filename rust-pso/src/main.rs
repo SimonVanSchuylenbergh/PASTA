@@ -34,7 +34,7 @@ pub fn main() -> Result<()> {
     let device = <Backend as burn::prelude::Backend>::Device::Cpu;
     // type Backend = burn::backend::Wgpu;
     // let device = burn::backend::wgpu::WgpuDevice::BestAvailable;
-    let n = 1;
+    let n = 200;
 
     let start = Instant::now();
     let folder = "/Users/ragnar/Documents/hermesnet/boss_grid_with_continuum";
@@ -85,7 +85,6 @@ pub fn main() -> Result<()> {
     let InterpolInput {
         factors,
         local_4x4x4_indices,
-        shape,
     } = prepare_interpolate::<Backend>(
         interpolator.ranges(),
         teff,
@@ -111,7 +110,6 @@ pub fn main() -> Result<()> {
     let InterpolInput {
         factors,
         local_4x4x4_indices,
-        shape,
     } = prepare_interpolate(
         interpolator.ranges(),
         teff,
@@ -132,7 +130,7 @@ pub fn main() -> Result<()> {
     let local_4x4x4 = Tensor::stack::<2>(vec_of_tensors, 0).reshape([4, 4, 4, -1]);
     let start = Instant::now();
     for _ in 0..n {
-        let _ = cubic_3d(factors.clone(), shape, local_4x4x4.clone());
+        let _ = cubic_3d(factors.clone(), local_4x4x4.clone());
     }
     println!("      interpolate: {:?}", start.elapsed() / n);
 
