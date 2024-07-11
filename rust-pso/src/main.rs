@@ -5,7 +5,7 @@ mod convolve_rv;
 mod cubic;
 mod fitting;
 mod interpolate;
-mod interpolators;
+mod model_fetchers;
 mod particleswarm;
 use crate::fitting::ObservedSpectrum;
 use crate::interpolate::{Bounds, CompoundInterpolator};
@@ -16,10 +16,10 @@ use convolve_rv::{oaconvolve, rot_broad_rv, WavelengthDispersion};
 use cubic::{cubic_3d, prepare_interpolate, InterpolInput};
 use fitting::{fit_pso, uncertainty_chi2, ChunkFitter, ContinuumFitter};
 use interpolate::{
-    nalgebra_to_tensor, read_npy_file, tensor_to_nalgebra, Interpolator, Range,
+    nalgebra_to_tensor, read_npy_file, tensor_to_nalgebra, Interpolator, ModelFetcher, Range,
     SquareGridInterpolator, WlGrid,
 };
-use interpolators::{CachedInterpolator, InMemInterpolator, OnDiskInterpolator};
+use model_fetchers::{CachedFetcher, InMemFetcher};
 use iter_num_tools::arange;
 use itertools::Itertools;
 use nalgebra as na;
@@ -39,9 +39,8 @@ pub fn main() -> Result<()> {
     let start = Instant::now();
     let folder = "/Users/ragnar/Documents/hermesnet/boss_grid_with_continuum";
     let wl_grid = WlGrid::Logspace(3.5440680443502757, 5.428_681_023_790_647e-6, 87508);
-    let interpolator = InMemInterpolator::new(
+    let fetcher = InMemFetcher::new(
         folder,
-        wl_grid,
         Range::new(arange(25_250.0..30_250.0, 250.0).collect()),
         Range::new(arange(-0.2..0.2, 0.1).collect()),
         Range::new(arange(4.0..5.0, 0.1).collect()),
@@ -49,6 +48,7 @@ pub fn main() -> Result<()> {
         (-150.0, 150.0),
         device,
     );
+    let interpolator = SquareGridInterpolator::new(fetcher, wl_grid);
     println!("Instantiated in: {:?}", start.elapsed());
 
     let wl = read_npy_file("wl.npy".into())?;
@@ -96,6 +96,7 @@ pub fn main() -> Result<()> {
         .into_iter()
         .map(|[i, j, k]| {
             interpolator
+                .fetcher
                 .find_spectrum(i as usize, j as usize, k as usize)
                 .unwrap()
                 .into_owned()
@@ -121,6 +122,7 @@ pub fn main() -> Result<()> {
         .into_iter()
         .map(|[i, j, k]| {
             interpolator
+                .fetcher
                 .find_spectrum(i as usize, j as usize, k as usize)
                 .unwrap()
                 .into_owned()

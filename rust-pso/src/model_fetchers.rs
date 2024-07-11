@@ -1,4 +1,6 @@
-use crate::interpolate::{read_spectrum, Range, SquareBounds, SquareGridInterpolator, WlGrid};
+use crate::interpolate::{
+    read_spectrum, ModelFetcher, Range, SquareBounds, SquareGridInterpolator, WlGrid,
+};
 use anyhow::Result;
 use burn::prelude::Backend;
 use burn::tensor::{Data, Tensor};
@@ -12,17 +14,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
-pub struct OnDiskInterpolator<E: Backend> {
+pub struct OnDiskFetcher<E: Backend> {
     pub dir: PathBuf,
-    pub synth_wl: WlGrid,
     pub ranges: SquareBounds,
     pub device: E::Device,
 }
 
-impl<E: Backend> OnDiskInterpolator<E> {
+impl<E: Backend> OnDiskFetcher<E> {
     pub fn new(
         dir: &str,
-        wavelength: WlGrid,
         teff_range: Range,
         m_range: Range,
         logg_range: Range,
@@ -39,21 +39,16 @@ impl<E: Backend> OnDiskInterpolator<E> {
         };
         Self {
             dir: PathBuf::from(dir),
-            synth_wl: wavelength,
             ranges,
             device,
         }
     }
 }
 
-impl<E: Backend> SquareGridInterpolator for OnDiskInterpolator<E> {
+impl<E: Backend> ModelFetcher for OnDiskFetcher<E> {
     type E = E;
-
     fn ranges(&self) -> &SquareBounds {
         &self.ranges
-    }
-    fn synth_wl(&self) -> WlGrid {
-        self.synth_wl
     }
     fn device(&self) -> &<Self::E as Backend>::Device {
         &self.device
@@ -71,8 +66,7 @@ impl<E: Backend> SquareGridInterpolator for OnDiskInterpolator<E> {
     }
 }
 
-pub struct InMemInterpolator<E: Backend> {
-    pub synth_wl: WlGrid, // min, step
+pub struct InMemFetcher<E: Backend> {
     pub ranges: SquareBounds,
     pub loaded_spectra: Vec<Tensor<E, 1>>,
     pub device: E::Device,
@@ -103,10 +97,9 @@ fn load_spectra<E: Backend>(
         .collect()
 }
 
-impl<E: Backend> InMemInterpolator<E> {
+impl<E: Backend> InMemFetcher<E> {
     pub fn new(
         dir: &str,
-        wavelength: WlGrid,
         teff_range: Range,
         m_range: Range,
         logg_range: Range,
@@ -124,23 +117,19 @@ impl<E: Backend> InMemInterpolator<E> {
         let loaded_spectra = load_spectra(PathBuf::from(dir), &ranges, &device);
         Self {
             loaded_spectra,
-            synth_wl: wavelength,
             ranges,
             device: device,
         }
     }
 }
 
-impl<E: Backend> SquareGridInterpolator for InMemInterpolator<E>
+impl<E: Backend> ModelFetcher for InMemFetcher<E>
 where
     <E as Backend>::FloatTensorPrimitive<1>: Sync,
 {
     type E = E;
     fn ranges(&self) -> &SquareBounds {
         &self.ranges
-    }
-    fn synth_wl(&self) -> WlGrid {
-        self.synth_wl
     }
     fn device(&self) -> &<Self::E as Backend>::Device {
         &self.device
@@ -153,18 +142,16 @@ where
 }
 
 #[derive(Clone)]
-pub struct CachedInterpolator<E: Backend> {
+pub struct CachedFetcher<E: Backend> {
     pub dir: PathBuf,
-    pub synth_wl: WlGrid,
     pub ranges: SquareBounds,
     cache: Arc<Mutex<LruCache<(usize, usize, usize), Vec<f64>>>>,
     pub device: E::Device,
 }
 
-impl<E: Backend> CachedInterpolator<E> {
+impl<E: Backend> CachedFetcher<E> {
     pub fn new(
         dir: &str,
-        wavelength: WlGrid,
         teff_range: Range,
         m_range: Range,
         logg_range: Range,
@@ -182,7 +169,6 @@ impl<E: Backend> CachedInterpolator<E> {
         };
         Self {
             dir: PathBuf::from(dir),
-            synth_wl: wavelength,
             ranges,
             cache: Arc::new(Mutex::new(LruCache::new(
                 NonZeroUsize::new(lrucap).unwrap(),
@@ -192,13 +178,10 @@ impl<E: Backend> CachedInterpolator<E> {
     }
 }
 
-impl<E: Backend> SquareGridInterpolator for CachedInterpolator<E> {
+impl<E: Backend> ModelFetcher for CachedFetcher<E> {
     type E = E;
     fn ranges(&self) -> &SquareBounds {
         &self.ranges
-    }
-    fn synth_wl(&self) -> WlGrid {
-        self.synth_wl
     }
     fn device(&self) -> &<Self::E as Backend>::Device {
         &self.device

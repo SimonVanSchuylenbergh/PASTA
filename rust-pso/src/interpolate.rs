@@ -244,14 +244,35 @@ impl Bounds for SquareBounds {
             .collect()
     }
 }
-pub trait SquareGridInterpolator: Send + Sync {
-    type E: Backend;
 
-    fn synth_wl(&self) -> WlGrid;
+pub trait ModelFetcher: Send + Sync {
+    type E: Backend;
     fn ranges(&self) -> &SquareBounds;
     fn device(&self) -> &<Self::E as Backend>::Device;
-
     fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<Cow<Tensor<Self::E, 1>>>;
+}
+
+#[derive(Clone)]
+pub struct SquareGridInterpolator<F: ModelFetcher> {
+    pub fetcher: F,
+    pub synth_wl: WlGrid,
+}
+
+impl<F: ModelFetcher> SquareGridInterpolator<F> {
+    pub fn new(model_fetcher: F, synth_wl: WlGrid) -> Self {
+        Self {
+            fetcher: model_fetcher,
+            synth_wl,
+        }
+    }
+
+    pub fn ranges(&self) -> &SquareBounds {
+        self.fetcher.ranges()
+    }
+
+    pub fn device(&self) -> &<F::E as Backend>::Device {
+        self.fetcher.device()
+    }
 }
 
 pub fn nalgebra_to_tensor<E: Backend>(x: na::DVector<f64>, device: &E::Device) -> Tensor<E, 1> {
@@ -263,17 +284,17 @@ pub fn tensor_to_nalgebra<E: Backend, T: Element + Scalar>(x: Tensor<E, 1>) -> n
     na::DVector::from_vec(vec)
 }
 
-impl<I: SquareGridInterpolator> Interpolator for I {
+impl<F: ModelFetcher> Interpolator for SquareGridInterpolator<F> {
     type B = SquareBounds;
-    type E = I::E;
+    type E = F::E;
     fn synth_wl(&self) -> WlGrid {
-        self.synth_wl()
+        self.synth_wl
     }
     fn bounds(&self) -> &SquareBounds {
-        self.ranges()
+        &self.ranges()
     }
     fn device(&self) -> &<Self::E as Backend>::Device {
-        self.device()
+        &self.device()
     }
     fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor<Self::E, 1>> {
         let InterpolInput {
@@ -286,7 +307,8 @@ impl<I: SquareGridInterpolator> Interpolator for I {
         let vec_of_tensors = local_4x4x4_indices
             .into_iter()
             .map(|[i, j, k]| {
-                self.find_spectrum(i as usize, j as usize, k as usize)
+                self.fetcher
+                    .find_spectrum(i as usize, j as usize, k as usize)
                     .unwrap()
                     .into_owned()
             })
@@ -325,17 +347,24 @@ impl<I: SquareGridInterpolator> Interpolator for I {
         rv: f64,
     ) -> Result<Tensor<Self::E, 1>> {
         let i = self
+            .fetcher
             .ranges()
             .teff
             .try_get_index(teff)
             .context("Teff not in grid")?;
-        let j = self.ranges().m.try_get_index(m).context("m not in grid")?;
+        let j = self
+            .fetcher
+            .ranges()
+            .m
+            .try_get_index(m)
+            .context("m not in grid")?;
         let k = self
+            .fetcher
             .ranges()
             .logg
             .try_get_index(logg)
             .context("logg not in grid")?;
-        let spec = self.find_spectrum(i, j, k)?;
+        let spec = self.fetcher.find_spectrum(i, j, k)?;
         let broadened = rot_broad_rv(
             tensor_to_nalgebra(spec.into_owned()),
             self.synth_wl(),
@@ -606,13 +635,17 @@ impl Bounds for CompoundBounds {
     }
 }
 
-pub struct CompoundInterpolator<I: SquareGridInterpolator> {
-    interpolators: [I; 3],
+pub struct CompoundInterpolator<F: ModelFetcher> {
+    interpolators: [SquareGridInterpolator<F>; 3],
     bounds: CompoundBounds,
 }
 
-impl<I: SquareGridInterpolator> CompoundInterpolator<I> {
-    pub fn new(first: I, second: I, third: I) -> Self {
+impl<F: ModelFetcher> CompoundInterpolator<F> {
+    pub fn new(
+        first: SquareGridInterpolator<F>,
+        second: SquareGridInterpolator<F>,
+        third: SquareGridInterpolator<F>,
+    ) -> Self {
         let bounds = CompoundBounds {
             bounds: [
                 first.ranges().clone(),
@@ -639,18 +672,18 @@ impl<I: SquareGridInterpolator> CompoundInterpolator<I> {
     }
 }
 
-impl<'a, I: SquareGridInterpolator> Interpolator for CompoundInterpolator<I> {
+impl<'a, F: ModelFetcher> Interpolator for CompoundInterpolator<F> {
     type B = CompoundBounds;
-    type E = I::E;
+    type E = F::E;
 
     fn synth_wl(&self) -> WlGrid {
-        self.interpolators[0].synth_wl()
+        self.interpolators[0].synth_wl
     }
     fn bounds(&self) -> &CompoundBounds {
         &self.bounds
     }
     fn device(&self) -> &<Self::E as Backend>::Device {
-        self.interpolators[0].device()
+        &self.interpolators[0].device()
     }
 
     fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor<Self::E, 1>> {
