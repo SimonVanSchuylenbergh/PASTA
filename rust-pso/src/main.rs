@@ -13,11 +13,11 @@ use anyhow::Result;
 use burn::backend::wgpu::WgpuDevice;
 use burn::tensor::Tensor;
 use convolve_rv::{oaconvolve, rot_broad_rv, WavelengthDispersion};
-use cubic::cubic_3d;
+use cubic::{cubic_3d, prepare_interpolate, InterpolInput};
 use fitting::{fit_pso, uncertainty_chi2, ChunkFitter, ContinuumFitter};
 use interpolate::{
-    nalgebra_to_tensor, prepare_interpolate, read_npy_file, tensor_to_nalgebra, InterpolInput,
-    Interpolator, Range, SquareGridInterpolator, WlGrid,
+    nalgebra_to_tensor, read_npy_file, tensor_to_nalgebra, Interpolator, Range,
+    SquareGridInterpolator, WlGrid,
 };
 use interpolators::{CachedInterpolator, InMemInterpolator, OnDiskInterpolator};
 use iter_num_tools::arange;
@@ -34,7 +34,7 @@ pub fn main() -> Result<()> {
     let device = <Backend as burn::prelude::Backend>::Device::Cpu;
     // type Backend = burn::backend::Wgpu;
     // let device = burn::backend::wgpu::WgpuDevice::BestAvailable;
-    let n = 200;
+    let n = 1;
 
     let start = Instant::now();
     let folder = "/Users/ragnar/Documents/hermesnet/boss_grid_with_continuum";
@@ -47,16 +47,20 @@ pub fn main() -> Result<()> {
         Range::new(arange(4.0..5.0, 0.1).collect()),
         (1.0, 300.0),
         (-150.0, 150.0),
-        device
+        device,
     );
     println!("Instantiated in: {:?}", start.elapsed());
 
     let wl = read_npy_file("wl.npy".into())?;
     let disp = read_npy_file("disp.npy".into())?;
-    let target_dispersion = convolve_rv::VariableTargetDispersion::new(wl.clone().into(), &disp.into(), wl_grid)?;
+    let target_dispersion =
+        convolve_rv::VariableTargetDispersion::new(wl.clone().into(), &disp.into(), wl_grid)?;
     let flux = read_npy_file("flux.npy".into())?;
     let var = read_npy_file("var.npy".into())?;
-    let observed_spectrum = ObservedSpectrum { flux: flux.into(), var: var.into() };
+    let observed_spectrum = ObservedSpectrum {
+        flux: flux.into(),
+        var: var.into(),
+    };
     let continuum_fitter = ChunkFitter::new(wl.into(), 10, 8, 0.2);
 
     let teff = 27000.0;
@@ -65,17 +69,9 @@ pub fn main() -> Result<()> {
     let vsini = 100.0;
     let rv = 0.0;
 
-
     let start = Instant::now();
     for _ in 0..n {
-        let _ = interpolator.produce_model(
-            &target_dispersion,
-            teff,
-            m,
-            logg,
-            vsini,
-            rv,
-        );
+        let _ = interpolator.produce_model(&target_dispersion, teff, m, logg, vsini, rv);
     }
     println!("produce_model: {:?}", start.elapsed() / n);
 
@@ -87,11 +83,16 @@ pub fn main() -> Result<()> {
 
     let start = Instant::now();
     let InterpolInput {
-        coord,
-        xp,
+        factors,
         local_4x4x4_indices,
         shape,
-    } = prepare_interpolate(interpolator.ranges(), teff, m, logg)?;
+    } = prepare_interpolate::<Backend>(
+        interpolator.ranges(),
+        teff,
+        m,
+        logg,
+        Interpolator::device(&interpolator),
+    )?;
     let vec_of_tensors = local_4x4x4_indices
         .into_iter()
         .map(|[i, j, k]| {
@@ -108,11 +109,16 @@ pub fn main() -> Result<()> {
     println!("      stacking: {:?}", start.elapsed() / n);
 
     let InterpolInput {
-        coord,
-        xp,
+        factors,
         local_4x4x4_indices,
         shape,
-    } = prepare_interpolate(interpolator.ranges(), teff, m, logg)?;
+    } = prepare_interpolate(
+        interpolator.ranges(),
+        teff,
+        m,
+        logg,
+        Interpolator::device(&interpolator),
+    )?;
     let vec_of_tensors = local_4x4x4_indices
         .into_iter()
         .map(|[i, j, k]| {
@@ -126,7 +132,7 @@ pub fn main() -> Result<()> {
     let local_4x4x4 = Tensor::stack::<2>(vec_of_tensors, 0).reshape([4, 4, 4, -1]);
     let start = Instant::now();
     for _ in 0..n {
-        let _ = cubic_3d(coord, &xp, local_4x4x4.clone(), shape);
+        let _ = cubic_3d(factors.clone(), shape, local_4x4x4.clone());
     }
     println!("      interpolate: {:?}", start.elapsed() / n);
 
