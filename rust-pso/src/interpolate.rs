@@ -1,6 +1,6 @@
 use crate::convolve_rv::{rot_broad_rv, WavelengthDispersion};
-use crate::cubic::cubic_3d;
-use anyhow::{bail, Context, Result};
+use crate::cubic::{cubic_3d, prepare_interpolate, InterpolInput};
+use anyhow::{Context, Result};
 use argmin_math::ArgminRandom;
 use burn::prelude::Backend;
 use burn::tensor::{Data, Element, Tensor};
@@ -91,112 +91,6 @@ pub struct SquareBounds {
     pub logg: Range,
     pub vsini: (f64, f64),
     pub rv: (f64, f64),
-}
-
-pub struct InterpolInput {
-    pub coord: [f64; 3],
-    pub xp: na::SVector<f64, 12>,
-    pub local_4x4x4_indices: [[isize; 3]; 64],
-    pub shape: [usize; 3],
-}
-
-fn get_indices(index: usize, range: &Range) -> Vec<isize> {
-    if index == 0 {
-        vec![0, 1, 2]
-    } else if index == range.n() - 2 {
-        vec![-1, 0, 1]
-    } else {
-        vec![-1, 0, 1, 2]
-    }
-}
-
-fn get_range(index: usize, range: &Range) -> Vec<f64> {
-    if index == 0 {
-        range.values[0..3].into()
-    } else if index == range.n() - 2 {
-        range.values[index - 1..index + 2].into()
-    } else {
-        range.values[index - 1..index + 3].into()
-    }
-}
-
-pub fn prepare_interpolate(
-    ranges: &SquareBounds,
-    teff: f64,
-    m: f64,
-    logg: f64,
-) -> Result<InterpolInput> {
-    // 3D cubic interpolation followed by convolution
-    if !ranges.teff.between_bounds(teff) {
-        bail!("Teff out of bounds ({})", teff);
-    }
-    if !ranges.m.between_bounds(m) {
-        bail!("M out of bounds ({})", m);
-    }
-    if !ranges.logg.between_bounds(logg) {
-        bail!("Logg out of bounds ({})", logg);
-    }
-
-    let i = ranges.teff.get_left_index(teff);
-    let j = ranges.m.get_left_index(m);
-    let k = ranges.logg.get_left_index(logg);
-
-    let dis = get_indices(i, &ranges.teff);
-    let djs = get_indices(j, &ranges.m);
-    let dks = get_indices(k, &ranges.logg);
-
-    let teff_range = get_range(i, &ranges.teff);
-    let m_range = get_range(j, &ranges.m);
-    let logg_range = get_range(k, &ranges.logg);
-
-    let mut xp = na::SVector::zeros();
-    let teff_min = teff_range.first().unwrap();
-    let teff_max = teff_range.last().unwrap();
-    let delta_teff = teff_max - teff_min;
-    let m_min = m_range.first().unwrap();
-    let m_max = m_range.last().unwrap();
-    let delta_m = m_max - m_min;
-    let logg_min = logg_range.first().unwrap();
-    let logg_max = logg_range.last().unwrap();
-    let delta_logg = logg_max - logg_min;
-
-    for i in 0..teff_range.len() {
-        xp[i] = (teff_range[i] - teff_min) / delta_teff;
-    }
-    for i in 0..m_range.len() {
-        xp[i + 4] = (m_range[i] - m_min) / delta_m;
-    }
-    for i in 0..logg_range.len() {
-        xp[i + 8] = (logg_range[i] - logg_min) / delta_logg;
-    }
-    let coord = [
-        (teff - teff_min) / delta_teff,
-        (m - m_min) / delta_m,
-        (logg - logg_min) / delta_logg,
-    ];
-
-    let shape = [dis.len(), djs.len(), dks.len()];
-    let mut local_4x4x4_indices = [[0; 3]; 64];
-    for index_i in 0..4 {
-        for index_j in 0..4 {
-            for index_k in 0..4 {
-                if index_i < dis.len() && index_j < djs.len() && index_k < dks.len() {
-                    local_4x4x4_indices[index_i * 16 + index_j * 4 + index_k] = [
-                        i as isize + dis[index_i],
-                        j as isize + djs[index_j],
-                        k as isize + dks[index_k],
-                    ]
-                }
-            }
-        }
-    }
-
-    Ok(InterpolInput {
-        coord,
-        xp,
-        local_4x4x4_indices,
-        shape,
-    })
 }
 
 pub trait Bounds: Clone {
