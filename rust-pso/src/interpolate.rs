@@ -279,7 +279,6 @@ impl<I: SquareGridInterpolator> Interpolator for I {
         let InterpolInput {
             factors,
             local_4x4x4_indices,
-            shape,
         } = prepare_interpolate(self.ranges(), teff, m, logg, self.device())
             .context("prepare_interpolate error")?;
 
@@ -295,7 +294,7 @@ impl<I: SquareGridInterpolator> Interpolator for I {
         // (4, 4, 4, N)
         let local_4x4x4 = Tensor::stack::<2>(vec_of_tensors, 0).reshape([4, 4, 4, -1]);
 
-        Ok(cubic_3d(factors, shape, local_4x4x4))
+        Ok(cubic_3d(factors, local_4x4x4))
     }
 
     fn produce_model(

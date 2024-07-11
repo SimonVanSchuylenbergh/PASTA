@@ -1,18 +1,9 @@
 use crate::interpolate::{Range, SquareBounds};
 use anyhow::{bail, Result};
 use burn::tensor::{backend::Backend, Tensor};
-use nalgebra as na;
-
-type SVectorView<'a, const N: usize, const M: usize> = na::Matrix<
-    f64,
-    na::Const<N>,
-    na::Const<1>,
-    na::ViewStorage<'a, f64, na::Const<N>, na::Const<1>, na::Const<1>, na::Const<M>>,
->;
 
 pub struct InterpolInput<E: Backend> {
     pub factors: Tensor<E, 2>, // (3, 4) tensor, factors to multiply with the 4 neighbors
-    pub shape: [usize; 3],
     pub local_4x4x4_indices: [[isize; 3]; 64],
 }
 
@@ -118,7 +109,7 @@ pub fn prepare_interpolate<E: Backend>(
     let logg_max = logg_range.last().unwrap();
     let delta_logg = logg_max - logg_min;
 
-    let factors_teff = if (teff_range.len() == 3) {
+    let factors_teff = if teff_range.len() == 3 {
         calculate_factors_quadratic(
             (teff - teff_min) / delta_teff,
             0.0,
@@ -134,7 +125,7 @@ pub fn prepare_interpolate<E: Backend>(
             1.0,
         )
     };
-    let factors_m = if (m_range.len() == 3) {
+    let factors_m = if m_range.len() == 3 {
         calculate_factors_quadratic(
             (m - m_min) / delta_m,
             0.0,
@@ -150,7 +141,7 @@ pub fn prepare_interpolate<E: Backend>(
             1.0,
         )
     };
-    let factors_logg = if (logg_range.len() == 3) {
+    let factors_logg = if logg_range.len() == 3 {
         calculate_factors_quadratic(
             (logg - logg_min) / delta_logg,
             0.0,
@@ -189,7 +180,6 @@ pub fn prepare_interpolate<E: Backend>(
     let dis = get_indices(i, &ranges.teff);
     let djs = get_indices(j, &ranges.m);
     let dks = get_indices(k, &ranges.logg);
-    let shape = [dis.len(), djs.len(), dks.len()];
     let mut local_4x4x4_indices = [[0; 3]; 64];
     for index_i in 0..4 {
         for index_j in 0..4 {
@@ -208,18 +198,7 @@ pub fn prepare_interpolate<E: Backend>(
     Ok(InterpolInput {
         factors,
         local_4x4x4_indices,
-        shape,
     })
-}
-
-/// Interpolates a 1D quadratic function.
-/// factors: Tensor with factors to multiply with the neighbors (4)
-/// yp: Tensor with three model spectra (4, N) (last row is thrown away)
-fn quadratic_1d<E: Backend>(factors: Tensor<E, 1>, yp: Tensor<E, 2>) -> Tensor<E, 1> {
-    let y = yp.narrow(0, 0, 3); // Throw away last row
-    let factors = factors.narrow(0, 0, 3); // Throw away last factor
-
-    (factors.unsqueeze_dim(1) * y).sum_dim(0).squeeze(0)
 }
 
 /// Interpolates a 1D cubic function.
@@ -233,25 +212,16 @@ fn cubic_1d<E: Backend>(factors: Tensor<E, 1>, yp: Tensor<E, 2>) -> Tensor<E, 1>
 /// factors: Tensor with factors to multiply with the neighbors (2, 4)
 /// yp: Tensor with 16 model spectra (4, 4, N)
 /// shape: Equals 3 or 4 for each dimension (quadratic or cubic)
-fn cubic_2d<E: Backend>(
-    factors: Tensor<E, 2>,
-    shape: [usize; 2],
-    yp: Tensor<E, 3>,
-) -> Tensor<E, 1> {
+fn cubic_2d<E: Backend>(factors: Tensor<E, 2>, yp: Tensor<E, 3>) -> Tensor<E, 1> {
     // 1D subcoordinates
     let logg_factors = factors.clone().narrow(0, 1, 1).squeeze(0); // logg factors (4)
-                                                                   // Interpolate in logg
+
+    // Interpolate in logg
     let local1d = Tensor::stack(
         yp.iter_dim(0)
             .map(|t| {
                 let subtensor = t.squeeze(0);
-                if shape[1] == 3 {
-                    quadratic_1d(logg_factors.clone(), subtensor)
-                } else if shape[1] == 4 {
-                    cubic_1d(logg_factors.clone(), subtensor)
-                } else {
-                    panic!("Second dimension of shape is neither 3 nor 4")
-                }
+                cubic_1d(logg_factors.clone(), subtensor)
             })
             .collect(),
         0,
@@ -259,32 +229,22 @@ fn cubic_2d<E: Backend>(
 
     // Interpolate in m
     let m_factors = factors.clone().narrow(0, 0, 1).squeeze(0); // m factors (4)
-    if shape[0] == 4 {
-        cubic_1d(m_factors, local1d)
-    } else if shape[0] == 3 {
-        quadratic_1d(m_factors, local1d)
-    } else {
-        panic!("First dimension of shape is neither 3 nor 4")
-    }
+    cubic_1d(m_factors, local1d)
 }
 
 /// Interpolates a 3D cubic function.
 /// factors: Tensor with factors to multiply with the neighbors (3, 4) (teff, m, logg)
 /// yp: Tensor with 64 model spectra (4, 4, 4, N)
-pub fn cubic_3d<E: Backend>(
-    factors: Tensor<E, 2>,
-    shape: [usize; 3],
-    yp: Tensor<E, 4>,
-) -> Tensor<E, 1> {
+pub fn cubic_3d<E: Backend>(factors: Tensor<E, 2>, yp: Tensor<E, 4>) -> Tensor<E, 1> {
     // Subgrid in m, logg
-    let m_logg_shape: [usize; 2] = [shape[1], shape[2]];
-    let m_logg_factors = factors.clone().narrow(0, 1, 2); // m, logg factors (2, 4)
-                                                          // Interpolate in logg and m
+    let m_logg_factors = factors.clone().narrow(0, 1, 2); // (2, 4)
+
+    // Interpolate in logg and m
     let local1d = Tensor::stack(
         yp.iter_dim(0)
             .map(|t| {
                 let subtensor = t.squeeze(0);
-                cubic_2d(m_logg_factors.clone(), m_logg_shape, subtensor)
+                cubic_2d(m_logg_factors.clone(), subtensor)
             })
             .collect(),
         0,
@@ -292,11 +252,5 @@ pub fn cubic_3d<E: Backend>(
 
     // Interpolate in teff
     let teff_factors = factors.narrow(0, 0, 1).squeeze(0); // teff factors (4)
-    if shape[0] == 4 {
-        cubic_1d(teff_factors, local1d)
-    } else if shape[0] == 3 {
-        quadratic_1d(teff_factors, local1d)
-    } else {
-        panic!("First dimension of shape is neither 3 nor 4")
-    }
+    cubic_1d(teff_factors, local1d)
 }
