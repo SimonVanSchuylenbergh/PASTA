@@ -1,25 +1,69 @@
 use crate::convolve_rv::{rot_broad_rv, WavelengthDispersion};
 use crate::cubic::calculate_interpolation_coefficients;
-use crate::tensor::Tensor;
 use anyhow::{Context, Result};
 use argmin_math::ArgminRandom;
-use nalgebra::{self as na, Scalar};
+use nalgebra as na;
 use npy::NpyData;
 use rand::Rng;
-use std::borrow::Cow;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub fn read_npy_file(file_path: PathBuf) -> Result<Vec<f64>> {
+pub type FluxFloat = f32; // Float type used for spectra
+
+pub enum CowVector<'a> {
+    Borrowed(na::DVectorView<'a, FluxFloat>),
+    Owned(na::DVector<FluxFloat>),
+}
+
+impl<'a> CowVector<'a> {
+    pub fn into_owned(self) -> na::DVector<FluxFloat> {
+        match self {
+            CowVector::Borrowed(view) => view.into_owned(),
+            CowVector::Owned(vec) => vec,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            CowVector::Borrowed(view) => view.len(),
+            CowVector::Owned(vec) => vec.len(),
+        }
+    }
+
+    pub fn rows(&self, start: usize, len: usize) -> na::DVectorView<FluxFloat> {
+        match self {
+            CowVector::Borrowed(view) => view.rows(start, len),
+            CowVector::Owned(vec) => vec.rows(start, len),
+        }
+    }
+
+    pub fn fixed_rows<const N: usize>(
+        &'a self,
+        start: usize,
+    ) -> na::Matrix<
+        FluxFloat,
+        na::Const<N>,
+        na::Const<1>,
+        na::ViewStorage<'a, FluxFloat, na::Const<N>, na::Const<1>, na::Const<1>, na::Dyn>,
+    > {
+        match self {
+            CowVector::Borrowed(view) => view.fixed_rows::<N>(start),
+            CowVector::Owned(vec) => vec.fixed_rows::<N>(start),
+        }
+    }
+}
+
+pub fn read_npy_file<F: npy::Serializable>(file_path: PathBuf) -> Result<Vec<F>> {
     let mut file = std::fs::File::open(file_path.clone())
         .context(format!("Error loading {}", file_path.to_str().unwrap()))?;
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)?;
-    let data: NpyData<f64> = NpyData::from_bytes(&buf)?;
+    let data: NpyData<F> = NpyData::from_bytes(&buf)
+        .context(format!("Error loading {}", file_path.to_str().unwrap()))?;
     Ok(data.to_vec())
 }
 
-pub fn read_spectrum(dir: &Path, teff: f64, m: f64, logg: f64) -> Result<Vec<f32>> {
+pub fn read_spectrum(dir: &Path, teff: f64, m: f64, logg: f64) -> Result<na::DVector<FluxFloat>> {
     // e.g. 00027_lm0050_07000_0350_0020_0000_Vsini_0000.npy
     let _teff = teff.round() as i32;
     let _m = (m * 100.0).round() as i32;
@@ -27,8 +71,11 @@ pub fn read_spectrum(dir: &Path, teff: f64, m: f64, logg: f64) -> Result<Vec<f32
     let sign = if _m < 0 { "m" } else { "p" };
     let filename = format!("l{}{:04}_{:05}_{:04}", sign, _m.abs(), _teff, _logg);
     let file_path = dir.join(format!("{}.npy", filename));
-    let result = read_npy_file(file_path.clone())?;
-    Ok(result.into_iter().map(|x| x as f32).collect())
+    let result = read_npy_file::<FluxFloat>(file_path.clone())?;
+    Ok(na::DVector::from_iterator(
+        result.len(),
+        result.into_iter().map(|x| x as FluxFloat),
+    ))
 }
 
 #[derive(Clone)]
@@ -153,8 +200,7 @@ pub trait Interpolator: Send + Sync {
 
     fn synth_wl(&self) -> WlGrid;
     fn bounds(&self) -> &Self::B;
-    fn device(&self) -> &tch::Device;
-    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor>;
+    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<na::DVector<FluxFloat>>;
     fn produce_model(
         &self,
         target_dispersion: &impl WavelengthDispersion,
@@ -163,7 +209,7 @@ pub trait Interpolator: Send + Sync {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor>;
+    ) -> Result<na::DVector<FluxFloat>>;
     fn produce_model_on_grid(
         &self,
         target_dispersion: &impl WavelengthDispersion,
@@ -172,7 +218,7 @@ pub trait Interpolator: Send + Sync {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor>;
+    ) -> Result<na::DVector<FluxFloat>>;
 }
 
 impl Bounds for SquareBounds {
@@ -246,20 +292,7 @@ impl Bounds for SquareBounds {
 
 pub trait ModelFetcher: Send + Sync {
     fn ranges(&self) -> &SquareBounds;
-    fn device(&self) -> &tch::Device;
-    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<Cow<Tensor>>;
-    fn find_neighbors(&self, i: usize, j: usize, k: usize) -> Result<Tensor> {
-        let neighbors = (-1..3)
-            .flat_map(|di| (-1..3).flat_map(move |dj| (-1..3).map(move |dk| (di, dj, dk))))
-            .map(|(di, dj, dk)| {
-                let i = ((i as i64 + di).max(0).min(1)) as usize;
-                let j = ((j as i64 + dj).max(0).min(1)) as usize;
-                let k = ((k as i64 + dk).max(0).min(1)) as usize;
-                Ok(self.find_spectrum(i, j, k)?.into_owned())
-            })
-            .collect::<Result<Vec<Tensor>>>()?;
-        Ok(Tensor::stack(&neighbors[..], 0)?)
-    }
+    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<CowVector>;
 }
 
 #[derive(Clone)]
@@ -279,20 +312,9 @@ impl<F: ModelFetcher> SquareGridInterpolator<F> {
     pub fn ranges(&self) -> &SquareBounds {
         self.fetcher.ranges()
     }
-
-    pub fn device(&self) -> &tch::Device {
-        self.fetcher.device()
-    }
 }
 
-pub fn nalgebra_to_tensor(x: na::DVector<f32>, device: &tch::Device) -> Tensor {
-    Tensor::from_slice(x.data.as_slice(), device)
-}
-
-pub fn tensor_to_nalgebra(x: Tensor) -> na::DVector<f32> {
-    let vec: Vec<f32> = x.into_vec().unwrap();
-    na::DVector::from_vec(vec)
-}
+const BATCH_SIZE: usize = 128;
 
 impl<F: ModelFetcher> Interpolator for SquareGridInterpolator<F> {
     type B = SquareBounds;
@@ -300,22 +322,51 @@ impl<F: ModelFetcher> Interpolator for SquareGridInterpolator<F> {
         self.synth_wl
     }
     fn bounds(&self) -> &SquareBounds {
-        &self.ranges()
+        self.ranges()
     }
-    fn device(&self) -> &tch::Device {
-        &self.device()
-    }
-    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor> {
-        let factors =
-            calculate_interpolation_coefficients(self.ranges(), teff, m, logg, self.device())
-                .context("prepare_interpolate error")?;
+    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<na::DVector<FluxFloat>> {
+        let factors = calculate_interpolation_coefficients(self.ranges(), teff, m, logg)?;
 
-        let i = self.ranges().teff.get_left_index(teff);
-        let j = self.ranges().m.get_left_index(m);
-        let k = self.ranges().logg.get_left_index(logg);
-        let neighbors = self.fetcher.find_neighbors(i, j, k)?;
-        Ok(factors.matmul(&neighbors)?)
-        // Ok(cubic_3d(factors, local_4x4x4))
+        let teff_range = self.ranges().teff.clone();
+        let m_range = self.ranges().m.clone();
+        let logg_range = self.ranges().logg.clone();
+
+        let i = teff_range.get_left_index(teff);
+        let j = m_range.get_left_index(m);
+        let k = logg_range.get_left_index(logg);
+
+        let neighbors = (-1..3)
+            .flat_map(|di| (-1..3).flat_map(move |dj| (-1..3).map(move |dk| (di, dj, dk))))
+            .map(|(di, dj, dk)| {
+                let i = ((i as i64 + di).max(0).min(teff_range.n() as i64 - 1)) as usize;
+                let j = ((j as i64 + dj).max(0).min(m_range.n() as i64 - 1)) as usize;
+                let k = ((k as i64 + dk).max(0).min(logg_range.n() as i64 - 1)) as usize;
+                self.fetcher.find_spectrum(i, j, k)
+            })
+            .collect::<Result<Vec<CowVector>>>()?;
+
+        let model_length = neighbors[0].len();
+        let factors_s =
+            na::SVector::<FluxFloat, 64>::from_iterator(factors.iter().map(|x| *x as FluxFloat));
+        let mut interpolated: na::DVector<FluxFloat> = na::DVector::zeros(model_length);
+        let mut mat = na::SMatrix::<FluxFloat, BATCH_SIZE, 64>::zeros();
+        for i in 0..(model_length / BATCH_SIZE) {
+            let start = i * BATCH_SIZE;
+            for j in 0..64 {
+                mat.set_column(j, &neighbors[j].fixed_rows::<BATCH_SIZE>(start));
+            }
+
+            mat.mul_to(&factors_s, &mut interpolated.rows_mut(start, BATCH_SIZE));
+        }
+        // Add remaining part
+        let start = (model_length / BATCH_SIZE) * BATCH_SIZE;
+        let remaining = model_length - start;
+        let mut mat = na::Matrix::<FluxFloat, na::Dyn, na::Const<64>, _>::zeros(remaining);
+        for j in 0..64 {
+            mat.set_column(j, &neighbors[j].rows(start, remaining));
+        }
+        mat.mul_to(&factors_s, &mut interpolated.rows_mut(start, remaining));
+        Ok(interpolated)
     }
 
     fn produce_model(
@@ -326,14 +377,13 @@ impl<F: ModelFetcher> Interpolator for SquareGridInterpolator<F> {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor> {
-        let interpolated = tensor_to_nalgebra(
-            self.interpolate(teff, m, logg)
-                .context("Error during interpolation step.")?,
-        );
+    ) -> Result<na::DVector<FluxFloat>> {
+        let interpolated = self
+            .interpolate(teff, m, logg)
+            .context("Error during interpolation step.")?;
         let broadened = rot_broad_rv(interpolated, self.synth_wl(), target_dispersion, vsini, rv)
             .context("Error during convolution/resampling step.")?;
-        Ok(nalgebra_to_tensor(broadened, self.device()))
+        Ok(broadened)
     }
 
     fn produce_model_on_grid(
@@ -344,7 +394,7 @@ impl<F: ModelFetcher> Interpolator for SquareGridInterpolator<F> {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor> {
+    ) -> Result<na::DVector<FluxFloat>> {
         let i = self
             .fetcher
             .ranges()
@@ -365,13 +415,13 @@ impl<F: ModelFetcher> Interpolator for SquareGridInterpolator<F> {
             .context("logg not in grid")?;
         let spec = self.fetcher.find_spectrum(i, j, k)?;
         let broadened = rot_broad_rv(
-            tensor_to_nalgebra(spec.into_owned()),
+            spec.into_owned(),
             self.synth_wl(),
             target_dispersion,
             vsini,
             rv,
         )?;
-        Ok(nalgebra_to_tensor(broadened, self.device()))
+        Ok(broadened)
     }
 }
 
@@ -680,11 +730,8 @@ impl<'a, F: ModelFetcher> Interpolator for CompoundInterpolator<F> {
     fn bounds(&self) -> &CompoundBounds {
         &self.bounds
     }
-    fn device(&self) -> &tch::Device {
-        &self.interpolators[0].device()
-    }
 
-    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor> {
+    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<na::DVector<FluxFloat>> {
         let i = self.choose_grid(teff, logg);
         self.interpolators[i].interpolate(teff, m, logg)
     }
@@ -697,7 +744,7 @@ impl<'a, F: ModelFetcher> Interpolator for CompoundInterpolator<F> {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor> {
+    ) -> Result<na::DVector<FluxFloat>> {
         let i = self.choose_grid(teff, logg);
         self.interpolators[i].produce_model(target_dispersion, teff, m, logg, vsini, rv)
     }
@@ -709,7 +756,7 @@ impl<'a, F: ModelFetcher> Interpolator for CompoundInterpolator<F> {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor> {
+    ) -> Result<na::DVector<FluxFloat>> {
         let i = self.choose_grid(teff, logg);
         self.interpolators[i].produce_model_on_grid(target_dispersion, teff, m, logg, vsini, rv)
     }

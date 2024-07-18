@@ -1,5 +1,5 @@
 use crate::convolve_rv::WavelengthDispersion;
-use crate::interpolate::{tensor_to_nalgebra, Bounds, Interpolator};
+use crate::interpolate::{Bounds, Interpolator, FluxFloat};
 use crate::particleswarm;
 use anyhow::{anyhow, Context, Result};
 use argmin::core::observers::{Observe, ObserverMode};
@@ -7,14 +7,12 @@ use argmin::core::{CostFunction, Error, Executor, PopulationState, State, KV};
 use argmin::solver::brent::BrentRoot;
 use enum_dispatch::enum_dispatch;
 use nalgebra as na;
+use num_traits::Float;
 use rayon::prelude::*;
 use serde::Serialize;
-use std::default;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
-use num_traits::Float;
-
 
 /// Scale labels by this amount during fitting
 pub const SCALING: na::SVector<f64, 5> =
@@ -22,13 +20,13 @@ pub const SCALING: na::SVector<f64, 5> =
 
 /// Observed specrum with flux and variance
 pub struct ObservedSpectrum {
-    pub flux: na::DVector<f32>,
-    pub var: na::DVector<f32>,
+    pub flux: na::DVector<FluxFloat>,
+    pub var: na::DVector<FluxFloat>,
 }
 
 impl ObservedSpectrum {
     /// Load observed spectrum from vector of flux and vector of variance
-    pub fn from_vecs(flux: Vec<f32>, var: Vec<f32>) -> Self {
+    pub fn from_vecs(flux: Vec<FluxFloat>, var: Vec<FluxFloat>) -> Self {
         let flux = na::DVector::from_vec(flux);
         let var = na::DVector::from_vec(var);
         Self { flux, var }
@@ -42,22 +40,22 @@ pub trait ContinuumFitter: Send + Sync {
     fn fit_continuum(
         &self,
         observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<f32>,
-    ) -> Result<(na::DVector<f32>, f64)>;
+        synthetic_spectrum: &na::DVector<FluxFloat>,
+    ) -> Result<(na::DVector<FluxFloat>, f64)>;
 
     /// Fit the continuum and return  its flux values
     fn fit_continuum_and_return_continuum(
         &self,
         observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<f32>,
-    ) -> Result<na::DVector<f32>>;
+        synthetic_spectrum: &na::DVector<FluxFloat>,
+    ) -> Result<na::DVector<FluxFloat>>;
 
     /// Fit the continuum and return the synthetic spectrum (model+pseudocontinuum)
     fn fit_continuum_and_return_fit(
         &self,
         observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<f32>,
-    ) -> Result<na::DVector<f32>> {
+        synthetic_spectrum: &na::DVector<FluxFloat>,
+    ) -> Result<na::DVector<FluxFloat>> {
         let continuum =
             self.fit_continuum_and_return_continuum(observed_spectrum, synthetic_spectrum)?;
         Ok(continuum.component_mul(synthetic_spectrum))
@@ -67,19 +65,19 @@ pub trait ContinuumFitter: Send + Sync {
 /// Continuum fitting function that is a linear model
 #[derive(Clone)]
 pub struct LinearModelFitter {
-    design_matrix: na::DMatrix<f32>,
-    svd: na::linalg::SVD<f32, na::Dyn, na::Dyn>,
+    design_matrix: na::DMatrix<FluxFloat>,
+    svd: na::linalg::SVD<FluxFloat, na::Dyn, na::Dyn>,
 }
 
 impl LinearModelFitter {
     /// Make linear model fitter from design matrix
-    pub fn new(design_matrix: na::DMatrix<f32>) -> Self {
+    pub fn new(design_matrix: na::DMatrix<FluxFloat>) -> Self {
         let svd = na::linalg::SVD::new(design_matrix.clone(), true, true);
         Self { design_matrix, svd }
     }
 
     /// Solve the linear model
-    fn solve(&self, b: &na::DVector<f32>, epsilon: f32) -> Result<na::DVector<f32>, &'static str> {
+    fn solve(&self, b: &na::DVector<FluxFloat>, epsilon: FluxFloat) -> Result<na::DVector<FluxFloat>, &'static str> {
         self.svd.solve(b, epsilon)
     }
 }
@@ -88,8 +86,8 @@ impl ContinuumFitter for LinearModelFitter {
     fn fit_continuum(
         &self,
         observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<f32>,
-    ) -> Result<(na::DVector<f32>, f64)> {
+        synthetic_spectrum: &na::DVector<FluxFloat>,
+    ) -> Result<(na::DVector<FluxFloat>, f64)> {
         let epsilon = 1e-14;
         let b = observed_spectrum.flux.component_div(synthetic_spectrum);
         let solution = self.solve(&b, epsilon).map_err(|err| anyhow!(err))?;
@@ -101,16 +99,16 @@ impl ContinuumFitter for LinearModelFitter {
         let residuals_cut = residuals.rows(20, synthetic_spectrum.len() - 40);
         let var = &observed_spectrum.var;
         let var_cut = var.rows(20, var.len() - 40);
-        let chi2 =
-            residuals_cut.component_div(&var_cut).dot(&residuals_cut) as f64 / residuals.len() as f64;
+        let chi2 = residuals_cut.component_div(&var_cut).dot(&residuals_cut) as f64
+            / residuals.len() as f64;
         Ok((solution, chi2))
     }
 
     fn fit_continuum_and_return_continuum(
         &self,
         observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<f32>,
-    ) -> Result<na::DVector<f32>> {
+        synthetic_spectrum: &na::DVector<FluxFloat>,
+    ) -> Result<na::DVector<FluxFloat>> {
         let epsilon = 1e-14;
         let b = observed_spectrum.flux.component_div(synthetic_spectrum);
         let solution = self.solve(&b, epsilon).map_err(|err| anyhow!(err))?;
@@ -130,9 +128,9 @@ fn map_range<F: Float>(x: F, from_low: F, from_high: F, to_low: F, to_high: F, c
 }
 
 /// Chunk blending function
-fn poly_blend(x: f32) -> f32 {
+fn poly_blend(x: FluxFloat) -> FluxFloat {
     let x_c = x.max(0.0).min(1.0);
-    let s = f32::sin(x_c * std::f32::consts::PI / 2.0);
+    let s = FluxFloat::sin(x_c * std::f32::consts::PI / 2.0);
     s * s
 }
 
@@ -143,8 +141,8 @@ pub struct ChunkFitter {
     p_order: usize,
     wl: na::DVector<f64>,
     chunks_startstop: na::DMatrix<usize>,
-    design_matrices: Vec<na::DMatrix<f32>>,
-    svds: Vec<na::linalg::SVD<f32, na::Dyn, na::Dyn>>,
+    design_matrices: Vec<na::DMatrix<FluxFloat>>,
+    svds: Vec<na::linalg::SVD<FluxFloat, na::Dyn, na::Dyn>>,
 }
 
 impl ChunkFitter {
@@ -185,9 +183,9 @@ impl ChunkFitter {
                 .rows(start, stop - start)
                 .map(|x| map_range(x, wl[start], wl[stop - 1], -1.0, 1.0, false));
 
-            let mut a = na::DMatrix::<f32>::zeros(stop - start, p_order + 1);
+            let mut a = na::DMatrix::<FluxFloat>::zeros(stop - start, p_order + 1);
             for i in 0..(p_order + 1) {
-                a.set_column(i, &wl_remap.map(|x| x.powi(i as i32) as f32));
+                a.set_column(i, &wl_remap.map(|x| x.powi(i as i32) as FluxFloat));
             }
             dms.push(a.clone());
             svds.push(na::linalg::SVD::new(a, true, true));
@@ -203,7 +201,7 @@ impl ChunkFitter {
         }
     }
 
-    pub fn _fit_chunks(&self, y: &na::DVector<f32>) -> Vec<na::DVector<f32>> {
+    pub fn _fit_chunks(&self, y: &na::DVector<FluxFloat>) -> Vec<na::DVector<FluxFloat>> {
         let mut pfits = Vec::new();
         for c in 0..self.n_chunks {
             let start = self.chunks_startstop[(c, 0)];
@@ -217,15 +215,15 @@ impl ChunkFitter {
         pfits
     }
 
-    pub fn build_continuum_from_chunks(&self, pfits: Vec<na::DVector<f32>>) -> na::DVector<f32> {
-        let polynomials: Vec<na::DVector<f32>> = self
+    pub fn build_continuum_from_chunks(&self, pfits: Vec<na::DVector<FluxFloat>>) -> na::DVector<FluxFloat> {
+        let polynomials: Vec<na::DVector<FluxFloat>> = self
             .design_matrices
             .iter()
             .zip(pfits.iter())
             .map(|(dm, p)| dm * p)
             .collect();
 
-        let mut continuum = na::DVector::<f32>::zeros(self.wl.len());
+        let mut continuum = na::DVector::<FluxFloat>::zeros(self.wl.len());
 
         // First chunk
         let start = self.chunks_startstop[(0, 0)];
@@ -240,9 +238,9 @@ impl ChunkFitter {
             let stop_prev = self.chunks_startstop[(c - 1, 1)];
             let fac = self.wl.rows(start, stop - start).map(|x| {
                 poly_blend(map_range(
-                    x as f32,
-                    self.wl[stop_prev - 1] as f32,
-                    self.wl[start] as f32,
+                    x as FluxFloat,
+                    self.wl[stop_prev - 1] as FluxFloat,
+                    self.wl[start] as FluxFloat,
                     0.0,
                     1.0,
                     false,
@@ -258,8 +256,8 @@ impl ChunkFitter {
     pub fn fit_and_return_continuum(
         &self,
         observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<f32>,
-    ) -> (Vec<na::DVector<f32>>, na::DVector<f32>) {
+        synthetic_spectrum: &na::DVector<FluxFloat>,
+    ) -> (Vec<na::DVector<FluxFloat>>, na::DVector<FluxFloat>) {
         let flux = &observed_spectrum.flux;
         let y = flux.component_div(synthetic_spectrum);
         let pfits = self._fit_chunks(&y);
@@ -272,8 +270,8 @@ impl ContinuumFitter for ChunkFitter {
     fn fit_continuum(
         &self,
         observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<f32>,
-    ) -> Result<(na::DVector<f32>, f64)> {
+        synthetic_spectrum: &na::DVector<FluxFloat>,
+    ) -> Result<(na::DVector<FluxFloat>, f64)> {
         let flux = &observed_spectrum.flux;
         let var = &observed_spectrum.var;
         let (pfits, cont) = self.fit_and_return_continuum(observed_spectrum, synthetic_spectrum);
@@ -285,16 +283,16 @@ impl ContinuumFitter for ChunkFitter {
         let residuals = flux - fit;
         let var_cut = var.rows(20, var.len() - 40);
         let residuals_cut = residuals.rows(20, flux.len() - 40);
-        let chi2 =
-            residuals_cut.component_div(&var_cut).dot(&residuals_cut) as f64 / residuals.len() as f64;
+        let chi2 = residuals_cut.component_div(&var_cut).dot(&residuals_cut) as f64
+            / residuals.len() as f64;
         Ok((params, chi2))
     }
 
     fn fit_continuum_and_return_continuum(
         &self,
         observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<f32>,
-    ) -> Result<na::DVector<f32>> {
+        synthetic_spectrum: &na::DVector<FluxFloat>,
+    ) -> Result<na::DVector<FluxFloat>> {
         let (_pfits, fit) = self.fit_and_return_continuum(observed_spectrum, synthetic_spectrum);
         Ok(fit)
     }
@@ -303,11 +301,11 @@ impl ContinuumFitter for ChunkFitter {
 /// Used to test fitting with a fixed continuum
 #[derive(Clone, Debug)]
 pub struct FixedContinuum {
-    continuum: na::DVector<f32>,
+    continuum: na::DVector<FluxFloat>,
 }
 
 impl FixedContinuum {
-    pub fn new(continuum: na::DVector<f32>) -> Self {
+    pub fn new(continuum: na::DVector<FluxFloat>) -> Self {
         Self { continuum }
     }
 }
@@ -316,8 +314,8 @@ impl ContinuumFitter for FixedContinuum {
     fn fit_continuum(
         &self,
         observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<f32>,
-    ) -> Result<(na::DVector<f32>, f64)> {
+        synthetic_spectrum: &na::DVector<FluxFloat>,
+    ) -> Result<(na::DVector<FluxFloat>, f64)> {
         // u8 is a dummy type
         let residuals = &observed_spectrum.flux - synthetic_spectrum.component_mul(&self.continuum);
         let chi2 = residuals
@@ -330,8 +328,8 @@ impl ContinuumFitter for FixedContinuum {
     fn fit_continuum_and_return_continuum(
         &self,
         _observed_spectrum: &ObservedSpectrum,
-        _synthetic_spectrum: &na::DVector<f32>,
-    ) -> Result<na::DVector<f32>> {
+        _synthetic_spectrum: &na::DVector<FluxFloat>,
+    ) -> Result<na::DVector<FluxFloat>> {
         Ok(self.continuum.clone())
     }
 }
@@ -343,11 +341,11 @@ impl ContinuumFitter for ConstantContinuum {
     fn fit_continuum(
         &self,
         observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<f32>,
-    ) -> Result<(na::DVector<f32>, f64)> {
+        synthetic_spectrum: &na::DVector<FluxFloat>,
+    ) -> Result<(na::DVector<FluxFloat>, f64)> {
         let n = synthetic_spectrum.len();
         let target = observed_spectrum.flux.component_div(synthetic_spectrum);
-        let mean = target.iter().sum::<f32>() / n as f32;
+        let mean = target.iter().sum::<FluxFloat>() / n as FluxFloat;
         let continuum = nalgebra::DVector::from_element(n, mean);
         let residuals = &observed_spectrum.flux - synthetic_spectrum.component_mul(&continuum);
         let chi2 = residuals
@@ -360,11 +358,11 @@ impl ContinuumFitter for ConstantContinuum {
     fn fit_continuum_and_return_continuum(
         &self,
         observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &nalgebra::DVector<f32>,
-    ) -> Result<nalgebra::DVector<f32>> {
+        synthetic_spectrum: &nalgebra::DVector<FluxFloat>,
+    ) -> Result<nalgebra::DVector<FluxFloat>> {
         let n = synthetic_spectrum.len();
         let target = observed_spectrum.flux.component_div(synthetic_spectrum);
-        let mean = target.iter().sum::<f32>() / n as f32;
+        let mean = target.iter().sum::<FluxFloat>() / n as FluxFloat;
         Ok(nalgebra::DVector::from_element(n, mean))
     }
 }
@@ -396,7 +394,7 @@ impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> CostFunct
                 .produce_model(self.target_dispersion, teff, m, logg, vsini, rv)?;
         let (_, ls) = self
             .continuum_fitter
-            .fit_continuum(self.observed_spectrum, &tensor_to_nalgebra(synth_spec))?;
+            .fit_continuum(self.observed_spectrum, &synth_spec)?;
         Ok(ls)
     }
 
@@ -408,7 +406,7 @@ impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> CostFunct
 #[derive(Debug)]
 pub struct OptimizationResult {
     pub labels: [f64; 5],
-    pub continuum_params: na::DVector<f32>,
+    pub continuum_params: na::DVector<FluxFloat>,
     pub ls: f64,
     pub iters: u64,
     pub time: f64,
@@ -558,8 +556,7 @@ pub fn fit_pso<I: Interpolator>(
         best_vsini,
         best_rv,
     )?;
-    let (continuum_params, _) =
-        continuum_fitter.fit_continuum(observed_spectrum, &tensor_to_nalgebra(synth_spec))?;
+    let (continuum_params, _) = continuum_fitter.fit_continuum(observed_spectrum, &synth_spec)?;
     let time = match result.state.time {
         Some(t) => t.as_secs_f64(),
         None => 0.0,
@@ -573,29 +570,7 @@ pub fn fit_pso<I: Interpolator>(
     })
 }
 
-pub fn fit_continuum_bulk<I: Interpolator>(
-    interpolator: &I,
-    target_dispersion: &impl WavelengthDispersion,
-    observed_spectrum: &ObservedSpectrum,
-    labels: Vec<[f64; 5]>,
-    continuum_fitter: &impl ContinuumFitter,
-) -> Vec<Option<(Vec<f32>, f64)>> {
-    labels
-        .into_par_iter()
-        .map(|[teff, m, logg, vsini, rv]| {
-            let synth_spec = interpolator
-                .produce_model(target_dispersion, teff, m, logg, vsini, rv)
-                .ok()?;
-
-            let (params, ls) = continuum_fitter
-                .fit_continuum(observed_spectrum, &tensor_to_nalgebra(synth_spec))
-                .ok()?;
-            Some((params.data.into(), ls))
-        })
-        .collect()
-}
-
-struct Chi2LandscapeFitCost<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
+struct ModelFitCost<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
     interpolator: &'a I,
     target_dispersion: &'a T,
     observed_spectrum: &'a ObservedSpectrum,
@@ -607,7 +582,7 @@ struct Chi2LandscapeFitCost<'a, I: Interpolator, T: WavelengthDispersion, F: Con
 }
 
 impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> CostFunction
-    for Chi2LandscapeFitCost<'a, I, T, F>
+    for ModelFitCost<'a, I, T, F>
 {
     type Param = f64;
     type Output = f64;
@@ -631,7 +606,7 @@ impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> CostFunct
             ))?;
         let (_, chi2) = self
             .continuum_fitter
-            .fit_continuum(self.observed_spectrum, &tensor_to_nalgebra(synth_spec))?;
+            .fit_continuum(self.observed_spectrum, &synth_spec)?;
         Ok(chi2 - self.target_value)
     }
 }
@@ -654,8 +629,7 @@ pub fn uncertainty_chi2<I: Interpolator>(
         label[3],
         label[4],
     )?;
-    let (_, best_chi2) =
-        continuum_fitter.fit_continuum(observed_spectrum, &tensor_to_nalgebra(best_synth_spec))?;
+    let (_, best_chi2) = continuum_fitter.fit_continuum(observed_spectrum, &best_synth_spec)?;
     let observed_wavelength = target_dispersion.wavelength();
     let n_p = observed_wavelength.len();
     let first_wl = observed_wavelength[0];
@@ -664,7 +638,7 @@ pub fn uncertainty_chi2<I: Interpolator>(
     let target_chi = best_chi2 * (1.0 + (2.0 / n).sqrt());
     Ok(core::array::from_fn(|i| {
         let bounds = interpolator.bounds().clone();
-        let costfunction = Chi2LandscapeFitCost {
+        let costfunction = ModelFitCost {
             interpolator,
             target_dispersion,
             observed_spectrum,
@@ -690,7 +664,7 @@ pub fn uncertainty_chi2<I: Interpolator>(
             .context("result_left.state.get_best_param()")?;
         let left = left_sol * search_radius[i];
 
-        let costfunction = Chi2LandscapeFitCost {
+        let costfunction = ModelFitCost {
             interpolator,
             target_dispersion,
             observed_spectrum,

@@ -1,15 +1,14 @@
+use crate::interpolate::{WlGrid, FluxFloat};
 use anyhow::{anyhow, Result};
 use enum_dispatch::enum_dispatch;
 use nalgebra as na;
 use realfft::RealFftPlanner;
 use std::ops::AddAssign;
 
-use crate::interpolate::WlGrid;
-
 #[enum_dispatch]
 pub trait WavelengthDispersion: Sync + Send {
     fn wavelength(&self) -> &na::DVector<f64>;
-    fn convolve(&self, flux: na::DVector<f32>) -> Result<na::DVector<f32>>;
+    fn convolve(&self, flux: na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>>;
 }
 
 #[derive(Clone, Debug)]
@@ -19,7 +18,7 @@ impl WavelengthDispersion for NoDispersionTarget {
     fn wavelength(&self) -> &na::DVector<f64> {
         &self.0
     }
-    fn convolve(&self, flux: na::DVector<f32>) -> Result<na::DVector<f32>> {
+    fn convolve(&self, flux: na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>> {
         Ok(flux)
     }
 }
@@ -27,8 +26,8 @@ impl WavelengthDispersion for NoDispersionTarget {
 fn resample_observed_to_synth(
     wl_obs: &na::DVector<f64>,
     wl_synth: WlGrid,
-    y: &na::DVector<f32>,
-) -> Result<na::DVector<f32>> {
+    y: &na::DVector<FluxFloat>,
+) -> Result<na::DVector<FluxFloat>> {
     if wl_obs.len() != y.len() {
         return Err(anyhow!(
             "Length of observed wavelength and flux are different"
@@ -45,21 +44,21 @@ fn resample_observed_to_synth(
             if j == wl_obs.len() - 1 {
                 y[j]
             } else {
-                let weight = ((x - wl_obs[j]) / (wl_obs[j + 1] - wl_obs[j])) as f32;
+                let weight = ((x - wl_obs[j]) / (wl_obs[j + 1] - wl_obs[j])) as FluxFloat;
                 (1.0 - weight) * y[j] + weight * y[j + 1]
             }
         }),
     ))
 }
 
-fn make_gaussian(arr: &mut [f32], sigma: f32) {
+fn make_gaussian(arr: &mut [FluxFloat], sigma: FluxFloat) {
     let n = arr.len();
     let mid = (n - 1) / 2;
     for i in 0..n {
-        let x = (i as f32 - mid as f32) / sigma;
+        let x = (i as FluxFloat - mid as FluxFloat) / sigma;
         arr[i] = (-0.5 * x * x).exp();
     }
-    let sum = arr.iter().sum::<f32>();
+    let sum = arr.iter().sum::<FluxFloat>();
     for a in arr.iter_mut() {
         *a /= sum;
     }
@@ -69,14 +68,14 @@ fn make_gaussian(arr: &mut [f32], sigma: f32) {
 pub struct VariableTargetDispersion {
     pub observed_wl: na::DVector<f64>,
     pub synth_wl: WlGrid,
-    pub kernels: na::DMatrix<f32>,
+    pub kernels: na::DMatrix<FluxFloat>,
     pub n: usize,
 }
 
 impl VariableTargetDispersion {
     pub fn new(
         wavelength: na::DVector<f64>,
-        dispersion: &na::DVector<f32>,
+        dispersion: &na::DVector<FluxFloat>,
         synth_wl: WlGrid,
     ) -> Result<Self> {
         // Resample observed dispersion to synthetic wavelength grid
@@ -88,12 +87,12 @@ impl VariableTargetDispersion {
                     .iter()
                     .max_by(|a, b| a.total_cmp(b))
                     .unwrap()
-                    / step as f32
+                    / step as FluxFloat
             }
             WlGrid::Logspace(_, step, _) => dispersion_resampled
                 .iter()
                 .zip(synth_wl.iterate())
-                .map(|(disp, wl)| disp / (step * std::f64::consts::LN_10 * wl) as f32)
+                .map(|(disp, wl)| disp / (step * std::f64::consts::LN_10 * wl) as FluxFloat)
                 .max_by(|a, b| a.total_cmp(b))
                 .unwrap(),
         };
@@ -111,8 +110,10 @@ impl VariableTargetDispersion {
             .zip(synth_wl.iterate().zip(dispersion_resampled.iter()))
         {
             let sigma = match synth_wl {
-                WlGrid::Linspace(_, step, _) => disp / step as f32,
-                WlGrid::Logspace(_, step, _) => disp / (step * std::f64::consts::LN_10 * wl) as f32,
+                WlGrid::Linspace(_, step, _) => disp / step as FluxFloat,
+                WlGrid::Logspace(_, step, _) => {
+                    disp / (step * std::f64::consts::LN_10 * wl) as FluxFloat
+                }
             };
             make_gaussian(kernel.as_mut_slice(), sigma);
         }
@@ -123,7 +124,6 @@ impl VariableTargetDispersion {
             n: (kernel_size - 1) / 2_usize,
         })
     }
-
 }
 
 impl WavelengthDispersion for VariableTargetDispersion {
@@ -131,7 +131,7 @@ impl WavelengthDispersion for VariableTargetDispersion {
         &self.observed_wl
     }
 
-    fn convolve(&self, flux_arr: na::DVector<f32>) -> Result<na::DVector<f32>> {
+    fn convolve(&self, flux_arr: na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>> {
         if flux_arr.len() != self.synth_wl.n() {
             return Err(anyhow!(
                 "Trying to convolve spectrum with different length than synthetic wavelength grid. flux_arr: {:?}, synth_wl: {:?}",
@@ -152,7 +152,7 @@ impl WavelengthDispersion for VariableTargetDispersion {
 
 const FFTSIZE: usize = 2048;
 
-fn build_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<f32> {
+fn build_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<FluxFloat> {
     let dvelo = match synth_wl {
         WlGrid::Linspace(first, step, N) => step / (first + 0.5 * step * (N as f64)),
         WlGrid::Logspace(_, step, _) => std::f64::consts::LN_10 * step,
@@ -168,42 +168,43 @@ fn build_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<f32> {
     }
 
     let y: Vec<f64> = velo_k.iter().map(|&v| 1.0 - (v / vrot).powi(2)).collect();
-    let mut kernel: Vec<f32> = y
+    let mut kernel: Vec<FluxFloat> = y
         .iter()
         .map(|&y| {
             if y > 0.0 {
                 ((2.0 * (1.0 - epsilon) * y.sqrt() + std::f64::consts::PI * epsilon / 2.0 * y)
-                    / (std::f64::consts::PI * vrot * (1.0 - epsilon / 3.0))) as f32
+                    / (std::f64::consts::PI * vrot * (1.0 - epsilon / 3.0)))
+                    as FluxFloat
             } else {
                 0.0
             }
         })
         .collect();
-    let sum: f32 = kernel.iter().sum();
+    let sum: FluxFloat = kernel.iter().sum();
     for k in &mut kernel {
         *k /= sum;
     }
     kernel
 }
 
-fn pad_with_zeros(arr: na::DVectorView<f32>, new_width: usize) -> na::DVector<f32> {
+fn pad_with_zeros(arr: na::DVectorView<FluxFloat>, new_width: usize) -> na::DVector<FluxFloat> {
     let mut padded = na::DVector::zeros(new_width);
     padded.rows_mut(0, arr.len()).copy_from(&arr);
     padded
 }
 
 pub fn oaconvolve(
-    input_array: &na::DVector<f32>,
+    input_array: &na::DVector<FluxFloat>,
     vsini: f64,
     synth_wl: WlGrid,
-) -> (na::DVector<f32>, usize) {
+) -> (na::DVector<FluxFloat>, usize) {
     if vsini < 1.0 {
-        let vec = input_array.into_iter().map(f32::to_owned).collect();
+        let vec = input_array.into_iter().map(FluxFloat::to_owned).collect();
         return (na::DVector::from_vec(vec), 0);
     }
 
     let n = FFTSIZE;
-    let mut planner: RealFftPlanner<f32> = RealFftPlanner::new();
+    let mut planner: RealFftPlanner<FluxFloat> = RealFftPlanner::new();
     let fft = planner.plan_fft_forward(n);
     let ifft = planner.plan_fft_inverse(n);
 
@@ -236,7 +237,7 @@ pub fn oaconvolve(
         ifft.process(transformed.as_mut_slice(), re_transformed.as_mut_slice())
             .unwrap();
         y.rows_mut(position, n)
-            .add_assign(&re_transformed / n as f32);
+            .add_assign(&re_transformed / n as FluxFloat);
     }
 
     (y, m)
@@ -244,30 +245,30 @@ pub fn oaconvolve(
 
 pub fn ccf(
     input_wl: &na::DVector<f64>,
-    input_spectrum_inverted: &na::DVector<f32>,
-    model_spectrum_inverted: &na::DVector<f32>,
+    input_spectrum_inverted: &na::DVector<FluxFloat>,
+    model_spectrum_inverted: &na::DVector<FluxFloat>,
     kernel_len: usize,
     synth_wl: WlGrid,
     rvs: &Vec<f64>,
-) -> Result<Vec<f32>> {
+) -> Result<Vec<FluxFloat>> {
     let n = input_wl.len();
 
     rvs.iter()
         .map(|rv| {
             let resampled =
                 shift_and_resample(model_spectrum_inverted, kernel_len, synth_wl, input_wl, *rv)?;
-            Ok(input_spectrum_inverted.dot(&resampled) / (n as f32))
+            Ok(input_spectrum_inverted.dot(&resampled) / (n as FluxFloat))
         })
         .collect()
 }
 
 pub fn shift_and_resample(
-    input_array: &na::DVector<f32>,
+    input_array: &na::DVector<FluxFloat>,
     kernel_len: usize,
     synth_wl: WlGrid,
     observed_wl: &na::DVector<f64>,
     rv: f64,
-) -> Result<na::DVector<f32>> {
+) -> Result<na::DVector<FluxFloat>> {
     let start = kernel_len / 2;
     let shift_factor = 1.0 - rv / 299792.0;
     let mut output = na::DVector::zeros(observed_wl.len());
@@ -297,19 +298,19 @@ pub fn shift_and_resample(
         let source_wl = obs_wl * shift_factor;
         let index = synth_wl.get_float_index_of_wl(source_wl);
         let j = index.floor() as usize;
-        let weight = index as f32 - j as f32;
+        let weight = index as FluxFloat - j as FluxFloat;
         output[i] = (1.0 - weight) * input_array[j + start] + weight * input_array[j + start + 1];
     }
     Ok(output)
 }
 
 pub fn rot_broad_rv(
-    input_array: na::DVector<f32>,
+    input_array: na::DVector<FluxFloat>,
     synth_wl: WlGrid,
     target_dispersion: &impl WavelengthDispersion,
     vsini: f64,
     rv: f64,
-) -> Result<na::DVector<f32>> {
+) -> Result<na::DVector<FluxFloat>> {
     let observed_wl = target_dispersion.wavelength();
     let convolved_for_resolution = target_dispersion.convolve(input_array)?;
     let (output, kernel_len) = oaconvolve(&convolved_for_resolution, vsini, synth_wl);
