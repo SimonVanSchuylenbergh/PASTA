@@ -1,3 +1,4 @@
+mod tensor;
 mod convolve_rv;
 mod cubic;
 mod fitting;
@@ -5,7 +6,6 @@ mod interpolate;
 mod model_fetchers;
 mod particleswarm;
 use anyhow::Result;
-use burn::backend::LibTorch;
 use convolve_rv::{NoDispersionTarget, VariableTargetDispersion, WavelengthDispersion};
 use enum_dispatch::enum_dispatch;
 use fitting::{
@@ -24,8 +24,6 @@ use numpy::array::PyArray;
 use numpy::{Ix1, Ix2};
 use pyo3::{prelude::*, pyclass};
 use rayon::prelude::*;
-
-type Backend = LibTorch;
 
 /// Fit polynomial to data.
 fn polyfit<const N: usize>(
@@ -123,7 +121,7 @@ pub struct PyOptimizationResult {
     pub labels: (f64, f64, f64, f64, f64),
     /// Fitted parameters for the continuum fitting function
     #[pyo3(get)]
-    pub continuum_params: Vec<f64>,
+    pub continuum_params: Vec<f32>,
     #[pyo3(get)]
     /// Chi2 value
     pub ls: f64,
@@ -178,7 +176,7 @@ pub struct PyWavelengthDispersion(WavelengthDispersionWrapper);
 #[pyfunction]
 fn VariableResolutionDispersion(
     wl: Vec<f64>,
-    disp: Vec<f64>,
+    disp: Vec<f32>,
     synth_wl: WlGrid,
 ) -> PyWavelengthDispersion {
     PyWavelengthDispersion(
@@ -209,10 +207,10 @@ pub struct PyContinuumFitter(ContinuumFitterWrapper);
 impl PyContinuumFitter {
     fn fit_and_return_continuum(
         &self,
-        synth: Vec<f64>,
-        y: Vec<f64>,
-        yerr: Vec<f64>,
-    ) -> PyResult<Vec<f64>> {
+        synth: Vec<f32>,
+        y: Vec<f32>,
+        yerr: Vec<f32>,
+    ) -> PyResult<Vec<f32>> {
         let observed_spectrum = ObservedSpectrum::from_vecs(y, yerr);
         let result = self
             .0
@@ -241,7 +239,7 @@ fn ChunkContinuumFitter(
 }
 
 #[pyfunction]
-fn FixedContinuumFitter(continuum: Vec<f64>) -> PyContinuumFitter {
+fn FixedContinuumFitter(continuum: Vec<f32>) -> PyContinuumFitter {
     PyContinuumFitter(FixedContinuum::new(continuum.into()).into())
 }
 
@@ -251,9 +249,9 @@ fn ConstantContinuumFitter() -> PyContinuumFitter {
 }
 
 /// Build LinearModelFitter object from design matrix
-fn convert_dm(design_matrix: Vec<f64>, len: usize) -> LinearModelFitter {
+fn convert_dm(design_matrix: Vec<f32>, len: usize) -> LinearModelFitter {
     let n_params = design_matrix.len() / len;
-    LinearModelFitter::new(na::DMatrix::<f64>::from_vec(len, n_params, design_matrix))
+    LinearModelFitter::new(na::DMatrix::<f32>::from_vec(len, n_params, design_matrix))
 }
 
 macro_rules! implement_methods {
@@ -270,8 +268,8 @@ macro_rules! implement_methods {
                 logg: f64,
                 vsini: f64,
                 rv: f64,
-            ) -> Bound<'a, PyArray<f64, Ix1>> {
-                let interpolated = tensor_to_nalgebra::<Backend, f64>(
+            ) -> Bound<'a, PyArray<f32, Ix1>> {
+                let interpolated = tensor_to_nalgebra(
                     self.interpolator
                         .produce_model(&dispersion.0, teff, m, logg, vsini, rv)
                         .unwrap(),
@@ -284,16 +282,16 @@ macro_rules! implement_methods {
                 &mut self,
                 py: Python<'a>,
                 wl: Vec<f64>,
-                disp: Vec<f64>,
-            ) -> Bound<'a, PyArray<f64, Ix2>> {
+                disp: Vec<f32>,
+            ) -> Bound<'a, PyArray<f32, Ix2>> {
                 let target_dispersion = VariableTargetDispersion::new(
                     wl.into(),
                     &disp.into(),
                     self.interpolator.synth_wl().clone(),
                 )
                 .unwrap();
-                let matrix = target_dispersion.get_kernels();
-                let v: Vec<Vec<f64>> = matrix
+                let matrix = target_dispersion.kernels;
+                let v: Vec<Vec<f32>> = matrix
                     .row_iter()
                     .map(|x| x.data.into_owned().into())
                     .collect();
@@ -308,18 +306,18 @@ macro_rules! implement_methods {
                 observed_wavelength: Vec<f64>,
                 labels: Vec<(f64, f64, f64, f64, f64)>,
                 progress: Option<bool>,
-            ) -> Bound<'a, PyArray<f64, Ix2>> {
+            ) -> Bound<'a, PyArray<f32, Ix2>> {
                 let target_dispersion = NoDispersionTarget(observed_wavelength.into());
                 let progress_bar = if progress.unwrap_or(false) {
                     ProgressBar::new(labels.len() as u64)
                 } else {
                     ProgressBar::hidden()
                 };
-                let vec: Vec<Vec<f64>> = labels
+                let vec: Vec<Vec<f32>> = labels
                     .into_par_iter()
                     .map(|(teff, m, logg, vsini, rv)| {
                         progress_bar.inc(1);
-                        tensor_to_nalgebra::<Backend, f64>(
+                        tensor_to_nalgebra(
                             self.interpolator
                                 .produce_model(&target_dispersion, teff, m, logg, vsini, rv)
                                 .unwrap(),
@@ -342,8 +340,8 @@ macro_rules! implement_methods {
                 logg: f64,
                 vsini: f64,
                 rv: f64,
-            ) -> PyResult<Vec<f64>> {
-                let out = tensor_to_nalgebra::<Backend, f64>(
+            ) -> PyResult<Vec<f32>> {
+                let out = tensor_to_nalgebra(
                     self.interpolator
                         .produce_model_on_grid(&dispersion.0, teff, mh, logg, vsini, rv)
                         .unwrap(),
@@ -353,8 +351,8 @@ macro_rules! implement_methods {
 
             /// Interpolate in grid.
             /// Doesn't do convoluton, shifting and resampling.
-            pub fn interpolate(&mut self, teff: f64, m: f64, logg: f64) -> PyResult<Vec<f64>> {
-                let interpolated = tensor_to_nalgebra::<Backend, f64>(
+            pub fn interpolate(&mut self, teff: f64, m: f64, logg: f64) -> PyResult<Vec<f32>> {
+                let interpolated = tensor_to_nalgebra(
                     self.interpolator.interpolate(teff, m, logg).unwrap(),
                 );
                 Ok(interpolated.iter().copied().collect())
@@ -367,12 +365,12 @@ macro_rules! implement_methods {
                 &self,
                 fitter: PyContinuumFitter,
                 dispersion: PyWavelengthDispersion,
-                observed_flux: Vec<f64>,
-                observed_var: Vec<f64>,
+                observed_flux: Vec<f32>,
+                observed_var: Vec<f32>,
                 label: (f64, f64, f64, f64, f64),
-            ) -> PyResult<Vec<f64>> {
+            ) -> PyResult<Vec<f32>> {
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
-                let synth = tensor_to_nalgebra::<Backend, f64>(
+                let synth = tensor_to_nalgebra(
                     self.interpolator
                         .produce_model(&dispersion.0, label.0, label.1, label.2, label.2, label.4)
                         .unwrap(),
@@ -393,12 +391,12 @@ macro_rules! implement_methods {
                 &self,
                 fitter: PyContinuumFitter,
                 dispersion: PyWavelengthDispersion,
-                observed_flux: Vec<f64>,
-                observed_var: Vec<f64>,
+                observed_flux: Vec<f32>,
+                observed_var: Vec<f32>,
                 label: [f64; 5],
-            ) -> PyResult<Vec<f64>> {
+            ) -> PyResult<Vec<f32>> {
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
-                let synth = tensor_to_nalgebra::<Backend, f64>(
+                let synth = tensor_to_nalgebra(
                     self.interpolator
                         .produce_model(
                             &dispersion.0,
@@ -424,15 +422,15 @@ macro_rules! implement_methods {
                 &self,
                 fitter: PyContinuumFitter,
                 dispersion: PyWavelengthDispersion,
-                observed_flux: Vec<f64>,
-                observed_var: Vec<f64>,
+                observed_flux: Vec<f32>,
+                observed_var: Vec<f32>,
                 labels: Vec<[f64; 5]>,
             ) -> PyResult<Vec<f64>> {
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
                 Ok(labels
                     .into_par_iter()
                     .map(|[teff, m, logg, vsini, rv]| {
-                        let synth_model = tensor_to_nalgebra::<Backend, f64>(
+                        let synth_model = tensor_to_nalgebra(
                             self.interpolator
                                 .produce_model(&dispersion.0, teff, m, logg, vsini, rv)
                                 .unwrap(),
@@ -450,9 +448,9 @@ macro_rules! implement_methods {
             pub fn chi2_fixed_continuum(
                 &self,
                 dispersion: PyWavelengthDispersion,
-                continuum: Vec<f64>,
-                observed_flux: Vec<f64>,
-                observed_var: Vec<f64>,
+                continuum: Vec<f32>,
+                observed_flux: Vec<f32>,
+                observed_var: Vec<f32>,
                 labels: Vec<[f64; 5]>,
             ) -> PyResult<Vec<f64>> {
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
@@ -460,7 +458,7 @@ macro_rules! implement_methods {
                 Ok(labels
                     .into_par_iter()
                     .map(|[teff, m, logg, vsini, rv]| {
-                        let synth_model = tensor_to_nalgebra::<Backend, f64>(
+                        let synth_model = tensor_to_nalgebra(
                             self.interpolator
                                 .produce_model(&dispersion.0, teff, m, logg, vsini, rv)
                                 .unwrap(),
@@ -478,8 +476,8 @@ macro_rules! implement_methods {
             pub fn chi2_bulk(
                 &self,
                 observed_wavelength: Vec<Vec<f64>>,
-                observed_flux: Vec<Vec<f64>>,
-                observed_var: Vec<Vec<f64>>,
+                observed_flux: Vec<Vec<f32>>,
+                observed_var: Vec<Vec<f32>>,
                 labels: Vec<[f64; 5]>,
                 progress: Option<bool>,
             ) -> PyResult<Vec<f64>> {
@@ -497,7 +495,7 @@ macro_rules! implement_methods {
                         progress_bar.inc(1);
                         let obs = ObservedSpectrum::from_vecs(flux, var);
                         let target_dispersion = NoDispersionTarget(wl.into());
-                        let synth_model = tensor_to_nalgebra::<Backend, f64>(
+                        let synth_model = tensor_to_nalgebra(
                             self.interpolator
                                 .produce_model(&target_dispersion, teff, m, logg, vsini, rv)
                                 .unwrap(),
@@ -515,8 +513,8 @@ macro_rules! implement_methods {
                 &self,
                 fitter: PyContinuumFitter,
                 dispersion: PyWavelengthDispersion,
-                observed_flux: Vec<f64>,
-                observed_var: Vec<f64>,
+                observed_flux: Vec<f32>,
+                observed_var: Vec<f32>,
                 settings: PSOSettings,
                 save_directory: Option<String>,
                 parallelize: Option<bool>,
@@ -541,8 +539,8 @@ macro_rules! implement_methods {
                 &self,
                 fitter: PyContinuumFitter,
                 dispersion: PyWavelengthDispersion,
-                observed_flux: Vec<f64>,
-                observed_var: Vec<f64>,
+                observed_flux: Vec<f32>,
+                observed_var: Vec<f32>,
                 parameters: [f64; 5],
                 search_radius: Option<[f64; 5]>,
             ) -> [Option<(f64, f64)>; 5] {
@@ -565,8 +563,8 @@ macro_rules! implement_methods {
             pub fn uncertainty_chi2_bulk(
                 &self,
                 observed_wavelengths: Vec<Vec<f64>>,
-                observed_fluxes: Vec<Vec<f64>>,
-                observed_vars: Vec<Vec<f64>>,
+                observed_fluxes: Vec<Vec<f32>>,
+                observed_vars: Vec<Vec<f32>>,
                 parameters: Vec<[f64; 5]>,
                 search_radius: Option<[f64; 5]>,
             ) -> Vec<[Option<(f64, f64)>; 5]> {
@@ -601,8 +599,8 @@ macro_rules! implement_methods {
             pub fn uncertainty_chi2_fixed_cont_bulk(
                 &self,
                 observed_wavelengths: Vec<Vec<f64>>,
-                observed_fluxes: Vec<Vec<f64>>,
-                observed_vars: Vec<Vec<f64>>,
+                observed_fluxes: Vec<Vec<f32>>,
+                observed_vars: Vec<Vec<f32>>,
                 parameters: Vec<[f64; 5]>,
                 search_radius: Option<[f64; 5]>,
             ) -> Vec<[Option<(f64, f64)>; 5]> {
@@ -618,7 +616,7 @@ macro_rules! implement_methods {
                         let target_dispersion = NoDispersionTarget(wl.into());
                         let obs = ObservedSpectrum::from_vecs(flux, var);
                         let cont_fitter = ChunkFitter::new(target_dispersion.0.clone(), 5, 8, 0.2);
-                        let synth = tensor_to_nalgebra::<Backend, f64>(
+                        let synth = tensor_to_nalgebra(
                             self.interpolator
                                 .produce_model(
                                     &target_dispersion,
@@ -692,7 +690,7 @@ macro_rules! implement_methods {
 #[pyclass]
 #[derive(Clone)]
 pub struct OnDiskInterpolator {
-    interpolator: SquareGridInterpolator<OnDiskFetcher<Backend>>,
+    interpolator: SquareGridInterpolator<OnDiskFetcher>,
 }
 
 #[pymethods]
@@ -714,7 +712,7 @@ impl OnDiskInterpolator {
             Range::new(logg_range),
             vsini_range.unwrap_or((1.0, 600.0)),
             rv_range.unwrap_or((-150.0, 150.0)),
-            Default::default(),
+            tch::Device::Cpu,
         );
         Self {
             interpolator: SquareGridInterpolator::new(fetcher, wavelength.0),
@@ -738,7 +736,7 @@ pub struct InMemInterpolator {
 /// Interpolator where all spectra have been loaded into memory.
 #[pyclass]
 pub struct LoadedInMemInterpolator {
-    interpolator: SquareGridInterpolator<InMemFetcher<Backend>>,
+    interpolator: SquareGridInterpolator<InMemFetcher>,
 }
 
 #[pymethods]
@@ -772,8 +770,8 @@ impl InMemInterpolator {
             Range::new(self.logg_range.clone()),
             self.vsini_range.unwrap_or((1.0, 600.0)),
             self.rv_range.unwrap_or((-150.0, 150.0)),
-            Default::default(),
-        );
+            tch::Device::Cpu,
+        ).unwrap();
         LoadedInMemInterpolator {
             interpolator: SquareGridInterpolator::new(fetcher, self.wavelength.0),
         }
@@ -783,7 +781,7 @@ impl InMemInterpolator {
 #[pyclass]
 #[derive(Clone)]
 pub struct CachedInterpolator {
-    interpolator: SquareGridInterpolator<CachedFetcher<Backend>>,
+    interpolator: SquareGridInterpolator<CachedFetcher>,
 }
 
 #[pymethods]
@@ -807,7 +805,7 @@ impl CachedInterpolator {
             vsini_range.unwrap_or((1.0, 600.0)),
             rv_range.unwrap_or((-150.0, 150.0)),
             lrucap.unwrap_or(4000),
-            Default::default(),
+            tch::Device::Cpu,
         );
         Self {
             interpolator: SquareGridInterpolator::new(fetcher, wavelength.0),
@@ -822,7 +820,7 @@ implement_methods!(CachedInterpolator, interpolators::CachedInterpolator);
 /// Compount Interpolator: uses multiple square grids of OnDiskInterpolator
 #[pyclass]
 pub struct OnDiskCompound {
-    interpolator: CompoundInterpolator<OnDiskFetcher<Backend>>,
+    interpolator: CompoundInterpolator<OnDiskFetcher>,
 }
 
 #[pymethods]
@@ -847,7 +845,7 @@ impl OnDiskCompound {
 
 #[pyclass]
 pub struct InMemCompound {
-    interpolator: CompoundInterpolator<InMemFetcher<Backend>>,
+    interpolator: CompoundInterpolator<InMemFetcher>,
 }
 
 #[pymethods]
@@ -872,7 +870,7 @@ impl InMemCompound {
 
 #[pyclass]
 pub struct CachedCompound {
-    interpolator: CompoundInterpolator<CachedFetcher<Backend>>,
+    interpolator: CompoundInterpolator<CachedFetcher>,
 }
 
 #[pymethods]
@@ -910,7 +908,7 @@ implement_methods!(
 /// Returns the fit parameters for each chunk.
 /// y is the observed spectrum divided by model.
 #[pyfunction]
-pub fn fit_continuum(wl: Vec<f64>, y: Vec<f64>) -> PyResult<Vec<Vec<f64>>> {
+pub fn fit_continuum(wl: Vec<f64>, y: Vec<f32>) -> PyResult<Vec<Vec<f32>>> {
     let wl_arr = na::DVector::from_vec(wl);
     let fitter = ChunkFitter::new(wl_arr, 5, 8, 0.2);
     let result = fitter._fit_chunks(&y.into());
@@ -919,7 +917,7 @@ pub fn fit_continuum(wl: Vec<f64>, y: Vec<f64>) -> PyResult<Vec<Vec<f64>>> {
 
 /// Build continuum from chunk fit parameters
 #[pyfunction]
-pub fn build_continuum(wl: Vec<f64>, pfits: Vec<Vec<f64>>) -> PyResult<Vec<f64>> {
+pub fn build_continuum(wl: Vec<f64>, pfits: Vec<Vec<f32>>) -> PyResult<Vec<f32>> {
     let wl_arr = na::DVector::from_vec(wl);
     let fitter = ChunkFitter::new(wl_arr, 5, 8, 0.2);
     let parr = pfits.into_iter().map(na::DVector::from_vec).collect();

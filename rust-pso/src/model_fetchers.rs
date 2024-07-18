@@ -1,9 +1,8 @@
 use crate::interpolate::{
-    read_spectrum, ModelFetcher, Range, SquareBounds, SquareGridInterpolator, WlGrid,
+    read_spectrum, ModelFetcher, Range, SquareBounds,
 };
+use crate::tensor::Tensor;
 use anyhow::Result;
-use burn::prelude::Backend;
-use burn::tensor::{Data, Tensor};
 use indicatif::ProgressBar;
 use itertools::Itertools;
 use lru::LruCache;
@@ -14,13 +13,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
-pub struct OnDiskFetcher<E: Backend> {
+pub struct OnDiskFetcher {
     pub dir: PathBuf,
     pub ranges: SquareBounds,
-    pub device: E::Device,
+    pub device: tch::Device,
 }
 
-impl<E: Backend> OnDiskFetcher<E> {
+impl OnDiskFetcher {
     pub fn new(
         dir: &str,
         teff_range: Range,
@@ -28,7 +27,7 @@ impl<E: Backend> OnDiskFetcher<E> {
         logg_range: Range,
         vsini_range: (f64, f64),
         rv_range: (f64, f64),
-        device: E::Device,
+        device: tch::Device,
     ) -> Self {
         let ranges = SquareBounds {
             teff: teff_range,
@@ -45,38 +44,33 @@ impl<E: Backend> OnDiskFetcher<E> {
     }
 }
 
-impl<E: Backend> ModelFetcher for OnDiskFetcher<E> {
-    type E = E;
+impl ModelFetcher for OnDiskFetcher {
     fn ranges(&self) -> &SquareBounds {
         &self.ranges
     }
-    fn device(&self) -> &<Self::E as Backend>::Device {
+    fn device(&self) -> &tch::Device {
         &self.device
     }
 
-    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<Cow<Tensor<Self::E, 1>>> {
+    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<Cow<Tensor>> {
         let teff = self.ranges.teff.get_value(i);
         let m = self.ranges.m.get_value(j);
         let logg = self.ranges.logg.get_value(k);
         let spec = read_spectrum(&self.dir, teff, m, logg)?;
-        Ok(Cow::Owned(Tensor::<E, 1>::from_data(
-            Data::from(&spec[..]).convert(),
-            &self.device,
-        )))
+        Ok(Cow::Owned(Tensor::from_slice(&spec[..], self.device())))
     }
 }
 
-pub struct InMemFetcher<E: Backend> {
+#[derive(Clone)]
+pub struct InMemFetcher {
     pub ranges: SquareBounds,
-    pub loaded_spectra: Vec<Tensor<E, 1>>,
-    pub device: E::Device,
+    pub loaded_spectra: Vec<Tensor>,
+    pub n: i64,
+    pub zeros: Tensor,
+    pub device: tch::Device,
 }
 
-fn load_spectra<E: Backend>(
-    dir: PathBuf,
-    ranges: &SquareBounds,
-    device: &E::Device,
-) -> Vec<Tensor<E, 1>> {
+fn load_spectra(dir: PathBuf, ranges: &SquareBounds, device: &tch::Device) -> Result<Vec<Tensor>> {
     let combinations: Vec<[f64; 3]> = ranges
         .teff
         .values
@@ -91,13 +85,13 @@ fn load_spectra<E: Backend>(
         .into_par_iter()
         .map(|[teff, m, logg]| {
             bar.inc(1);
-            let spec = read_spectrum(&dir, teff, m, logg).unwrap();
-            Tensor::<E, 1>::from_data(Data::from(&spec[..]).convert(), device)
+            let spec = read_spectrum(&dir, teff, m, logg)?;
+            Ok(Tensor::from_slice(&spec[..], device))
         })
         .collect()
 }
 
-impl<E: Backend> InMemFetcher<E> {
+impl InMemFetcher {
     pub fn new(
         dir: &str,
         teff_range: Range,
@@ -105,8 +99,8 @@ impl<E: Backend> InMemFetcher<E> {
         logg_range: Range,
         vsini_range: (f64, f64),
         rv_range: (f64, f64),
-        device: E::Device,
-    ) -> Self {
+        device: tch::Device,
+    ) -> Result<Self> {
         let ranges = SquareBounds {
             teff: teff_range,
             m: m_range,
@@ -114,42 +108,41 @@ impl<E: Backend> InMemFetcher<E> {
             vsini: vsini_range,
             rv: rv_range,
         };
-        let loaded_spectra = load_spectra(PathBuf::from(dir), &ranges, &device);
-        Self {
-            loaded_spectra,
+        let loaded_spectra = load_spectra(PathBuf::from(dir), &ranges, &device)?;
+        let n = loaded_spectra[0].dims()[0];
+        Ok(Self {
             ranges,
+            loaded_spectra,
+            n,
+            zeros: Tensor::zeros([1, n], &device),
             device: device,
-        }
+        })
     }
 }
 
-impl<E: Backend> ModelFetcher for InMemFetcher<E>
-where
-    <E as Backend>::FloatTensorPrimitive<1>: Sync,
-{
-    type E = E;
+impl ModelFetcher for InMemFetcher {
     fn ranges(&self) -> &SquareBounds {
         &self.ranges
     }
-    fn device(&self) -> &<Self::E as Backend>::Device {
+    fn device(&self) -> &tch::Device {
         &self.device
     }
 
-    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<Cow<Tensor<Self::E, 1>>> {
+    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<Cow<Tensor>> {
         let idx = i * self.ranges.m.n() * self.ranges.logg.n() + j * self.ranges.logg.n() + k;
         Ok(Cow::Borrowed(&self.loaded_spectra[idx]))
     }
 }
 
 #[derive(Clone)]
-pub struct CachedFetcher<E: Backend> {
+pub struct CachedFetcher {
     pub dir: PathBuf,
     pub ranges: SquareBounds,
-    cache: Arc<Mutex<LruCache<(usize, usize, usize), Vec<f64>>>>,
-    pub device: E::Device,
+    cache: Arc<Mutex<LruCache<(usize, usize, usize), Vec<f32>>>>,
+    pub device: tch::Device,
 }
 
-impl<E: Backend> CachedFetcher<E> {
+impl CachedFetcher {
     pub fn new(
         dir: &str,
         teff_range: Range,
@@ -158,7 +151,7 @@ impl<E: Backend> CachedFetcher<E> {
         vsini_range: (f64, f64),
         rv_range: (f64, f64),
         lrucap: usize,
-        device: E::Device,
+        device: tch::Device,
     ) -> Self {
         let ranges = SquareBounds {
             teff: teff_range,
@@ -178,20 +171,18 @@ impl<E: Backend> CachedFetcher<E> {
     }
 }
 
-impl<E: Backend> ModelFetcher for CachedFetcher<E> {
-    type E = E;
+impl ModelFetcher for CachedFetcher {
     fn ranges(&self) -> &SquareBounds {
         &self.ranges
     }
-    fn device(&self) -> &<Self::E as Backend>::Device {
+    fn device(&self) -> &tch::Device {
         &self.device
     }
 
-    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<Cow<Tensor<Self::E, 1>>> {
+    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<Cow<Tensor>> {
         let mut cache = self.cache.lock().unwrap();
         if let Some(spec) = cache.get(&(i, j, k)) {
-            let tensor =
-                Tensor::<E, 1>::from_data(Data::from(&spec.clone()[..]).convert(), &self.device);
+            let tensor = Tensor::from_slice(&spec.clone()[..], &self.device);
             Ok(Cow::Owned(tensor))
         } else {
             std::mem::drop(cache);
@@ -199,7 +190,7 @@ impl<E: Backend> ModelFetcher for CachedFetcher<E> {
             let m = self.ranges.m.get_value(j);
             let logg = self.ranges.logg.get_value(k);
             let spec = read_spectrum(&self.dir, teff, m, logg)?;
-            let tensor = Tensor::<E, 1>::from_data(Data::from(&spec[..]).convert(), &self.device);
+            let tensor = Tensor::from_slice(&spec[..], &self.device);
             let mut cache = self.cache.lock().unwrap();
             cache.put((i, j, k), spec.clone());
             Ok(Cow::Owned(tensor))

@@ -1,11 +1,7 @@
 use crate::interpolate::{Range, SquareBounds};
+use crate::tensor::Tensor;
 use anyhow::{bail, Result};
-use burn::tensor::{backend::Backend, Tensor};
-
-pub struct InterpolInput<E: Backend> {
-    pub factors: Tensor<E, 2>, // (3, 4) tensor, factors to multiply with the 4 neighbors
-    pub local_4x4x4_indices: [[isize; 3]; 64],
-}
+use itertools::Itertools;
 
 fn get_indices(index: usize, range: &Range) -> Vec<isize> {
     if index == 0 {
@@ -27,20 +23,20 @@ fn get_range(index: usize, range: &Range) -> Vec<f64> {
     }
 }
 
-fn calculate_factors_quadratic(x: f64, x0: f64, x1: f64, x2: f64) -> [f32; 4] {
+fn calculate_factors_quadratic(x: f64, x0: f64, x1: f64, x2: f64) -> [f64; 4] {
     let xsq = x * x;
 
     let col0_denom = x0 * x0 - x0 * x1 - x0 * x2 + x1 * x2;
     let col1_denom = -x1 * x1 + x0 * x1 - x0 * x2 + x1 * x2;
     let col2_denom = x2 * x2 + x0 * x1 - x0 * x2 - x1 * x2;
 
-    let f0 = ((xsq - (x1 + x2) * x + x1 * x2) / col0_denom) as f32;
-    let f1 = ((-xsq + (x0 + x2) * x - x0 * x2) / col1_denom) as f32;
-    let f2 = ((xsq - (x0 + x1) * x + x0 * x1) / col2_denom) as f32;
+    let f0 = ((xsq - (x1 + x2) * x + x1 * x2) / col0_denom);
+    let f1 = ((-xsq + (x0 + x2) * x - x0 * x2) / col1_denom);
+    let f2 = ((xsq - (x0 + x1) * x + x0 * x1) / col2_denom);
     [f0, f1, f2, 0.0]
 }
 
-fn calculate_factors_cubic(x: f64, x0: f64, x1: f64, x2: f64, x3: f64) -> [f32; 4] {
+fn calculate_factors_cubic(x: f64, x0: f64, x1: f64, x2: f64, x3: f64) -> [f64; 4] {
     let xsq = x * x;
     let xcu = xsq * x;
 
@@ -63,23 +59,23 @@ fn calculate_factors_cubic(x: f64, x0: f64, x1: f64, x2: f64, x3: f64) -> [f32; 
         - x1 * x2 * x3;
 
     let f0 = ((xcu - (x1 + x2 + x3) * xsq + (x1 * x2 + x1 * x3 + x2 * x3) * x - (x1 * x2 * x3))
-        / col0_denom) as f32;
+        / col0_denom);
     let f1 = ((-xcu + (x0 + x2 + x3) * xsq - (x0 * x2 + x0 * x3 + x2 * x3) * x + (x0 * x2 * x3))
-        / col1_denom) as f32;
+        / col1_denom);
     let f2 = ((xcu - (x0 + x1 + x3) * xsq + (x0 * x1 + x0 * x3 + x1 * x3) * x - (x0 * x1 * x3))
-        / col2_denom) as f32;
+        / col2_denom);
     let f3 = ((-xcu + (x0 + x1 + x2) * xsq - (x0 * x1 + x0 * x2 + x1 * x2) * x + (x0 * x1 * x2))
-        / col3_denom) as f32;
+        / col3_denom);
     [f0, f1, f2, f3]
 }
 
-pub fn prepare_interpolate<E: Backend>(
+pub fn calculate_interpolation_coefficients_flat(
     ranges: &SquareBounds,
     teff: f64,
     m: f64,
     logg: f64,
-    device: &E::Device,
-) -> Result<InterpolInput<E>> {
+    device: &tch::Device,
+) -> Result<[[f64; 4]; 3]> {
     // 3D cubic interpolation followed by convolution
     if !ranges.teff.between_bounds(teff) {
         bail!("Teff out of bounds ({})", teff);
@@ -157,100 +153,25 @@ pub fn prepare_interpolate<E: Backend>(
             1.0,
         )
     };
-
-    let factors = Tensor::from_floats(
-        [
-            factors_teff[0],
-            factors_teff[1],
-            factors_teff[2],
-            factors_teff[3],
-            factors_m[0],
-            factors_m[1],
-            factors_m[2],
-            factors_m[3],
-            factors_logg[0],
-            factors_logg[1],
-            factors_logg[2],
-            factors_logg[3],
-        ],
-        device,
-    )
-    .reshape([3, 4]);
-
-    let dis = get_indices(i, &ranges.teff);
-    let djs = get_indices(j, &ranges.m);
-    let dks = get_indices(k, &ranges.logg);
-    let mut local_4x4x4_indices = [[0; 3]; 64];
-    for index_i in 0..4 {
-        for index_j in 0..4 {
-            for index_k in 0..4 {
-                if index_i < dis.len() && index_j < djs.len() && index_k < dks.len() {
-                    local_4x4x4_indices[index_i * 16 + index_j * 4 + index_k] = [
-                        i as isize + dis[index_i],
-                        j as isize + djs[index_j],
-                        k as isize + dks[index_k],
-                    ]
-                }
-            }
-        }
-    }
-
-    Ok(InterpolInput {
-        factors,
-        local_4x4x4_indices,
-    })
+    Ok([factors_teff, factors_m, factors_logg])
 }
 
-/// Interpolates a 1D cubic function.
-/// factors: Tensor with factors to multiply with the neighbors (4)
-/// yp: Tensor with four model spectra (4, N)
-fn cubic_1d<E: Backend>(factors: Tensor<E, 1>, yp: Tensor<E, 2>) -> Tensor<E, 1> {
-    (factors.unsqueeze_dim(1) * yp).sum_dim(0).squeeze(0)
-}
+pub fn calculate_interpolation_coefficients(
+    ranges: &SquareBounds,
+    teff: f64,
+    m: f64,
+    logg: f64,
+    device: &tch::Device,
+) -> Result<Tensor> {
+    let [factors_teff, factors_m, factors_logg] =
+        calculate_interpolation_coefficients_flat(ranges, teff, m, logg, device)?;
+    let all_factors: Vec<f32> = factors_teff
+        .iter()
+        .cartesian_product(factors_m)
+        .cartesian_product(factors_logg)
+        .map(|((f_teff, f_m), f_logg)| (f_teff * f_m * f_logg) as f32)
+        .collect();
 
-/// Interpolates a 2D cubic function.
-/// factors: Tensor with factors to multiply with the neighbors (2, 4)
-/// yp: Tensor with 16 model spectra (4, 4, N)
-/// shape: Equals 3 or 4 for each dimension (quadratic or cubic)
-fn cubic_2d<E: Backend>(factors: Tensor<E, 2>, yp: Tensor<E, 3>) -> Tensor<E, 1> {
-    // 1D subcoordinates
-    let logg_factors = factors.clone().narrow(0, 1, 1).squeeze(0); // logg factors (4)
-
-    // Interpolate in logg
-    let local1d = Tensor::stack(
-        yp.iter_dim(0)
-            .map(|t| {
-                let subtensor = t.squeeze(0);
-                cubic_1d(logg_factors.clone(), subtensor)
-            })
-            .collect(),
-        0,
-    );
-
-    // Interpolate in m
-    let m_factors = factors.clone().narrow(0, 0, 1).squeeze(0); // m factors (4)
-    cubic_1d(m_factors, local1d)
-}
-
-/// Interpolates a 3D cubic function.
-/// factors: Tensor with factors to multiply with the neighbors (3, 4) (teff, m, logg)
-/// yp: Tensor with 64 model spectra (4, 4, 4, N)
-pub fn cubic_3d<E: Backend>(factors: Tensor<E, 2>, yp: Tensor<E, 4>) -> Tensor<E, 1> {
-    // Subgrid in m, logg
-    let m_logg_factors = factors.clone().narrow(0, 1, 2); // (2, 4)
-
-    // Interpolate in logg and m
-    let local1d = Tensor::stack(
-        yp.iter_dim(0)
-            .map(|t| {
-                let subtensor = t.squeeze(0);
-                cubic_2d(m_logg_factors.clone(), subtensor)
-            })
-            .collect(),
-        0,
-    ); // (4, N) tensor
-
-    // Interpolate in teff
-    let teff_factors = factors.narrow(0, 0, 1).squeeze(0); // teff factors (4)
-    cubic_1d(teff_factors, local1d)
+    let factors = Tensor::from_slice(&all_factors[..], device);
+    Ok(factors)
 }

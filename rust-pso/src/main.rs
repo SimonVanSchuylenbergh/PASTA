@@ -7,37 +7,107 @@ mod fitting;
 mod interpolate;
 mod model_fetchers;
 mod particleswarm;
+mod tensor;
 use crate::fitting::ObservedSpectrum;
 use crate::interpolate::{Bounds, CompoundInterpolator};
+use crate::tensor::Tensor;
 use anyhow::Result;
-use burn::backend::wgpu::WgpuDevice;
-use burn::tensor::Tensor;
 use convolve_rv::{oaconvolve, rot_broad_rv, WavelengthDispersion};
-use cubic::{cubic_3d, prepare_interpolate, InterpolInput};
+use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
 use fitting::{fit_pso, uncertainty_chi2, ChunkFitter, ContinuumFitter};
 use interpolate::{
     nalgebra_to_tensor, read_npy_file, tensor_to_nalgebra, Interpolator, ModelFetcher, Range,
-    SquareGridInterpolator, WlGrid,
+    SquareBounds, SquareGridInterpolator, WlGrid,
 };
-use model_fetchers::{CachedFetcher, InMemFetcher};
 use iter_num_tools::arange;
 use itertools::Itertools;
+use model_fetchers::{CachedFetcher, InMemFetcher};
 use nalgebra as na;
+use rand::distributions::Standard;
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::hint::black_box;
+use std::iter::repeat;
 use std::time::Instant;
+
+const teff: f64 = 27000.0;
+const m: f64 = 0.05;
+const logg: f64 = 4.5;
+
+fn convolve1(flux_arr: na::DVector<f32>, kernels: &na::DMatrix<f32>, n: usize) -> na::DVector<f32> {
+    na::DVector::from_fn(flux_arr.len(), |i, _| {
+        let kernel = kernels.column(i);
+        if (i < n) || (i >= kernels.ncols() - n) {
+            return flux_arr[i];
+        }
+        let fluxs = flux_arr.rows(i - n, 2 * n + 1);
+        kernel.dot(&fluxs)
+    })
+}
+
+fn convolve2(flux_arr: &Tensor, kernels: &Tensor, n: i64) -> Tensor {
+    let padded = flux_arr.tensor.pad([n, n], "constant", Some(0_f64));
+    let unfolded = padded.unfold(0, 2 * n + 1, 1);
+
+    let out = (unfolded * kernels.clone().tensor).sum_dim_intlist(&[0_i64][..], false, None);
+    Tensor { tensor: out }
+}
+
+const N: usize = 500;
+
+fn convolve3(flux_arr: na::DVector<f32>, kernels: &na::DMatrix<f32>, n: usize) -> na::DVector<f32> {
+    // Herschrijf naar batches
+    let mut out = na::DVector::zeros(flux_arr.len());
+    let mut mat = na::DMatrix::<f32>::zeros(N, 2 * n + 1);
+    for i in 0..(flux_arr.len() / N) {
+        let start = i * N;
+        for j in 0..N {
+            mat.row_mut(j)
+                .copy_from(&flux_arr.rows(start + j - n, 2 * n + 1));
+        }
+        mat.mul_to(&kernels.columns(start, N), &mut out.rows_mut(start, N))
+    }
+    let start = (flux_arr.len() / N) * N;
+    let remaining = flux_arr.len() - start;
+    let mut mat = na::DMatrix::<f32>::zeros(remaining, 2 * n + 1);
+    for j in 0..remaining {
+        mat.row_mut(j)
+            .copy_from(&flux_arr.rows(start + j - n, 2 * n + 1));
+    }
+    mat.mul_to(
+        &kernels.columns(start, remaining),
+        &mut out.rows_mut(start, remaining),
+    );
+    out
+}
+
+fn convolve4(
+    flux_arr: na::DVector<f32>,
+    kernels_tr: &na::DMatrix<f32>,
+    n: usize,
+) -> na::DVector<f32> {
+    let n = flux_arr.len();
+    let flux_arr_padded = na::DVector::from_iterator(
+        flux_arr.len() + 2 * n,
+        repeat(0.0)
+            .take(n)
+            .chain(flux_arr.iter().cloned())
+            .chain(repeat(0.0).take(n)),
+    );
+    kernels_tr.column_iter().enumerate().fold(
+        na::DVector::zeros(flux_arr.len()),
+        |mut acc, (i, kernel)| {
+            let fluxs = flux_arr_padded.rows(i, n);
+            acc + (kernel.component_mul(&fluxs))
+        },
+    )
+}
 
 pub fn main() -> Result<()> {
     tch::set_num_threads(1);
-    type Backend = burn::backend::LibTorch;
-    let device = <Backend as burn::prelude::Backend>::Device::Cpu;
-    // type Backend = burn::backend::Wgpu;
-    // let device = burn::backend::wgpu::WgpuDevice::BestAvailable;
-    let n = 200;
+    let device = tch::Device::Cpu;
 
-    let start = Instant::now();
-    let folder = "/Users/ragnar/Documents/hermesnet/boss_grid_with_continuum";
+    let folder = "/STER/hermesnet/boss_grid_with_continuum";
     let wl_grid = WlGrid::Logspace(3.5440680443502757, 5.428_681_023_790_647e-6, 87508);
     let fetcher = InMemFetcher::new(
         folder,
@@ -47,128 +117,131 @@ pub fn main() -> Result<()> {
         (1.0, 300.0),
         (-150.0, 150.0),
         device,
-    );
+    )?;
     let interpolator = SquareGridInterpolator::new(fetcher, wl_grid);
-    println!("Instantiated in: {:?}", start.elapsed());
+    let device = interpolator.fetcher.device().clone();
+    let interpolated_tensor = interpolator.interpolate(teff, m, logg)?;
+    let interpolated_na = tensor_to_nalgebra(interpolated_tensor.clone());
 
     let wl = read_npy_file("wl.npy".into())?;
-    let disp = read_npy_file("disp.npy".into())?;
+    let disp = read_npy_file("disp.npy".into())?
+        .into_iter()
+        .map(|x| x as f32)
+        .collect::<Vec<f32>>();
     let target_dispersion =
         convolve_rv::VariableTargetDispersion::new(wl.clone().into(), &disp.into(), wl_grid)?;
-    let flux = read_npy_file("flux.npy".into())?;
-    let var = read_npy_file("var.npy".into())?;
-    let observed_spectrum = ObservedSpectrum {
-        flux: flux.into(),
-        var: var.into(),
-    };
-    let continuum_fitter = ChunkFitter::new(wl.into(), 10, 8, 0.2);
+    let kernels_na = target_dispersion.kernels;
+    let kernels_na_tr = kernels_na.transpose();
+    let kernels_flat = na::DVector::from_iterator(
+        kernels_na.nrows() * kernels_na.ncols(),
+        kernels_na.iter().cloned(),
+    );
+    let kernels_tensor = nalgebra_to_tensor(kernels_flat, &device)
+        .reshape([kernels_na.nrows() as i64, kernels_na.ncols() as i64])?
+        .transpose(0, 1);
+    let n = target_dispersion.n;
+    println!("n: {}", n);
 
-    let teff = 27000.0;
-    let m = 0.0;
-    let logg = 4.5;
-    let vsini = 100.0;
-    let rv = 0.0;
-
-    let start = Instant::now();
-    for _ in 0..n {
-        let _ = interpolator.produce_model(&target_dispersion, teff, m, logg, vsini, rv);
-    }
-    println!("produce_model: {:?}", start.elapsed() / n);
+    let is = (0..44 * 8).collect::<Vec<usize>>();
 
     let start = Instant::now();
-    for _ in 0..n {
-        let _ = interpolator.interpolate(teff, m, logg);
-    }
-    println!("  interpolate: {:?}", start.elapsed() / n);
+    is.par_iter().for_each(|_| {
+        convolve1(interpolated_na.clone(), &kernels_na, n);
+    });
+    println!("convolve1: {:?}", start.elapsed());
+    let start = Instant::now();
+    is.par_iter().for_each(|_| {
+        convolve1(interpolated_na.clone(), &kernels_na, n);
+    });
+    println!("convolve1: {:?}", start.elapsed());
+    let start = Instant::now();
+    is.par_iter().for_each(|_| {
+        convolve1(interpolated_na.clone(), &kernels_na, n);
+    });
+    println!("convolve1: {:?}", start.elapsed());
+    println!("convolve1: {:?}", start.elapsed());
+    let start = Instant::now();
+    is.par_iter().for_each(|_| {
+        convolve1(interpolated_na.clone(), &kernels_na, n);
+    });
+    println!("convolve1: {:?}", start.elapsed());
+    println!("convolve1: {:?}", start.elapsed());
+    let start = Instant::now();
+    is.par_iter().for_each(|_| {
+        convolve1(interpolated_na.clone(), &kernels_na, n);
+    });
+    println!("convolve1: {:?}", start.elapsed());
+    println!("");
 
     let start = Instant::now();
-    let InterpolInput {
-        factors,
-        local_4x4x4_indices,
-    } = prepare_interpolate::<Backend>(
-        interpolator.ranges(),
-        teff,
-        m,
-        logg,
-        Interpolator::device(&interpolator),
-    )?;
-    let vec_of_tensors = local_4x4x4_indices
-        .into_iter()
-        .map(|[i, j, k]| {
-            interpolator
-                .fetcher
-                .find_spectrum(i as usize, j as usize, k as usize)
-                .unwrap()
-                .into_owned()
-        })
-        .collect::<Vec<Tensor<Backend, 1>>>();
-    for _ in 0..n {
-        // (4, 4, 4, N)
-        let local_4x4x4 = Tensor::stack::<2>(vec_of_tensors.clone(), 0).reshape([4, 4, 4, -1]);
-    }
-    println!("      stacking: {:?}", start.elapsed() / n);
-
-    let InterpolInput {
-        factors,
-        local_4x4x4_indices,
-    } = prepare_interpolate(
-        interpolator.ranges(),
-        teff,
-        m,
-        logg,
-        Interpolator::device(&interpolator),
-    )?;
-    let vec_of_tensors = local_4x4x4_indices
-        .into_iter()
-        .map(|[i, j, k]| {
-            interpolator
-                .fetcher
-                .find_spectrum(i as usize, j as usize, k as usize)
-                .unwrap()
-                .into_owned()
-        })
-        .collect::<Vec<Tensor<Backend, 1>>>();
-    // (4, 4, 4, N)
-    let local_4x4x4 = Tensor::stack::<2>(vec_of_tensors, 0).reshape([4, 4, 4, -1]);
+    is.par_iter().for_each(|_| {
+        convolve2(&interpolated_tensor, &kernels_tensor, n as i64);
+    });
+    println!("convolve2: {:?}", start.elapsed());
     let start = Instant::now();
-    for _ in 0..n {
-        let _ = cubic_3d(factors.clone(), local_4x4x4.clone());
-    }
-    println!("      interpolate: {:?}", start.elapsed() / n);
-
-    let interpolated = tensor_to_nalgebra::<Backend, f64>(interpolator.interpolate(teff, m, logg)?);
+    is.par_iter().for_each(|_| {
+        convolve2(&interpolated_tensor, &kernels_tensor, n as i64);
+    });
+    println!("convolve2: {:?}", start.elapsed());
     let start = Instant::now();
-    for _ in 0..n {
-        let _ = rot_broad_rv(interpolated.clone(), wl_grid, &target_dispersion, vsini, rv);
-    }
-    println!("  rot_broad_rv: {:?}", start.elapsed() / n);
+    is.par_iter().for_each(|_| {
+        convolve2(&interpolated_tensor, &kernels_tensor, n as i64);
+    });
+    println!("convolve2: {:?}", start.elapsed());
+    println!("");
 
     let start = Instant::now();
-    for _ in 0..n {
-        let _ = target_dispersion.convolve(interpolated.clone());
-    }
-    println!("      convolve resolution: {:?}", start.elapsed() / n);
-
-    let convolved_for_resolution = target_dispersion.convolve(interpolated.clone())?;
+    is.par_iter().for_each(|_| {
+        convolve1(interpolated_na.clone(), &kernels_na, n);
+    });
+    println!("convolve3: {:?}", start.elapsed());
     let start = Instant::now();
-    for _ in 0..n {
-        let _ = oaconvolve(&convolved_for_resolution, vsini, wl_grid);
-    }
-    println!("      convolve vsini: {:?}", start.elapsed() / n);
-
-    let synth_spec = tensor_to_nalgebra::<Backend, f64>(interpolator.produce_model(
-        &target_dispersion,
-        teff,
-        m,
-        logg,
-        vsini,
-        rv,
-    )?);
+    is.par_iter().for_each(|_| {
+        convolve1(interpolated_na.clone(), &kernels_na, n);
+    });
+    println!("convolve3: {:?}", start.elapsed());
     let start = Instant::now();
-    for _ in 0..n {
-        let _ = continuum_fitter.fit_continuum(&observed_spectrum, &synth_spec);
-    }
-    println!("fit continuum: {:?}", start.elapsed() / n);
+    is.par_iter().for_each(|_| {
+        convolve1(interpolated_na.clone(), &kernels_na, n);
+    });
+    println!("convolve3: {:?}", start.elapsed());
+    let start = Instant::now();
+    is.par_iter().for_each(|_| {
+        convolve1(interpolated_na.clone(), &kernels_na, n);
+    });
+    println!("convolve3: {:?}", start.elapsed());
+    let start = Instant::now();
+    is.par_iter().for_each(|_| {
+        convolve1(interpolated_na.clone(), &kernels_na, n);
+    });
+    println!("convolve3: {:?}", start.elapsed());
+    println!("");
 
+    let start = Instant::now();
+    is.par_iter().for_each(|_| {
+        convolve4(interpolated_na.clone(), &kernels_na_tr, n);
+    });
+    println!("convolve4: {:?}", start.elapsed());
+    let start = Instant::now();
+    is.par_iter().for_each(|_| {
+        convolve4(interpolated_na.clone(), &kernels_na_tr, n);
+    });
+    println!("convolve4: {:?}", start.elapsed());
+    let start = Instant::now();
+    is.par_iter().for_each(|_| {
+        convolve4(interpolated_na.clone(), &kernels_na_tr, n);
+    });
+    println!("convolve4: {:?}", start.elapsed());
+    let start = Instant::now();
+    is.par_iter().for_each(|_| {
+        convolve4(interpolated_na.clone(), &kernels_na_tr, n);
+    });
+    println!("convolve4: {:?}", start.elapsed());
+    let start = Instant::now();
+    is.par_iter().for_each(|_| {
+        convolve4(interpolated_na.clone(), &kernels_na_tr, n);
+    });
+    println!("convolve4: {:?}", start.elapsed());
+    println!("");
     Ok(())
 }

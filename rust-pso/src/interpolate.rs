@@ -1,9 +1,8 @@
 use crate::convolve_rv::{rot_broad_rv, WavelengthDispersion};
-use crate::cubic::{cubic_3d, prepare_interpolate, InterpolInput};
+use crate::cubic::calculate_interpolation_coefficients;
+use crate::tensor::Tensor;
 use anyhow::{Context, Result};
 use argmin_math::ArgminRandom;
-use burn::prelude::Backend;
-use burn::tensor::{Data, Element, Tensor};
 use nalgebra::{self as na, Scalar};
 use npy::NpyData;
 use rand::Rng;
@@ -20,7 +19,7 @@ pub fn read_npy_file(file_path: PathBuf) -> Result<Vec<f64>> {
     Ok(data.to_vec())
 }
 
-pub fn read_spectrum(dir: &Path, teff: f64, m: f64, logg: f64) -> Result<Vec<f64>> {
+pub fn read_spectrum(dir: &Path, teff: f64, m: f64, logg: f64) -> Result<Vec<f32>> {
     // e.g. 00027_lm0050_07000_0350_0020_0000_Vsini_0000.npy
     let _teff = teff.round() as i32;
     let _m = (m * 100.0).round() as i32;
@@ -28,7 +27,8 @@ pub fn read_spectrum(dir: &Path, teff: f64, m: f64, logg: f64) -> Result<Vec<f64
     let sign = if _m < 0 { "m" } else { "p" };
     let filename = format!("l{}{:04}_{:05}_{:04}", sign, _m.abs(), _teff, _logg);
     let file_path = dir.join(format!("{}.npy", filename));
-    read_npy_file(file_path.clone())
+    let result = read_npy_file(file_path.clone())?;
+    Ok(result.into_iter().map(|x| x as f32).collect())
 }
 
 #[derive(Clone)]
@@ -139,7 +139,7 @@ impl WlGrid {
     pub fn iterate(&self) -> Box<dyn Iterator<Item = f64> + '_> {
         match self {
             WlGrid::Linspace(first, step, total) => {
-                Box::new((0..*total).map(move |i| first + step * i as f64))
+                Box::new((0..*total).map(move |i| (first + step * i as f64)))
             }
             WlGrid::Logspace(first, step, total) => {
                 Box::new((0..*total).map(move |i| 10_f64.powf(first + step * i as f64)))
@@ -150,12 +150,11 @@ impl WlGrid {
 
 pub trait Interpolator: Send + Sync {
     type B: Bounds;
-    type E: Backend;
 
     fn synth_wl(&self) -> WlGrid;
     fn bounds(&self) -> &Self::B;
-    fn device(&self) -> &<Self::E as Backend>::Device;
-    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor<Self::E, 1>>;
+    fn device(&self) -> &tch::Device;
+    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor>;
     fn produce_model(
         &self,
         target_dispersion: &impl WavelengthDispersion,
@@ -164,7 +163,7 @@ pub trait Interpolator: Send + Sync {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor<Self::E, 1>>;
+    ) -> Result<Tensor>;
     fn produce_model_on_grid(
         &self,
         target_dispersion: &impl WavelengthDispersion,
@@ -173,7 +172,7 @@ pub trait Interpolator: Send + Sync {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor<Self::E, 1>>;
+    ) -> Result<Tensor>;
 }
 
 impl Bounds for SquareBounds {
@@ -246,10 +245,21 @@ impl Bounds for SquareBounds {
 }
 
 pub trait ModelFetcher: Send + Sync {
-    type E: Backend;
     fn ranges(&self) -> &SquareBounds;
-    fn device(&self) -> &<Self::E as Backend>::Device;
-    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<Cow<Tensor<Self::E, 1>>>;
+    fn device(&self) -> &tch::Device;
+    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<Cow<Tensor>>;
+    fn find_neighbors(&self, i: usize, j: usize, k: usize) -> Result<Tensor> {
+        let neighbors = (-1..3)
+            .flat_map(|di| (-1..3).flat_map(move |dj| (-1..3).map(move |dk| (di, dj, dk))))
+            .map(|(di, dj, dk)| {
+                let i = ((i as i64 + di).max(0).min(1)) as usize;
+                let j = ((j as i64 + dj).max(0).min(1)) as usize;
+                let k = ((k as i64 + dk).max(0).min(1)) as usize;
+                Ok(self.find_spectrum(i, j, k)?.into_owned())
+            })
+            .collect::<Result<Vec<Tensor>>>()?;
+        Ok(Tensor::stack(&neighbors[..], 0)?)
+    }
 }
 
 #[derive(Clone)]
@@ -270,53 +280,42 @@ impl<F: ModelFetcher> SquareGridInterpolator<F> {
         self.fetcher.ranges()
     }
 
-    pub fn device(&self) -> &<F::E as Backend>::Device {
+    pub fn device(&self) -> &tch::Device {
         self.fetcher.device()
     }
 }
 
-pub fn nalgebra_to_tensor<E: Backend>(x: na::DVector<f64>, device: &E::Device) -> Tensor<E, 1> {
-    Tensor::<E, 1>::from_data(Data::from(x.data.as_slice()).convert(), device)
+pub fn nalgebra_to_tensor(x: na::DVector<f32>, device: &tch::Device) -> Tensor {
+    Tensor::from_slice(x.data.as_slice(), device)
 }
 
-pub fn tensor_to_nalgebra<E: Backend, T: Element + Scalar>(x: Tensor<E, 1>) -> na::DVector<T> {
-    let vec: Vec<T> = x.into_data().convert().value;
+pub fn tensor_to_nalgebra(x: Tensor) -> na::DVector<f32> {
+    let vec: Vec<f32> = x.into_vec().unwrap();
     na::DVector::from_vec(vec)
 }
 
 impl<F: ModelFetcher> Interpolator for SquareGridInterpolator<F> {
     type B = SquareBounds;
-    type E = F::E;
     fn synth_wl(&self) -> WlGrid {
         self.synth_wl
     }
     fn bounds(&self) -> &SquareBounds {
         &self.ranges()
     }
-    fn device(&self) -> &<Self::E as Backend>::Device {
+    fn device(&self) -> &tch::Device {
         &self.device()
     }
-    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor<Self::E, 1>> {
-        let InterpolInput {
-            factors,
-            local_4x4x4_indices,
-        } = prepare_interpolate(self.ranges(), teff, m, logg, self.device())
-            .context("prepare_interpolate error")?;
+    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor> {
+        let factors =
+            calculate_interpolation_coefficients(self.ranges(), teff, m, logg, self.device())
+                .context("prepare_interpolate error")?;
 
-        // TODO: avoid unwrap
-        let vec_of_tensors = local_4x4x4_indices
-            .into_iter()
-            .map(|[i, j, k]| {
-                self.fetcher
-                    .find_spectrum(i as usize, j as usize, k as usize)
-                    .unwrap()
-                    .into_owned()
-            })
-            .collect::<Vec<Tensor<Self::E, 1>>>();
-        // (4, 4, 4, N)
-        let local_4x4x4 = Tensor::stack::<2>(vec_of_tensors, 0).reshape([4, 4, 4, -1]);
-
-        Ok(cubic_3d(factors, local_4x4x4))
+        let i = self.ranges().teff.get_left_index(teff);
+        let j = self.ranges().m.get_left_index(m);
+        let k = self.ranges().logg.get_left_index(logg);
+        let neighbors = self.fetcher.find_neighbors(i, j, k)?;
+        Ok(factors.matmul(&neighbors)?)
+        // Ok(cubic_3d(factors, local_4x4x4))
     }
 
     fn produce_model(
@@ -327,8 +326,8 @@ impl<F: ModelFetcher> Interpolator for SquareGridInterpolator<F> {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor<Self::E, 1>> {
-        let interpolated = tensor_to_nalgebra::<Self::E, f64>(
+    ) -> Result<Tensor> {
+        let interpolated = tensor_to_nalgebra(
             self.interpolate(teff, m, logg)
                 .context("Error during interpolation step.")?,
         );
@@ -345,7 +344,7 @@ impl<F: ModelFetcher> Interpolator for SquareGridInterpolator<F> {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor<Self::E, 1>> {
+    ) -> Result<Tensor> {
         let i = self
             .fetcher
             .ranges()
@@ -674,7 +673,6 @@ impl<F: ModelFetcher> CompoundInterpolator<F> {
 
 impl<'a, F: ModelFetcher> Interpolator for CompoundInterpolator<F> {
     type B = CompoundBounds;
-    type E = F::E;
 
     fn synth_wl(&self) -> WlGrid {
         self.interpolators[0].synth_wl
@@ -682,11 +680,11 @@ impl<'a, F: ModelFetcher> Interpolator for CompoundInterpolator<F> {
     fn bounds(&self) -> &CompoundBounds {
         &self.bounds
     }
-    fn device(&self) -> &<Self::E as Backend>::Device {
+    fn device(&self) -> &tch::Device {
         &self.interpolators[0].device()
     }
 
-    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor<Self::E, 1>> {
+    fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<Tensor> {
         let i = self.choose_grid(teff, logg);
         self.interpolators[i].interpolate(teff, m, logg)
     }
@@ -699,7 +697,7 @@ impl<'a, F: ModelFetcher> Interpolator for CompoundInterpolator<F> {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor<Self::E, 1>> {
+    ) -> Result<Tensor> {
         let i = self.choose_grid(teff, logg);
         self.interpolators[i].produce_model(target_dispersion, teff, m, logg, vsini, rv)
     }
@@ -711,7 +709,7 @@ impl<'a, F: ModelFetcher> Interpolator for CompoundInterpolator<F> {
         logg: f64,
         vsini: f64,
         rv: f64,
-    ) -> Result<Tensor<Self::E, 1>> {
+    ) -> Result<Tensor> {
         let i = self.choose_grid(teff, logg);
         self.interpolators[i].produce_model_on_grid(target_dispersion, teff, m, logg, vsini, rv)
     }
