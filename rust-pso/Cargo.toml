@@ -23,7 +23,7 @@ indicatif = "0.17.8"
 realfft = "3.3.0"
 iter_num_tools = "0.7.1"
 anyhow = "1.0.82"
-numpy = { version= "0.21.0"}
+numpy = { version= "0.21.0", features = ["nalgebra"]}
 enum_dispatch = "0.3.13"
 num-traits = "0.2.19"
 

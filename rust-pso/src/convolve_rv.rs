@@ -154,7 +154,7 @@ const FFTSIZE: usize = 2048;
 
 fn build_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<FluxFloat> {
     let dvelo = match synth_wl {
-        WlGrid::Linspace(first, step, N) => step / (first + 0.5 * step * (N as f64)),
+        WlGrid::Linspace(first, step, n) => step / (first + 0.5 * step * (n as f64)),
         WlGrid::Logspace(_, step, _) => std::f64::consts::LN_10 * step,
     };
     let epsilon = 0.6;
@@ -241,25 +241,6 @@ pub fn oaconvolve(
     }
 
     (y, m)
-}
-
-pub fn ccf(
-    input_wl: &na::DVector<f64>,
-    input_spectrum_inverted: &na::DVector<FluxFloat>,
-    model_spectrum_inverted: &na::DVector<FluxFloat>,
-    kernel_len: usize,
-    synth_wl: WlGrid,
-    rvs: &Vec<f64>,
-) -> Result<Vec<FluxFloat>> {
-    let n = input_wl.len();
-
-    rvs.iter()
-        .map(|rv| {
-            let resampled =
-                shift_and_resample(model_spectrum_inverted, kernel_len, synth_wl, input_wl, *rv)?;
-            Ok(input_spectrum_inverted.dot(&resampled) / (n as FluxFloat))
-        })
-        .collect()
 }
 
 pub fn shift_and_resample(

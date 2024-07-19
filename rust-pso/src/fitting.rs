@@ -8,7 +8,6 @@ use argmin::solver::brent::BrentRoot;
 use enum_dispatch::enum_dispatch;
 use nalgebra as na;
 use num_traits::Float;
-use rayon::prelude::*;
 use serde::Serialize;
 use std::fs::File;
 use std::io::BufWriter;

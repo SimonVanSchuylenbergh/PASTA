@@ -483,13 +483,9 @@ impl Bounds for CompoundBounds {
         let vsini = param[3];
         let rv = param[4];
 
-        let m_bounds = self.bounds[0].m.get_first_and_last();
-        let vsini_bounds = self.bounds[0].vsini;
-        let rv_bounds = self.bounds[0].rv;
-
-        let new_m = m.max(m_bounds.0).min(m_bounds.1);
-        let new_vsini = vsini.max(vsini_bounds.0).min(vsini_bounds.1);
-        let new_rv = rv.max(rv_bounds.0).min(rv_bounds.1);
+        let new_m = m.max(self.m_bounds().0).min(self.m_bounds().1);
+        let new_vsini = vsini.max(self.vsini_bounds().0).min(self.vsini_bounds().1);
+        let new_rv = rv.max(self.rv_bounds().0).min(self.rv_bounds().1);
         let new_param = na::Vector5::new(teff, new_m, logg, new_vsini, new_rv);
 
         if self.is_within_bounds(new_param) {

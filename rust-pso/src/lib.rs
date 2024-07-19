@@ -20,7 +20,7 @@ use model_fetchers::{CachedFetcher, InMemFetcher, OnDiskFetcher};
 use nalgebra as na;
 use nalgebra::Storage;
 use numpy::array::PyArray;
-use numpy::{Ix1, Ix2};
+use numpy::{Ix1, Ix2, PyArrayLike};
 use pyo3::{prelude::*, pyclass};
 use rayon::prelude::*;
 
@@ -510,13 +510,16 @@ macro_rules! implement_methods {
                 &self,
                 fitter: PyContinuumFitter,
                 dispersion: PyWavelengthDispersion,
-                observed_flux: Vec<FluxFloat>,
-                observed_var: Vec<FluxFloat>,
+                observed_flux: PyArrayLike<FluxFloat, Ix1>,
+                observed_var: PyArrayLike<FluxFloat, Ix1>,
                 settings: PSOSettings,
                 save_directory: Option<String>,
                 parallelize: Option<bool>,
             ) -> PyResult<PyOptimizationResult> {
-                let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
+                let observed_spectrum = ObservedSpectrum {
+                    flux: observed_flux.as_matrix().column(0).into_owned(),
+                    var: observed_var.as_matrix().column(0).into_owned(),
+                };
                 let result = fit_pso(
                     &self.interpolator,
                     &dispersion.0,
@@ -527,6 +530,13 @@ macro_rules! implement_methods {
                     parallelize.unwrap_or(true),
                 );
                 Ok(result.unwrap().into())
+                // Ok(PyOptimizationResult {
+                //     labels: (0.0, 0.0, 0.0, 0.0, 0.0),
+                //     continuum_params: vec![0.0],
+                //     ls: 0.0,
+                //     iters: 0,
+                //     time: 0.0,
+                // })
             }
 
             /// Calculate uncertainties with the chi2 landscape method

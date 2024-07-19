@@ -31,22 +31,62 @@ const logg: f64 = 4.5;
 const vsini: f64 = 100.0;
 const rv: f64 = 0.0;
 
-const N: usize = 100;
 
 pub fn main() -> Result<()> {
     let start = Instant::now();
     let folder = "/STER/hermesnet/boss_grid_with_continuum_32";
     let wl_grid = WlGrid::Logspace(3.5440680443502757, 5.428681023790647e-06, 87508);
-    let fetcher = InMemFetcher::new(
-        folder,
-        Range::new(arange(25_250.0..30_250.0, 250.0).collect()),
-        Range::new(arange(-0.2..0.2, 0.1).collect()),
-        Range::new(arange(4.0..5.0, 0.1).collect()),
-        (1.0, 300.0),
-        (-150.0, 150.0),
-    )?;
-    println!("Instantiated in: {:?}", start.elapsed());
-    let interpolator = SquareGridInterpolator::new(fetcher, wl_grid);
+    // let fetcher = InMemFetcher::new(
+    //     folder,
+    //     Range::new(arange(25_250.0..30_250.0, 250.0).collect()),
+    //     Range::new(arange(-0.2..0.2, 0.1).collect()),
+    //     Range::new(arange(4.0..5.0, 0.1).collect()),
+    //     (1.0, 300.0),
+    //     (-150.0, 150.0),
+    // )?;
+    // println!("Instantiated in: {:?}", start.elapsed());
+    // let interpolator = SquareGridInterpolator::new(fetcher, wl_grid);
+
+    let interpolator1 = SquareGridInterpolator::new(
+        InMemFetcher::new(
+            folder,
+            Range::new(arange(25_250.0..30_250.0, 250.0).collect()),
+            Range::new(arange(-0.2..0.2, 0.1).collect()),
+            Range::new(arange(3.3..5.1, 0.1).collect()),
+            (1.0, 300.0),
+            (-150.0, 150.0),
+        )?,
+        wl_grid,
+    );
+
+    let interpolator2 = SquareGridInterpolator::new(
+        InMemFetcher::new(
+            folder,
+            Range::new(
+                arange(9800.0..10_000.0, 100.0)
+                    .chain(arange(10_000.0..26_000.0, 250.0))
+                    .collect(),
+            ),
+            Range::new(arange(-0.8..0.9, 0.1).collect()),
+            Range::new(arange(3.0..5.1, 0.1).collect()),
+            (1.0, 300.0),
+            (-150.0, 150.0),
+        )?,
+        wl_grid,
+    );
+
+    let interpolator3 = SquareGridInterpolator::new(
+        InMemFetcher::new(
+            folder,
+            Range::new(arange(6000.0..10_100.0, 100.0).collect()),
+            Range::new(arange(-0.8..0.9, 0.1).collect()),
+            Range::new(arange(2.5..5.1, 0.1).collect()),
+            (1.0, 300.0),
+            (-150.0, 150.0),
+        )?,
+        wl_grid,
+    );
+    let interpolator = CompoundInterpolator::new(interpolator1, interpolator2, interpolator3);
 
     let wl = read_npy_file::<f64>("wl.npy".into())?;
     let disp = read_npy_file::<f64>("disp.npy".into())?

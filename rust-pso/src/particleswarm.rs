@@ -67,24 +67,6 @@ where
         }
     }
 }
-impl<B, F, R0> ParticleSwarm<B, F, R0>
-where
-    B: Bounds,
-    F: ArgminFloat,
-    R0: Rng,
-{
-    pub fn with_rng_generator<R1: Rng>(self, generator: R1) -> ParticleSwarm<B, F, R1> {
-        ParticleSwarm {
-            weight_inertia: self.weight_inertia,
-            weight_cognitive: self.weight_cognitive,
-            weight_social: self.weight_social,
-            delta: self.delta,
-            bounds: self.bounds,
-            num_particles: self.num_particles,
-            rng_generator: generator,
-        }
-    }
-}
 
 const N: usize = 5;
 type P = na::SVector<f64, 5>;
