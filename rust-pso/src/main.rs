@@ -31,7 +31,6 @@ const logg: f64 = 4.5;
 const vsini: f64 = 100.0;
 const rv: f64 = 0.0;
 
-
 pub fn main() -> Result<()> {
     let start = Instant::now();
     let folder = "/STER/hermesnet/boss_grid_with_continuum_32";
@@ -51,7 +50,7 @@ pub fn main() -> Result<()> {
         InMemFetcher::new(
             folder,
             Range::new(arange(25_250.0..30_250.0, 250.0).collect()),
-            Range::new(arange(-0.2..0.2, 0.1).collect()),
+            Range::new(arange(-0.8..0.9, 0.1).collect()),
             Range::new(arange(3.3..5.1, 0.1).collect()),
             (1.0, 300.0),
             (-150.0, 150.0),
@@ -93,8 +92,9 @@ pub fn main() -> Result<()> {
         .into_iter()
         .map(|x| x as f32)
         .collect::<Vec<_>>();
-    // let target_dispersion = VariableTargetDispersion::new(wl.clone().into(), &disp.into(), wl_grid)?;
-    let target_dispersion = NoDispersionTarget(wl.clone().into());
+    let target_dispersion =
+        VariableTargetDispersion::new(wl.clone().into(), &disp.into(), wl_grid)?;
+    // let target_dispersion = NoDispersionTarget(wl.clone().into());
     let flux = read_npy_file::<f64>("flux.npy".into())?
         .into_iter()
         .map(|x| x as f32)
@@ -104,98 +104,101 @@ pub fn main() -> Result<()> {
         .map(|x| x as f32)
         .collect::<Vec<_>>();
     let observed_spectrum = ObservedSpectrum::from_vecs(flux, var);
+    let observed_spectra = (0..44)
+        .map(|_| observed_spectrum.clone())
+        .collect::<Vec<_>>();
     let continuum_fitter = ChunkFitter::new(wl.into(), 5, 8, 0.2);
     let settings = PSOSettings {
         num_particles: 44,
         max_iters: 100,
         inertia_factor: 0.7213475204,
         cognitive_factor: 1.193180596,
-        social_factor: 1.193180596,
+        social_factor: 0.5,
         delta: 1e-7,
     };
 
     let is = (0..44 * 100).collect::<Vec<usize>>();
-    let start = Instant::now();
-    is.par_iter().for_each(|_| {
-        let y = interpolator.interpolate(teff, m, logg).unwrap();
-    });
-    println!("interpolate: {:?}", start.elapsed());
-    let start = Instant::now();
-    is.par_iter().for_each(|_| {
-        let y = interpolator.interpolate(teff, m, logg).unwrap();
-    });
-    println!("interpolate: {:?}", start.elapsed());
-    let start = Instant::now();
-    is.par_iter().for_each(|_| {
-        let y = interpolator.interpolate(teff, m, logg).unwrap();
-    });
-    println!("interpolate: {:?}", start.elapsed());
-    let start = Instant::now();
-    is.par_iter().for_each(|_| {
-        let y = interpolator.interpolate(teff, m, logg).unwrap();
-    });
-    println!("interpolate: {:?}", start.elapsed());
+    // let start = Instant::now();
+    // is.par_iter().for_each(|_| {
+    //     let y = interpolator.interpolate(teff, m, logg).unwrap();
+    // });
+    // println!("interpolate: {:?}", start.elapsed());
+    // let start = Instant::now();
+    // is.par_iter().for_each(|_| {
+    //     let y = interpolator.interpolate(teff, m, logg).unwrap();
+    // });
+    // println!("interpolate: {:?}", start.elapsed());
+    // let start = Instant::now();
+    // is.par_iter().for_each(|_| {
+    //     let y = interpolator.interpolate(teff, m, logg).unwrap();
+    // });
+    // println!("interpolate: {:?}", start.elapsed());
+    // let start = Instant::now();
+    // is.par_iter().for_each(|_| {
+    //     let y = interpolator.interpolate(teff, m, logg).unwrap();
+    // });
+    // println!("interpolate: {:?}", start.elapsed());
 
-    let interpolated = interpolator.interpolate(teff, m, logg)?;
+    // let interpolated = interpolator.interpolate(teff, m, logg)?;
 
-    let start = Instant::now();
-    is.par_iter().for_each(|_| {
-        let y = target_dispersion.convolve(interpolated.clone()).unwrap();
-    });
-    println!("convolve res: {:?}", start.elapsed());
-    let start = Instant::now();
-    is.par_iter().for_each(|_| {
-        let y = target_dispersion.convolve(interpolated.clone()).unwrap();
-    });
-    println!("convolve res: {:?}", start.elapsed());
-    let start = Instant::now();
-    is.par_iter().for_each(|_| {
-        let y = target_dispersion.convolve(interpolated.clone()).unwrap();
-    });
-    println!("convolve res: {:?}", start.elapsed());
-    let start = Instant::now();
-    is.par_iter().for_each(|_| {
-        let y = target_dispersion.convolve(interpolated.clone()).unwrap();
-    });
-    println!("convolve res: {:?}", start.elapsed());
+    // let start = Instant::now();
+    // is.par_iter().for_each(|_| {
+    //     let y = target_dispersion.convolve(interpolated.clone()).unwrap();
+    // });
+    // println!("convolve res: {:?}", start.elapsed());
+    // let start = Instant::now();
+    // is.par_iter().for_each(|_| {
+    //     let y = target_dispersion.convolve(interpolated.clone()).unwrap();
+    // });
+    // println!("convolve res: {:?}", start.elapsed());
+    // let start = Instant::now();
+    // is.par_iter().for_each(|_| {
+    //     let y = target_dispersion.convolve(interpolated.clone()).unwrap();
+    // });
+    // println!("convolve res: {:?}", start.elapsed());
+    // let start = Instant::now();
+    // is.par_iter().for_each(|_| {
+    //     let y = target_dispersion.convolve(interpolated.clone()).unwrap();
+    // });
+    // println!("convolve res: {:?}", start.elapsed());
 
-    let convolved_for_resolution = target_dispersion.convolve(interpolated.clone())?;
+    // let convolved_for_resolution = target_dispersion.convolve(interpolated.clone())?;
 
-    let start = Instant::now();
-    is.par_iter().for_each(|_| {
-        let y = oaconvolve(&convolved_for_resolution, vsini, wl_grid);
-    });
-    println!("convolve vsini: {:?}", start.elapsed());
-    let start = Instant::now();
-    is.par_iter().for_each(|_| {
-        let y = oaconvolve(&convolved_for_resolution, vsini, wl_grid);
-    });
-    println!("convolve vsini: {:?}", start.elapsed());
-    let start = Instant::now();
-    is.par_iter().for_each(|_| {
-        let y = oaconvolve(&convolved_for_resolution, vsini, wl_grid);
-    });
-    println!("convolve vsini: {:?}", start.elapsed());
-    let start = Instant::now();
-    is.par_iter().for_each(|_| {
-        let y = oaconvolve(&convolved_for_resolution, vsini, wl_grid);
-    });
-    println!("convolve vsini: {:?}", start.elapsed());
+    // let start = Instant::now();
+    // is.par_iter().for_each(|_| {
+    //     let y = oaconvolve(&convolved_for_resolution, vsini, wl_grid);
+    // });
+    // println!("convolve vsini: {:?}", start.elapsed());
+    // let start = Instant::now();
+    // is.par_iter().for_each(|_| {
+    //     let y = oaconvolve(&convolved_for_resolution, vsini, wl_grid);
+    // });
+    // println!("convolve vsini: {:?}", start.elapsed());
+    // let start = Instant::now();
+    // is.par_iter().for_each(|_| {
+    //     let y = oaconvolve(&convolved_for_resolution, vsini, wl_grid);
+    // });
+    // println!("convolve vsini: {:?}", start.elapsed());
+    // let start = Instant::now();
+    // is.par_iter().for_each(|_| {
+    //     let y = oaconvolve(&convolved_for_resolution, vsini, wl_grid);
+    // });
+    // println!("convolve vsini: {:?}", start.elapsed());
 
-    let start = Instant::now();
-    is.par_iter().for_each(|_| {
-        let y = interpolator
-            .produce_model(&target_dispersion, teff, m, logg, vsini, rv)
-            .unwrap();
-    });
-    println!("produce_model: {:?}", start.elapsed());
-    let start = Instant::now();
-    is.par_iter().for_each(|_| {
-        let y = interpolator
-            .produce_model(&target_dispersion, teff, m, logg, vsini, rv)
-            .unwrap();
-    });
-    println!("produce_model: {:?}", start.elapsed());
+    // let start = Instant::now();
+    // is.par_iter().for_each(|_| {
+    //     let y = interpolator
+    //         .produce_model(&target_dispersion, teff, m, logg, vsini, rv)
+    //         .unwrap();
+    // });
+    // println!("produce_model: {:?}", start.elapsed());
+    // let start = Instant::now();
+    // is.par_iter().for_each(|_| {
+    //     let y = interpolator
+    //         .produce_model(&target_dispersion, teff, m, logg, vsini, rv)
+    //         .unwrap();
+    // });
+    // println!("produce_model: {:?}", start.elapsed());
     let start = Instant::now();
     is.par_iter().for_each(|_| {
         let y = interpolator
@@ -242,6 +245,30 @@ pub fn main() -> Result<()> {
     });
     println!("fit_continuum: {:?}", start.elapsed());
 
+    // let start = Instant::now();
+    // let y = fit_pso(
+    //     &interpolator,
+    //     &target_dispersion,
+    //     &observed_spectrum,
+    //     &continuum_fitter,
+    //     &settings,
+    //     None,
+    //     true,
+    // )
+    // .unwrap();
+    // println!("fit_pso: {:?}", start.elapsed());
+    // let start = Instant::now();
+    // let y = fit_pso(
+    //     &interpolator,
+    //     &target_dispersion,
+    //     &observed_spectrum,
+    //     &continuum_fitter,
+    //     &settings,
+    //     None,
+    //     true,
+    // )
+    // .unwrap();
+    // println!("fit_pso: {:?}", start.elapsed());
     let start = Instant::now();
     let y = fit_pso(
         &interpolator,
@@ -251,7 +278,8 @@ pub fn main() -> Result<()> {
         &settings,
         None,
         true,
-    );
+    )
+    .unwrap();
     println!("fit_pso: {:?}", start.elapsed());
     let start = Instant::now();
     let y = fit_pso(
@@ -262,7 +290,8 @@ pub fn main() -> Result<()> {
         &settings,
         None,
         true,
-    );
+    )
+    .unwrap();
     println!("fit_pso: {:?}", start.elapsed());
     let start = Instant::now();
     let y = fit_pso(
@@ -273,29 +302,22 @@ pub fn main() -> Result<()> {
         &settings,
         None,
         true,
-    );
+    )
+    .unwrap();
     println!("fit_pso: {:?}", start.elapsed());
-    let start = Instant::now();
-    let y = fit_pso(
-        &interpolator,
-        &target_dispersion,
-        &observed_spectrum,
-        &continuum_fitter,
-        &settings,
-        None,
-        true,
-    );
-    println!("fit_pso: {:?}", start.elapsed());
-    let start = Instant::now();
-    let y = fit_pso(
-        &interpolator,
-        &target_dispersion,
-        &observed_spectrum,
-        &continuum_fitter,
-        &settings,
-        None,
-        true,
-    );
-    println!("fit_pso: {:?}", start.elapsed());
+
+    // let start = Instant::now();
+    // observed_spectra.par_iter().for_each(|spec| {
+    //     fit_pso(
+    //         &interpolator,
+    //         &target_dispersion,
+    //         spec,
+    //         &continuum_fitter,
+    //         &settings,
+    //         None,
+    //         false,
+    //     ).unwrap();
+    // });
+    // println!("fit_pso: {:?}", start.elapsed());
     Ok(())
 }

@@ -529,14 +529,38 @@ macro_rules! implement_methods {
                     save_directory,
                     parallelize.unwrap_or(true),
                 );
-                Ok(result.unwrap().into())
-                // Ok(PyOptimizationResult {
-                //     labels: (0.0, 0.0, 0.0, 0.0, 0.0),
-                //     continuum_params: vec![0.0],
-                //     ls: 0.0,
-                //     iters: 0,
-                //     time: 0.0,
-                // })
+                Ok(result?.into())
+            }
+
+            pub fn fit_pso_bulk(
+                &self,
+                fitters: Vec<PyContinuumFitter>,
+                dispersions: Vec<PyWavelengthDispersion>,
+                observed_fluxs: Vec<Vec<FluxFloat>>,
+                observed_vars: Vec<Vec<FluxFloat>>,
+                settings: PSOSettings,
+            ) -> PyResult<Vec<PyOptimizationResult>> {
+                let pso_settings: fitting::PSOSettings = settings.into();
+                println!("{:?}", fitters.len());
+                Ok(fitters
+                    .into_par_iter()
+                    .zip(dispersions)
+                    .zip(observed_fluxs)
+                    .zip(observed_vars)
+                    .map(|(((fitter, disp), flux), var)| {
+                        let observed_spectrum = ObservedSpectrum::from_vecs(flux, var);
+                        let result = fit_pso(
+                            &self.interpolator,
+                            &disp.0,
+                            &observed_spectrum.into(),
+                            &fitter.0,
+                            &pso_settings,
+                            None,
+                            false,
+                        );
+                        result.unwrap().into()
+                    })
+                    .collect::<Vec<_>>())
             }
 
             /// Calculate uncertainties with the chi2 landscape method
@@ -569,29 +593,29 @@ macro_rules! implement_methods {
             /// for many spectra with multithreading
             pub fn uncertainty_chi2_bulk(
                 &self,
-                observed_wavelengths: Vec<Vec<f64>>,
+                fitters: Vec<PyContinuumFitter>,
+                dispersions: Vec<PyWavelengthDispersion>,
                 observed_fluxes: Vec<Vec<FluxFloat>>,
                 observed_vars: Vec<Vec<FluxFloat>>,
                 parameters: Vec<[f64; 5]>,
                 search_radius: Option<[f64; 5]>,
             ) -> Vec<[Option<(f64, f64)>; 5]> {
                 let search_radius = search_radius.unwrap_or([2000.0, 0.3, 0.3, 40.0, 40.0]);
-                let bar = ProgressBar::new(observed_wavelengths.len() as u64);
-                observed_wavelengths
+                let bar = ProgressBar::new(fitters.len() as u64);
+                fitters
                     .into_par_iter()
+                    .zip(dispersions)
                     .zip(observed_fluxes)
                     .zip(observed_vars)
                     .zip(parameters)
-                    .map(|(((wl, flux), var), params)| {
+                    .map(|((((fitter, disp), flux), var), params)| {
                         bar.inc(1);
-                        let target_dispersion = NoDispersionTarget(wl.into());
                         let obs = ObservedSpectrum::from_vecs(flux, var);
-                        let fitter = ChunkFitter::new(target_dispersion.0.clone(), 5, 8, 0.2);
                         uncertainty_chi2(
                             &self.interpolator,
-                            &target_dispersion,
+                            &disp.0,
                             &obs,
-                            &fitter,
+                            &fitter.0,
                             params.into(),
                             search_radius.into(),
                         )
@@ -602,47 +626,28 @@ macro_rules! implement_methods {
             }
 
             /// Uncertainties with the chi2 landscape method,
-            /// on multiple spectra using multithreading
-            pub fn uncertainty_chi2_fixed_cont_bulk(
+            /// for many spectra with multithreading
+            pub fn uncertainty_chi2_bulk_fixed_wl(
                 &self,
-                observed_wavelengths: Vec<Vec<f64>>,
+                fitter: PyContinuumFitter,
+                dispersion: PyWavelengthDispersion,
                 observed_fluxes: Vec<Vec<FluxFloat>>,
                 observed_vars: Vec<Vec<FluxFloat>>,
                 parameters: Vec<[f64; 5]>,
                 search_radius: Option<[f64; 5]>,
             ) -> Vec<[Option<(f64, f64)>; 5]> {
                 let search_radius = search_radius.unwrap_or([2000.0, 0.3, 0.3, 40.0, 40.0]);
-                let bar = ProgressBar::new(observed_wavelengths.len() as u64);
-                observed_wavelengths
+                observed_fluxes
                     .into_par_iter()
-                    .zip(observed_fluxes)
                     .zip(observed_vars)
                     .zip(parameters)
-                    .map(|(((wl, flux), var), params)| {
-                        bar.inc(1);
-                        let target_dispersion = NoDispersionTarget(wl.into());
+                    .map(|((flux, var), params)| {
                         let obs = ObservedSpectrum::from_vecs(flux, var);
-                        let cont_fitter = ChunkFitter::new(target_dispersion.0.clone(), 5, 8, 0.2);
-                        let synth = self
-                            .interpolator
-                            .produce_model(
-                                &target_dispersion,
-                                params[0],
-                                params[1],
-                                params[2],
-                                params[3],
-                                params[4],
-                            )
-                            .unwrap();
-                        let continuum = cont_fitter
-                            .fit_continuum_and_return_continuum(&obs, &synth)
-                            .unwrap();
-                        let fixed_fitter = FixedContinuum::new(continuum);
                         uncertainty_chi2(
                             &self.interpolator,
-                            &target_dispersion,
+                            &dispersion.0,
                             &obs,
-                            &fixed_fitter,
+                            &fitter.0,
                             params.into(),
                             search_radius.into(),
                         )

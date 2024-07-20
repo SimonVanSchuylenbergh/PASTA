@@ -18,6 +18,7 @@ pub const SCALING: na::SVector<f64, 5> =
     na::SVector::<f64, 5>::new(10_000.0, 1.0, 1.0, 100.0, 100.0);
 
 /// Observed specrum with flux and variance
+#[derive(Clone, Debug)]
 pub struct ObservedSpectrum {
     pub flux: na::DVector<FluxFloat>,
     pub var: na::DVector<FluxFloat>,
