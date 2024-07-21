@@ -1,4 +1,4 @@
-use crate::interpolate::{WlGrid, FluxFloat};
+use crate::interpolate::{FluxFloat, WlGrid};
 use anyhow::{anyhow, Result};
 use enum_dispatch::enum_dispatch;
 use nalgebra as na;
@@ -64,6 +64,10 @@ fn make_gaussian(arr: &mut [FluxFloat], sigma: FluxFloat) {
     }
 }
 
+/// Used for spectra where the spectral resolution is strongly wavelength dependent.
+/// Every pixel of the synthetic spectrum will be convolved with its own gaussian kernel
+/// to simulate the effect of variable spectral resolution.
+/// The kernels are precomputed and stored in a matrix.
 #[derive(Clone, Debug)]
 pub struct VariableTargetDispersion {
     pub observed_wl: na::DVector<f64>,
@@ -73,6 +77,9 @@ pub struct VariableTargetDispersion {
 }
 
 impl VariableTargetDispersion {
+    /// Create a new VariableTargetDispersion object.
+    /// dispersion: per-pixel spectral resolution in angstrom (1 sigma)
+    /// The observed wavelength and resolution array are resampled to the synthetic wavelength grid.
     pub fn new(
         wavelength: na::DVector<f64>,
         dispersion: &na::DVector<FluxFloat>,
@@ -134,7 +141,7 @@ impl WavelengthDispersion for VariableTargetDispersion {
     fn convolve(&self, flux_arr: na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>> {
         if flux_arr.len() != self.synth_wl.n() {
             return Err(anyhow!(
-                "Trying to convolve spectrum with different length than synthetic wavelength grid. flux_arr: {:?}, synth_wl: {:?}",
+                "flux_arr and wavelength grid don't match. flux_arr: {:?}, synth_wl: {:?}",
                 flux_arr.len(),
                 self.synth_wl.n()
             ));
@@ -152,7 +159,8 @@ impl WavelengthDispersion for VariableTargetDispersion {
 
 const FFTSIZE: usize = 2048;
 
-fn build_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<FluxFloat> {
+pub fn build_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<FluxFloat> {
+    // In case of linear wavelength dispersion, choose central wavelength for the pixel velocity step
     let dvelo = match synth_wl {
         WlGrid::Linspace(first, step, n) => step / (first + 0.5 * step * (n as f64)),
         WlGrid::Logspace(_, step, _) => std::f64::consts::LN_10 * step,
@@ -160,8 +168,20 @@ fn build_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<FluxFloat> {
     let epsilon = 0.6;
     let vrot = vsini / 299792.0;
 
-    let n = 1.max((2.0 * vrot / dvelo).round() as usize);
+    // Number of pixels required for the kernel
+    let n_maybe_even = 1.max(
+        (2.0 * vrot / dvelo
+            * (1.0 + (4.0 * (epsilon - 1.0) / (std::f64::consts::PI * epsilon)).powf(2.0)).sqrt())
+        .ceil() as usize
+            + 2,
+    );
+    let n = if n_maybe_even % 2 == 0 {
+        n_maybe_even + 1
+    } else {
+        n_maybe_even
+    };
     let mut velo_k: Vec<f64> = (0..n).map(|i| i as f64 * dvelo).collect();
+    // Center around midpoint
     let mid = velo_k[n - 1] / 2.0;
     for v in &mut velo_k {
         *v -= mid;
