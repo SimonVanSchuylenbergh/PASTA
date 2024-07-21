@@ -149,6 +149,10 @@ impl CachedFetcher {
             ))),
         }
     }
+
+    pub fn cache_size(&self) -> usize {
+        self.cache.lock().unwrap().len()
+    }
 }
 
 impl ModelFetcher for CachedFetcher {

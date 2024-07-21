@@ -681,8 +681,8 @@ impl Bounds for CompoundBounds {
 }
 
 pub struct CompoundInterpolator<F: ModelFetcher> {
-    interpolators: [SquareGridInterpolator<F>; 3],
-    bounds: CompoundBounds,
+    pub interpolators: [SquareGridInterpolator<F>; 3],
+    pub bounds: CompoundBounds,
 }
 
 impl<F: ModelFetcher> CompoundInterpolator<F> {

@@ -217,6 +217,29 @@ impl PyContinuumFitter {
             .unwrap();
         Ok(result.data.into())
     }
+
+    fn fit_and_return_chi2(
+        &self,
+        synth: Vec<FluxFloat>,
+        y: Vec<FluxFloat>,
+        yerr: Vec<FluxFloat>,
+    ) -> PyResult<f64> {
+        let observed_spectrum = ObservedSpectrum::from_vecs(y, yerr);
+        let (_, chi2) = self
+            .0
+            .fit_continuum(&observed_spectrum, &na::DVector::from_vec(synth))
+            .unwrap();
+        Ok(chi2)
+    }
+
+    fn build_continuum(&self, params: Vec<FluxFloat>) -> PyResult<Vec<FluxFloat>> {
+        Ok(self
+            .0
+            .build_continuum(&na::DVector::from_vec(params))
+            .unwrap()
+            .data
+            .into())
+    }
 }
 
 #[pyfunction]
@@ -238,23 +261,18 @@ fn ChunkContinuumFitter(
 }
 
 #[pyfunction]
-fn FixedContinuumFitter(continuum: Vec<FluxFloat>) -> PyContinuumFitter {
-    PyContinuumFitter(FixedContinuum::new(continuum.into()).into())
+fn FixedContinuumFitter(
+    continuum: Vec<FluxFloat>,
+    ignore_first_and_last: Option<usize>,
+) -> PyContinuumFitter {
+    PyContinuumFitter(
+        FixedContinuum::new(continuum.into(), ignore_first_and_last.unwrap_or(0)).into(),
+    )
 }
 
 #[pyfunction]
 fn ConstantContinuumFitter() -> PyContinuumFitter {
     PyContinuumFitter(ConstantContinuum().into())
-}
-
-/// Build LinearModelFitter object from design matrix
-fn convert_dm(design_matrix: Vec<FluxFloat>, len: usize) -> LinearModelFitter {
-    let n_params = design_matrix.len() / len;
-    LinearModelFitter::new(na::DMatrix::<FluxFloat>::from_vec(
-        len,
-        n_params,
-        design_matrix,
-    ))
 }
 
 macro_rules! implement_methods {
@@ -443,32 +461,6 @@ macro_rules! implement_methods {
                     .collect())
             }
 
-            /// Compute the chi2 value at a given set of labels, with a fixed continuum.
-            pub fn chi2_fixed_continuum(
-                &self,
-                dispersion: PyWavelengthDispersion,
-                continuum: Vec<FluxFloat>,
-                observed_flux: Vec<FluxFloat>,
-                observed_var: Vec<FluxFloat>,
-                labels: Vec<[f64; 5]>,
-            ) -> PyResult<Vec<f64>> {
-                let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
-                let fitter = FixedContinuum::new(continuum.into());
-                Ok(labels
-                    .into_par_iter()
-                    .map(|[teff, m, logg, vsini, rv]| {
-                        let synth_model = self
-                            .interpolator
-                            .produce_model(&dispersion.0, teff, m, logg, vsini, rv)
-                            .unwrap();
-                        let (_, chi2) = fitter
-                            .fit_continuum(&observed_spectrum, &synth_model)
-                            .unwrap();
-                        chi2
-                    })
-                    .collect())
-            }
-
             /// Compute the chi2 value at a given set of labels with multithreading.
             /// Continuum is fitted.
             pub fn chi2_bulk(
@@ -572,6 +564,7 @@ macro_rules! implement_methods {
                 dispersion: PyWavelengthDispersion,
                 observed_flux: Vec<FluxFloat>,
                 observed_var: Vec<FluxFloat>,
+                spec_res: f64,
                 parameters: [f64; 5],
                 search_radius: Option<[f64; 5]>,
             ) -> [Option<(f64, f64)>; 5] {
@@ -582,6 +575,7 @@ macro_rules! implement_methods {
                     &dispersion.0,
                     &observed_spectrum,
                     &fitter.0,
+                    spec_res,
                     parameters.into(),
                     search_radius.into(),
                 )
@@ -597,6 +591,7 @@ macro_rules! implement_methods {
                 dispersions: Vec<PyWavelengthDispersion>,
                 observed_fluxes: Vec<Vec<FluxFloat>>,
                 observed_vars: Vec<Vec<FluxFloat>>,
+                spec_res: f64,
                 parameters: Vec<[f64; 5]>,
                 search_radius: Option<[f64; 5]>,
             ) -> Vec<[Option<(f64, f64)>; 5]> {
@@ -616,6 +611,7 @@ macro_rules! implement_methods {
                             &disp.0,
                             &obs,
                             &fitter.0,
+                            spec_res,
                             params.into(),
                             search_radius.into(),
                         )
@@ -633,6 +629,7 @@ macro_rules! implement_methods {
                 dispersion: PyWavelengthDispersion,
                 observed_fluxes: Vec<Vec<FluxFloat>>,
                 observed_vars: Vec<Vec<FluxFloat>>,
+                spec_res: f64,
                 parameters: Vec<[f64; 5]>,
                 search_radius: Option<[f64; 5]>,
             ) -> Vec<[Option<(f64, f64)>; 5]> {
@@ -648,6 +645,7 @@ macro_rules! implement_methods {
                             &dispersion.0,
                             &obs,
                             &fitter.0,
+                            spec_res,
                             params.into(),
                             search_radius.into(),
                         )
@@ -820,6 +818,10 @@ impl CachedInterpolator {
             interpolator: SquareGridInterpolator::new(fetcher, wavelength.0),
         }
     }
+
+    pub fn cache_size(&self) -> usize {
+        self.interpolator.fetcher.cache_size()
+    }
 }
 
 implement_methods!(OnDiskInterpolator, interpolators::OnDiskInterpolator);
@@ -898,6 +900,14 @@ impl CachedCompound {
             ),
         }
     }
+
+    pub fn cache_size(&self) -> (usize, usize, usize) {
+        (
+            self.interpolator.interpolators[0].fetcher.cache_size(),
+            self.interpolator.interpolators[1].fetcher.cache_size(),
+            self.interpolator.interpolators[2].fetcher.cache_size(),
+        )
+    }
 }
 
 implement_methods!(
@@ -913,25 +923,9 @@ implement_methods!(
     interpolate::CompoundInterpolator<interpolators::CachedInterpolator>
 );
 
-/// Fit continuum with chunk method.
-/// Returns the fit parameters for each chunk.
-/// y is the observed spectrum divided by model.
 #[pyfunction]
-pub fn fit_continuum(wl: Vec<f64>, y: Vec<FluxFloat>) -> PyResult<Vec<Vec<FluxFloat>>> {
-    let wl_arr = na::DVector::from_vec(wl);
-    let fitter = ChunkFitter::new(wl_arr, 5, 8, 0.2);
-    let result = fitter._fit_chunks(&y.into());
-    Ok(result.into_iter().map(|x| x.data.into()).collect())
-}
-
-/// Build continuum from chunk fit parameters
-#[pyfunction]
-pub fn build_continuum(wl: Vec<f64>, pfits: Vec<Vec<FluxFloat>>) -> PyResult<Vec<FluxFloat>> {
-    let wl_arr = na::DVector::from_vec(wl);
-    let fitter = ChunkFitter::new(wl_arr, 5, 8, 0.2);
-    let parr = pfits.into_iter().map(na::DVector::from_vec).collect();
-    let result = fitter.build_continuum_from_chunks(parr);
-    Ok(result.data.into())
+pub fn get_vsini_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<FluxFloat> {
+    convolve_rv::build_kernel(vsini, synth_wl.0)
 }
 
 #[pymodule]
@@ -949,7 +943,6 @@ fn pso(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ChunkContinuumFitter, m)?)?;
     m.add_function(wrap_pyfunction!(FixedContinuumFitter, m)?)?;
     m.add_function(wrap_pyfunction!(ConstantContinuumFitter, m)?)?;
-    m.add_function(wrap_pyfunction!(fit_continuum, m)?)?;
-    m.add_function(wrap_pyfunction!(build_continuum, m)?)?;
+    m.add_function(wrap_pyfunction!(get_vsini_kernel, m)?)?;
     Ok(())
 }
