@@ -279,7 +279,7 @@ macro_rules! implement_methods {
     ($name: ident, $interpolator_type: ty) => {
         #[pymethods]
         impl $name {
-            /// Produce a model by interpolating, convolving, shifting by rv and resampling to wl array.
+            /// Produce a model spectrum by interpolating, convolving, shifting by rv and resampling to wl array.
             pub fn produce_model<'a>(
                 &mut self,
                 py: Python<'a>,
@@ -298,6 +298,8 @@ macro_rules! implement_methods {
                 PyArray::from_vec_bound(py, interpolated.iter().copied().collect())
             }
 
+
+            /// Build the wavelength dispersion kernel (debugging purposes).
             pub fn get_kernels<'a>(
                 &mut self,
                 py: Python<'a>,
@@ -318,16 +320,15 @@ macro_rules! implement_methods {
                 PyArray::from_vec2_bound(py, &v[..]).unwrap()
             }
 
-            /// Produce multiple models with multithreading.
+            /// Produce multiple model spectra using multithreading.
             /// labels: Vec of (Teff, [M/H], logg, vsini, RV) tuples.
             pub fn produce_model_bulk<'a>(
                 &mut self,
                 py: Python<'a>,
-                observed_wavelength: Vec<f64>,
-                labels: Vec<(f64, f64, f64, f64, f64)>,
+                dispersion: PyWavelengthDispersion,
+                labels: Vec<[f64; 5]>,
                 progress: Option<bool>,
             ) -> Bound<'a, PyArray<FluxFloat, Ix2>> {
-                let target_dispersion = NoDispersionTarget(observed_wavelength.into());
                 let progress_bar = if progress.unwrap_or(false) {
                     ProgressBar::new(labels.len() as u64)
                 } else {
@@ -335,10 +336,10 @@ macro_rules! implement_methods {
                 };
                 let vec: Vec<Vec<FluxFloat>> = labels
                     .into_par_iter()
-                    .map(|(teff, m, logg, vsini, rv)| {
+                    .map(|[teff, m, logg, vsini, rv]| {
                         progress_bar.inc(1);
                         self.interpolator
-                            .produce_model(&target_dispersion, teff, m, logg, vsini, rv)
+                            .produce_model(&dispersion.0, teff, m, logg, vsini, rv)
                             .unwrap()
                             .iter()
                             .copied()
@@ -929,7 +930,7 @@ pub fn get_vsini_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<FluxFloat> {
 }
 
 #[pymodule]
-fn pso(_py: Python, m: &PyModule) -> PyResult<()> {
+fn pso(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CachedInterpolator>()?;
     m.add_class::<OnDiskInterpolator>()?;
     m.add_class::<InMemInterpolator>()?;
