@@ -4,8 +4,12 @@ mod fitting;
 mod interpolate;
 mod model_fetchers;
 mod particleswarm;
+
 use anyhow::Result;
-use convolve_rv::{NoDispersionTarget, VariableTargetDispersion, WavelengthDispersion};
+use convolve_rv::{
+    FixedTargetDispersion, NoConvolutionDispersionTarget, VariableTargetDispersion,
+    WavelengthDispersion,
+};
 use enum_dispatch::enum_dispatch;
 use fitting::{
     fit_pso, uncertainty_chi2, ChunkFitter, FixedContinuum, LinearModelFitter, ObservedSpectrum,
@@ -23,54 +27,6 @@ use numpy::array::PyArray;
 use numpy::{Ix1, Ix2, PyArrayLike};
 use pyo3::{prelude::*, pyclass};
 use rayon::prelude::*;
-
-/// Fit polynomial to data.
-fn polyfit<const N: usize>(
-    x_values: &na::SVector<f64, N>,
-    b: &na::SVector<f64, N>,
-    polynomial_degree: usize,
-) -> na::DVector<f64> {
-    let number_of_columns = polynomial_degree + 1;
-    let number_of_rows = x_values.len();
-    let mut a = na::DMatrix::zeros(number_of_rows, number_of_columns);
-
-    for (row, &x) in x_values.iter().enumerate() {
-        // First column is always 1
-        a[(row, 0)] = 1.0;
-
-        for col in 1..number_of_columns {
-            a[(row, col)] = x.powf(col as f64);
-        }
-    }
-
-    let decomp = na::SVD::new(a, true, true);
-    decomp.solve(b, na::convert(1e-18f64)).unwrap()
-}
-
-/// Filter a spectrum and keep only the pixels with wavelengths within at least one of the ranges.
-/// Ranges are given as a vec of (start, end) tuples (inclusive).
-fn cut_spectrum_multi_ranges(
-    wl: &na::DVector<f64>,
-    flux: &na::DVector<f64>,
-    wl_ranges: Vec<(f64, f64)>,
-) -> (na::DVector<f64>, na::DVector<f64>) {
-    let mut indices = Vec::new();
-    for (i, &x) in wl.iter().enumerate() {
-        for wl_range in wl_ranges.iter() {
-            if x >= wl_range.0 && x <= wl_range.1 {
-                indices.push(i);
-                break;
-            }
-        }
-    }
-    let mut new_wl = na::DVector::zeros(indices.len());
-    let mut new_flux = na::DVector::zeros(indices.len());
-    for (i, &index) in indices.iter().enumerate() {
-        new_wl[i] = wl[index];
-        new_flux[i] = flux[index];
-    }
-    (new_wl, new_flux)
-}
 
 /// Parameters to the PSO algorithm
 #[derive(Clone, Debug)]
@@ -111,7 +67,7 @@ impl From<PSOSettings> for FittingPSOSettings {
     }
 }
 
-/// Output from the PSO fitting.
+/// Output of the PSO fitting algorithm.
 #[derive(Clone, Debug)]
 #[pyclass(module = "normalization", frozen)]
 pub struct PyOptimizationResult {
@@ -119,14 +75,15 @@ pub struct PyOptimizationResult {
     #[pyo3(get)]
     pub labels: (f64, f64, f64, f64, f64),
     /// Fitted parameters for the continuum fitting function
+    /// (polynomial coefficients)
     #[pyo3(get)]
     pub continuum_params: Vec<FluxFloat>,
     #[pyo3(get)]
     /// Chi2 value
-    pub ls: f64,
+    pub chi2: f64,
     #[pyo3(get)]
     /// Number of iterations used
-    pub iters: u64,
+    pub iterations: u64,
     /// Time taken
     #[pyo3(get)]
     pub time: f64,
@@ -138,8 +95,8 @@ impl From<OptimizationResult> for PyOptimizationResult {
         PyOptimizationResult {
             labels: result.labels.into(),
             continuum_params: result.continuum_params.data.into(),
-            ls: result.ls,
-            iters: result.iters,
+            chi2: result.ls,
+            iterations: result.iters,
             time: result.time,
         }
     }
@@ -159,12 +116,17 @@ impl WlGrid {
             WlGrid(interpolate::WlGrid::Linspace(min, step, len))
         }
     }
+
+    pub fn get_array(&self) -> Vec<f64> {
+        self.0.iterate().collect()
+    }
 }
 
 #[enum_dispatch(WavelengthDispersion)]
 #[derive(Clone, Debug)]
 enum WavelengthDispersionWrapper {
-    NoDispersionTarget,
+    NoConvolutionDispersionTarget,
+    FixedTargetDispersion,
     VariableTargetDispersion,
 }
 
@@ -186,8 +148,21 @@ fn VariableResolutionDispersion(
 }
 
 #[pyfunction]
-fn FixedResolutionDispersion(wl: Vec<f64>) -> PyWavelengthDispersion {
-    PyWavelengthDispersion(NoDispersionTarget(wl.into()).into())
+fn FixedResolutionDispersion(
+    wl: Vec<f64>,
+    resolution: f64,
+    synth_wl: WlGrid,
+) -> PyWavelengthDispersion {
+    PyWavelengthDispersion(
+        FixedTargetDispersion::new(wl.into(), resolution, synth_wl.0)
+            .unwrap()
+            .into(),
+    )
+}
+
+#[pyfunction]
+fn NoConvolutionDispersion(wl: Vec<f64>) -> PyWavelengthDispersion {
+    PyWavelengthDispersion(NoConvolutionDispersionTarget(wl.into()).into())
 }
 
 #[enum_dispatch(ContinuumFitter)]
@@ -275,6 +250,8 @@ fn ConstantContinuumFitter() -> PyContinuumFitter {
     PyContinuumFitter(ConstantContinuum().into())
 }
 
+/// Implement methods for all the interpolator classes.
+/// We can't use traits with pyo3, so we have to use macros.
 macro_rules! implement_methods {
     ($name: ident, $interpolator_type: ty) => {
         #[pymethods]
@@ -298,8 +275,7 @@ macro_rules! implement_methods {
                 PyArray::from_vec_bound(py, interpolated.iter().copied().collect())
             }
 
-
-            /// Build the wavelength dispersion kernel (debugging purposes).
+            /// Build the wavelength dispersion kernels (debugging purposes).
             pub fn get_kernels<'a>(
                 &mut self,
                 py: Python<'a>,
@@ -444,25 +420,38 @@ macro_rules! implement_methods {
                 observed_flux: Vec<FluxFloat>,
                 observed_var: Vec<FluxFloat>,
                 labels: Vec<[f64; 5]>,
+                allow_nan: Option<bool>,
             ) -> PyResult<Vec<f64>> {
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
                 Ok(labels
                     .into_par_iter()
                     .map(|[teff, m, logg, vsini, rv]| {
-                        let synth_model = self
-                            .interpolator
-                            .produce_model(&dispersion.0, teff, m, logg, vsini, rv)
-                            .unwrap();
+                        let synth_model_result = self.interpolator.produce_model(
+                            &dispersion.0,
+                            teff,
+                            m,
+                            logg,
+                            vsini,
+                            rv,
+                        );
+                        let synth_model = match allow_nan {
+                            Some(true) => match synth_model_result {
+                                Ok(x) => x,
+                                Err(_) => return f64::NAN,
+                            },
+                            _ => synth_model_result.unwrap(),
+                        };
                         let (_, chi2) = fitter
                             .0
                             .fit_continuum(&observed_spectrum, &synth_model)
                             .unwrap();
                         chi2
+                        // 0.0
                     })
                     .collect())
             }
 
-            /// Compute the chi2 value at a given set of labels with multithreading.
+            /// Compute the chi2 value at a given set of labels for multiple spectra.
             /// Continuum is fitted.
             pub fn chi2_bulk(
                 &self,
@@ -471,6 +460,7 @@ macro_rules! implement_methods {
                 observed_var: Vec<Vec<FluxFloat>>,
                 labels: Vec<[f64; 5]>,
                 progress: Option<bool>,
+                allow_nan: Option<bool>,
             ) -> PyResult<Vec<f64>> {
                 let progress_bar = if progress.unwrap_or(false) {
                     ProgressBar::new(labels.len() as u64)
@@ -485,11 +475,23 @@ macro_rules! implement_methods {
                     .map(|((([teff, m, logg, vsini, rv], wl), flux), var)| {
                         progress_bar.inc(1);
                         let obs = ObservedSpectrum::from_vecs(flux, var);
-                        let target_dispersion = NoDispersionTarget(wl.into());
-                        let synth_model = self
-                            .interpolator
-                            .produce_model(&target_dispersion, teff, m, logg, vsini, rv)
-                            .unwrap();
+                        let target_dispersion = NoConvolutionDispersionTarget(wl.into());
+                        let synth_model_result = self.interpolator.produce_model(
+                            &target_dispersion,
+                            teff,
+                            m,
+                            logg,
+                            vsini,
+                            rv,
+                        );
+                        let synth_model = match allow_nan {
+                            Some(true) => match synth_model_result {
+                                Ok(x) => x,
+                                Err(_) => return f64::NAN,
+                            },
+                            _ => synth_model_result.unwrap(),
+                        };
+                        // let synth_model = synth_model_result.unwrap();
                         let fitter = ChunkFitter::new(target_dispersion.0.clone(), 5, 8, 0.2);
                         let (_, chi2) = fitter.fit_continuum(&obs, &synth_model).unwrap();
                         chi2
@@ -624,6 +626,8 @@ macro_rules! implement_methods {
 
             /// Uncertainties with the chi2 landscape method,
             /// for many spectra with multithreading
+            /// where every spectrum is on the same wavelength grid.
+            /// Only one `dispersion` object must be given.
             pub fn uncertainty_chi2_bulk_fixed_wl(
                 &self,
                 fitter: PyContinuumFitter,
@@ -926,7 +930,11 @@ implement_methods!(
 
 #[pyfunction]
 pub fn get_vsini_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<FluxFloat> {
-    convolve_rv::build_kernel(vsini, synth_wl.0)
+    let dvelo = match synth_wl.0 {
+        interpolate::WlGrid::Linspace(_, _, _) => panic!("Only logspace is supported"),
+        interpolate::WlGrid::Logspace(_, step, _) => std::f64::consts::LN_10 * step,
+    };
+    convolve_rv::build_rotation_kernel(vsini, dvelo).data.into()
 }
 
 #[pymodule]
@@ -939,8 +947,9 @@ fn pso(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CachedCompound>()?;
     m.add_class::<WlGrid>()?;
     m.add_class::<PSOSettings>()?;
-    m.add_function(wrap_pyfunction!(VariableResolutionDispersion, m)?)?;
+    m.add_function(wrap_pyfunction!(NoConvolutionDispersion, m)?)?;
     m.add_function(wrap_pyfunction!(FixedResolutionDispersion, m)?)?;
+    m.add_function(wrap_pyfunction!(VariableResolutionDispersion, m)?)?;
     m.add_function(wrap_pyfunction!(ChunkContinuumFitter, m)?)?;
     m.add_function(wrap_pyfunction!(FixedContinuumFitter, m)?)?;
     m.add_function(wrap_pyfunction!(ConstantContinuumFitter, m)?)?;

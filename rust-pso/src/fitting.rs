@@ -6,7 +6,6 @@ use argmin::core::observers::{Observe, ObserverMode};
 use argmin::core::{CostFunction, Error, Executor, PopulationState, State, KV};
 use argmin::solver::brent::BrentRoot;
 use enum_dispatch::enum_dispatch;
-use itertools::Itertools;
 use nalgebra as na;
 use num_traits::Float;
 use serde::Serialize;
@@ -116,6 +115,13 @@ impl ContinuumFitter for LinearModelFitter {
     }
 
     fn build_continuum(&self, params: &na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>> {
+        if params.len() != self.design_matrix.ncols() {
+            return Err(anyhow!(
+                "Incorrect number of parameters {:?}, expected {:?}",
+                params.len(),
+                self.design_matrix.ncols()
+            ));
+        }
         Ok(&self.design_matrix * params)
     }
 }
@@ -691,7 +697,7 @@ pub fn uncertainty_chi2<I: Interpolator>(
             .state
             .get_best_param()
             .context("result_left.state.get_best_param()")?;
-        let left = left_sol * search_radius[i];
+        let left = -left_sol * search_radius[i]; // Minus because we are looking for the negative of the solution
 
         let costfunction = ModelFitCost {
             interpolator,
