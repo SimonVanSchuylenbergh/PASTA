@@ -11,7 +11,8 @@ use crate::fitting::ObservedSpectrum;
 use crate::interpolate::{Bounds, CompoundInterpolator, SquareBounds};
 use anyhow::Result;
 use convolve_rv::{
-    oaconvolve, rot_broad_rv, NoDispersionTarget, VariableTargetDispersion, WavelengthDispersion,
+    oa_convolve, rot_broad_rv, NoConvolutionDispersionTarget, VariableTargetDispersion,
+    WavelengthDispersion,
 };
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
 use fitting::{fit_pso, uncertainty_chi2, ChunkFitter, ContinuumFitter, PSOSettings};
