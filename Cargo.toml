@@ -29,10 +29,9 @@ num-traits = "0.2.19"
 
 [dependencies.pyo3]
 version = "0.21.1"
-features = ["abi3-py39", "multiple-pymethods", "anyhow"]
+features = ["abi3-py37", "multiple-pymethods", "anyhow"]
 
 [profile.release]
-#debug = true
 codegen-units = 1
 lto = "fat"
 
