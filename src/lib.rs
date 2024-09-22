@@ -938,7 +938,7 @@ pub fn get_vsini_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<FluxFloat> {
 }
 
 #[pymodule]
-fn pso(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn pasta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CachedInterpolator>()?;
     m.add_class::<OnDiskInterpolator>()?;
     m.add_class::<InMemInterpolator>()?;

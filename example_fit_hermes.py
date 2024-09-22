@@ -3,21 +3,25 @@
 # Example for the HERMES spectrograph.
 
 from json import dump, load
+from os import environ
 from pathlib import Path
 
 import numpy as np
 from astropy.io import fits  # type: ignore
-from pso import (
+from pasta import (
     ChunkContinuumFitter,
     InMemCompound,
-    OnDiskCompound,
     InMemInterpolator,
-    OnDiskInterpolator,
     NoConvolutionDispersion,
+    OnDiskCompound,
+    OnDiskInterpolator,
     PSOSettings,
     WlGrid,
 )
 from tqdm.auto import tqdm  # Optional progress bar
+
+# Get more info on errors on Rust side
+environ["RUST_BACKTRACE"] = "1"
 
 
 # Read the observed spectrum from a fits file
@@ -46,7 +50,7 @@ def read_and_prepare_spectrum(
     var = var[mask]
     # Ignore pixels with zero or nan variance
     mask = (np.isnan(var)) | (var <= 0) | (np.isinf(var))
-    var[mask] = 1e30 # Set a large value to ignore these pixels
+    var[mask] = 1e30  # Set a large value to ignore these pixels
     return (wl, flux, var)
 
 
