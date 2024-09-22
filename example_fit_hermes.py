@@ -58,7 +58,7 @@ def read_and_prepare_spectrum(
 # We combine three rectangular grids
 # InMemInterpolator can be replaced by OnDiskInterpolator or CachedInterpolator
 # if the models are too large to fit in memory
-path = "path/to/models"
+model_path = "/path/to/models"
 # The wavelength grid of the models (first wavelength, step, number of pixels) in log10 scale
 wl_grid = WlGrid(np.log10(4_000), 1.6833119454e-06, 90470, log=True)
 vsini_range = (1, 500)
@@ -66,7 +66,7 @@ rv_range = (-150, 150)
 InterpolatorType = InMemInterpolator
 
 interpolator1 = InterpolatorType(
-    path,
+    model_path,
     wavelength=wl_grid,
     teff_range=list(np.arange(25_250, 30_250, 250)),
     m_range=list(np.arange(-0.8, 0.9, 0.1)),
@@ -75,7 +75,7 @@ interpolator1 = InterpolatorType(
     rv_range=rv_range,
 )
 interpolator2 = InterpolatorType(
-    path,
+    model_path,
     wavelength=wl_grid,
     teff_range=list(
         np.concatenate([np.arange(9800, 10000, 100), np.arange(10000, 26_000, 250)])
@@ -86,7 +86,7 @@ interpolator2 = InterpolatorType(
     rv_range=rv_range,
 )
 interpolator3 = InterpolatorType(
-    path,
+    model_path,
     wavelength=wl_grid,
     teff_range=list(np.arange(6000, 10_100, 100)),
     m_range=list(np.arange(-0.8, 0.9, 0.1)),
@@ -122,15 +122,14 @@ if not overwrite and output_file.exists():
 else:
     solutions = []
 
-spectra_folder = Path("path/to/observed_spectra_folder")
+spectra_folder = Path("/path/to/observed_spectra")
 # For HERMES, don't include the Var files here
 flux_files = sorted(
     [f for f in list(spectra_folder.glob("*.fits")) if "Var" not in f.name]
 )
 
-with open(
-    "prog.txt", "w"
-) as prog_file:  # Optional progress bar written to file prog.txt (useful for slurm)
+# Optional progress bar written to file progress.txt (useful for slurm)
+with open("progress.txt", "w") as prog_file:
     for file in tqdm(flux_files, file=prog_file):
         index = file.stem.split("_")[0]
         if index in [sol["index"] for sol in solutions]:
@@ -146,12 +145,25 @@ with open(
         dispersion = NoConvolutionDispersion(wl)
         # Fit the spectrum and write the solution to the output file
         solution = interpolator.fit_pso(fitter, dispersion, flux, var, settings)
-        sol = {
+        teff, m, logg, vsini, rv = solution.labels
+        # The chi2 landscape will be sampled in this region to determine the uncertainty
+        search_radius = [teff/4, 0.4, 0.5, vsini/4, 10.0]
+        uncertainty = interpolator.uncertainty_chi2(
+            fitter, dispersion, flux, var, 86_000, solution.labels, search_radius
+        )
+        # Left and right bounds are returned for each parameter
+        # take the average to get the uncertainty
+        # Sometimes no solution is found in the search region,
+        # in that case the uncertainty is set to 0
+        uncertainty = [0 if u is None else (u[0] + u[1])/2 for u in uncertainty]
+
+        json_output = {
             "index": index,
             "labels": solution.labels,  # (teff, logg, m, vsini, rv)
+            "uncertainty": uncertainty,
             "continuum": solution.continuum_params,  # Polynomial coefficients for every chunk
             "chi2": solution.chi2,  # Chi-squared of the best solution
         }
-        solutions.append(sol)
+        solutions.append(json_output)
         with open(output_file, "w") as f:
             dump(solutions, f)
