@@ -1,14 +1,20 @@
 # PASTA
- Pipeline for Automated Spectral Analysis
+ Pipeline for Automated Spectral Analysis.
+ 
+ Example usage in `example_fit_hermes.py` and `check_fit_hermes.py`.
 
 ## Installation
-### Python
-This folder functions as a Python package that can be installed in an environement using pip:
-    pip install -e .
-The `-e` is optional and links the package to this folder such that modifications to the files are applied immediately without needing to reinstall the package.
-The necessary dependencies are specified in the `environment.yaml` file
+The code is written in Rust, with an interface to Python. It can be installed as a Python package, either from the pre-built wheel or by compiling the source code.
 
-### Rust
-Part of the code relies on functions written in Rust that provide bindings to Python.
-A pre-compiled binary wheel is provided and can be installed with pip:
-`pip intall `
+
+### Pre-built wheel
+A pre-built wheel for x86_64 Linux is provided under the Github [releases](https://github.com/SimonVanSchuylenbergh/PASTA/releases). It can be installed in the active Python environment with `pip`:
+```sh
+pip install pasta-0.1.0-cp37-abi3-manylinux_2_35_x86_64.whl
+```
+
+### Compiling from source
+The Python package is built from source using [maturin](https://github.com/PyO3/maturin). To install in the active Python environment use
+```sh
+maturin develop --release
+```
