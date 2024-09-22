@@ -92,6 +92,9 @@ pub struct FixedTargetDispersion {
 
 impl FixedTargetDispersion {
     pub fn new(wavelength: na::DVector<f64>, resolution: f64, synth_wl: WlGrid) -> Result<Self> {
+        if resolution <= 0.0 {
+            return Err(anyhow!("Resolution must be positive"));
+        }
         let sigma = match synth_wl {
             WlGrid::Linspace(_, _, _) => {
                 return Err(anyhow!(
@@ -138,7 +141,9 @@ fn resample_observed_to_synth(
 ) -> Result<na::DVector<FluxFloat>> {
     if wl_obs.len() != y.len() {
         return Err(anyhow!(
-            "Length of observed wavelength and flux are different"
+            "Length of observed wavelength and flux are different. wl_obs: {:?}, y: {:?}",
+            wl_obs.len(),
+            y.len()
         ));
     }
 
@@ -300,28 +305,29 @@ fn pad_with_zeros(arr: na::DVectorView<FluxFloat>, new_width: usize) -> na::DVec
 }
 
 pub fn convolve_rotation(
+    synth_wl: &WlGrid,
     input_array: &na::DVector<FluxFloat>,
     vsini: f64,
-    synth_wl: WlGrid,
 ) -> Result<na::DVector<FluxFloat>> {
-    if vsini < 1.0 {
-        return Ok(input_array.clone());
-    }
-    match synth_wl {
-        WlGrid::Linspace(_, _, _) => {
-            return Err(anyhow!(
-                "Rotational broadening with linear wavelength dispersion is not supported"
-            ));
+    let dvelo = match synth_wl {
+        WlGrid::Linspace(first, step, total) => {
+            // Use the middle wavelength as an approximation
+            let avg_wl = (first + first + step * (*total as f64)) / 2.0;
+            step / avg_wl
         }
         WlGrid::Logspace(_, step, _) => {
-            let dvelo = std::f64::consts::LN_10 * step;
-            let kernel = build_rotation_kernel(vsini, dvelo);
-            let convolved = oa_convolve(input_array, &kernel);
-            Ok(convolved
-                .rows(kernel.len() / 2, input_array.len())
-                .into_owned())
+            std::f64::consts::LN_10 * step
         }
+    };
+    let kernel = build_rotation_kernel(vsini, dvelo);
+    // If vsini is very small, no convolution is done
+    if kernel.len() <= 2 {
+        return Ok(input_array.clone());
     }
+    let convolved = oa_convolve(input_array, &kernel);
+    Ok(convolved
+        .rows(kernel.len() / 2, input_array.len())
+        .into_owned())
 }
 
 pub fn shift_and_resample(
@@ -366,7 +372,7 @@ pub fn shift_and_resample(
 
 pub fn rot_broad_rv(
     input_array: na::DVector<FluxFloat>,
-    synth_wl: WlGrid, 
+    synth_wl: WlGrid,
     target_dispersion: &impl WavelengthDispersion,
     vsini: f64,
     rv: f64,
@@ -374,8 +380,10 @@ pub fn rot_broad_rv(
     if vsini < 0.0 {
         return Err(anyhow!("vsini must be positive"));
     }
-    let observed_wl = target_dispersion.wavelength();
-    let convolved_for_rotation = convolve_rotation(&input_array, vsini, synth_wl)?;
+    let convolved_for_rotation = convolve_rotation(&synth_wl, &input_array, vsini)?;
+    // Convolve for resolution
     let output = target_dispersion.convolve(convolved_for_rotation)?;
+    let observed_wl = target_dispersion.wavelength();
+    // RV shift and resample to observed wavelength grid
     shift_and_resample(&output, synth_wl, observed_wl, rv)
 }
