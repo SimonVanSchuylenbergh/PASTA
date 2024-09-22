@@ -9,11 +9,13 @@ import numpy as np
 from astropy.io import fits  # type: ignore
 from pso import (
     ChunkContinuumFitter,
+    InMemCompound,
+    OnDiskCompound,
     InMemInterpolator,
+    OnDiskInterpolator,
     NoConvolutionDispersion,
     PSOSettings,
     WlGrid,
-    InMemCompound,
 )
 from tqdm.auto import tqdm  # Optional progress bar
 
@@ -36,6 +38,15 @@ def read_and_prepare_spectrum(
     # Read the variance from the corresponding file
     with fits.open(str(path).replace("merged", "mergedVar")) as image:
         var = np.array(image[0].data, dtype=dtype)  # type: ignore
+
+    # Only use 4007-5673 Angstroms
+    mask = (wl >= 4007) & (wl <= 5673)
+    wl = wl[mask]
+    flux = flux[mask]
+    var = var[mask]
+    # Ignore pixels with zero or nan variance
+    mask = (np.isnan(var)) | (var <= 0) | (np.isinf(var))
+    var[mask] = 1e30 # Set a large value to ignore these pixels
     return (wl, flux, var)
 
 
@@ -48,8 +59,9 @@ path = "path/to/models"
 wl_grid = WlGrid(np.log10(4_000), 1.6833119454e-06, 90470, log=True)
 vsini_range = (1, 500)
 rv_range = (-150, 150)
+InterpolatorType = InMemInterpolator
 
-interpolator1 = InMemInterpolator(
+interpolator1 = InterpolatorType(
     path,
     wavelength=wl_grid,
     teff_range=list(np.arange(25_250, 30_250, 250)),
@@ -58,7 +70,7 @@ interpolator1 = InMemInterpolator(
     vsini_range=vsini_range,
     rv_range=rv_range,
 )
-interpolator2 = InMemInterpolator(
+interpolator2 = InterpolatorType(
     path,
     wavelength=wl_grid,
     teff_range=list(
@@ -67,9 +79,9 @@ interpolator2 = InMemInterpolator(
     m_range=list(np.arange(-0.8, 0.9, 0.1)),
     logg_range=list(np.arange(3.0, 5.1, 0.1)),
     vsini_range=vsini_range,
-    rv_range=wl_grid,
+    rv_range=rv_range,
 )
-interpolator3 = InMemInterpolator(
+interpolator3 = InterpolatorType(
     path,
     wavelength=wl_grid,
     teff_range=list(np.arange(6000, 10_100, 100)),
@@ -101,7 +113,8 @@ blending_length = 0.2
 # or append to it and skip the already computed solutions
 overwrite = False
 if not overwrite and output_file.exists():
-    solutions = load(open(output_file))
+    with open(output_file) as f:
+        solutions = load(f)
 else:
     solutions = []
 
@@ -131,9 +144,9 @@ with open(
         solution = interpolator.fit_pso(fitter, dispersion, flux, var, settings)
         sol = {
             "index": index,
-            "labels": solution.labels, # (teff, logg, m, vsini, rv)
-            "continuum": solution.continuum_params, # Polynomial coefficients for every chunk
-            "chi2": solution.chi2, # Chi-squared of the best solution
+            "labels": solution.labels,  # (teff, logg, m, vsini, rv)
+            "continuum": solution.continuum_params,  # Polynomial coefficients for every chunk
+            "chi2": solution.chi2,  # Chi-squared of the best solution
         }
         solutions.append(sol)
         with open(output_file, "w") as f:
