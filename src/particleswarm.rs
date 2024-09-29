@@ -20,7 +20,6 @@
 //!
 //! \[1\] <https://en.wikipedia.org/wiki/Particle_swarm_optimization>
 
-use crate::fitting::SCALING;
 use argmin::{
     argmin_error, argmin_error_closure,
     core::{ArgminFloat, CostFunction, Error, PopulationState, Problem, Solver, SyncAlias, KV},

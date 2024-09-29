@@ -13,10 +13,6 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
 
-/// Scale labels by this amount during fitting
-pub const SCALING: na::SVector<f64, 5> =
-    na::SVector::<f64, 5>::new(10_000.0, 1.0, 1.0, 100.0, 100.0);
-
 /// Observed specrum with flux and variance
 #[derive(Clone, Debug)]
 pub struct ObservedSpectrum {
@@ -417,7 +413,7 @@ impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> CostFunct
     type Output = f64;
 
     fn cost(&self, params: &Self::Param) -> Result<Self::Output> {
-        let rescaled = params.component_mul(&SCALING);
+        let rescaled = params;
         let teff = rescaled[0];
         let m = rescaled[1];
         let logg = rescaled[2];
@@ -536,7 +532,7 @@ impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 5>, f64>, 
         let particles = state.get_population().ok_or(Error::msg("No particles"))?;
         let values: Vec<ParticleInfo> = particles
             .iter()
-            .map(|p| (p.position.component_mul(&SCALING), p.cost).into())
+            .map(|p| (p.position, p.cost).into())
             .collect();
         let filename = self.dir.join(format!("{}_{}.json", self.file_prefix, iter));
         let f = BufWriter::new(File::create(filename)?);
@@ -575,7 +571,7 @@ pub fn fit_pso<I: Interpolator>(
         .ok_or(anyhow!("No best parameter found"))?
         .position;
 
-    let best_rescaled = best_param.component_mul(&SCALING);
+    let best_rescaled = best_param;
     let best_teff = best_rescaled[0];
     let best_m = best_rescaled[1];
     let best_logg = best_rescaled[2];
