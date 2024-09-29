@@ -1,5 +1,6 @@
 use crate::convolve_rv::{rot_broad_rv, WavelengthDispersion};
 use crate::cubic::calculate_interpolation_coefficients;
+use crate::particleswarm::PSOBounds;
 use anyhow::{Context, Result};
 use argmin_math::ArgminRandom;
 use nalgebra as na;
@@ -140,16 +141,31 @@ pub struct SquareBounds {
     pub rv: (f64, f64),
 }
 
-pub trait Bounds: Clone {
+pub trait GridBounds: Clone {
     fn is_within_bounds(&self, param: na::SVector<f64, 5>) -> bool;
-    fn clamp(&self, param: na::SVector<f64, 5>) -> na::SVector<f64, 5>;
     fn clamp_1d(&self, param: na::SVector<f64, 5>, index: usize) -> f64;
     fn minmax(&self) -> (na::SVector<f64, 5>, na::SVector<f64, 5>);
+}
+
+impl<GB: GridBounds> PSOBounds<5> for GB {
+    fn minmax(&self) -> (nalgebra::SVector<f64, 5>, nalgebra::SVector<f64, 5>) {
+        self.minmax()
+    }
+
+    fn clamp_1d(&self, param: nalgebra::SVector<f64, 5>, index: usize) -> f64 {
+        self.clamp_1d(param, index)
+    }
+
     fn generate_random_within_bounds(
         &self,
         rng: &mut impl Rng,
         num_particles: usize,
-    ) -> Vec<na::SVector<f64, 5>>;
+    ) -> Vec<na::SVector<f64, 5>> {
+        let (min, max) = self.minmax();
+        (0..num_particles)
+            .map(|_| na::SVector::rand_from_range(&min, &max, rng))
+            .collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -196,7 +212,7 @@ impl WlGrid {
 }
 
 pub trait Interpolator: Send + Sync {
-    type B: Bounds;
+    type B: GridBounds;
 
     fn synth_wl(&self) -> WlGrid;
     fn bounds(&self) -> &Self::B;
@@ -219,9 +235,35 @@ pub trait Interpolator: Send + Sync {
         vsini: f64,
         rv: f64,
     ) -> Result<na::DVector<FluxFloat>>;
+
+    fn produce_binary_model(
+        &self,
+        target_dispersion: &impl WavelengthDispersion,
+        star1_parameters: (f64, f64, f64, f64, f64),
+        star2_parameters: (f64, f64, f64, f64, f64),
+        light_ratio: f64,
+    ) -> Result<na::DVector<FluxFloat>> {
+        let model1 = self.produce_model(
+            target_dispersion,
+            star1_parameters.0,
+            star1_parameters.1,
+            star1_parameters.2,
+            star1_parameters.3,
+            star1_parameters.4,
+        )?;
+        let model2 = self.produce_model(
+            target_dispersion,
+            star2_parameters.0,
+            star2_parameters.1,
+            star2_parameters.2,
+            star2_parameters.3,
+            star2_parameters.4,
+        )?;
+        Ok(model1 * (light_ratio as f32) + model2 * (1.0 - light_ratio as f32))
+    }
 }
 
-impl Bounds for SquareBounds {
+impl GridBounds for SquareBounds {
     fn is_within_bounds(&self, param: na::SVector<f64, 5>) -> bool {
         self.teff.between_bounds(param[0])
             && self.m.between_bounds(param[1])
@@ -230,21 +272,6 @@ impl Bounds for SquareBounds {
             && param[3] <= self.vsini.1
             && param[4] >= self.rv.0
             && param[4] <= self.rv.1
-    }
-    fn clamp(&self, param: na::SVector<f64, 5>) -> na::SVector<f64, 5> {
-        let mut new_param = param;
-
-        let teff_bounds = self.teff.get_first_and_last();
-        let m_bounds = self.m.get_first_and_last();
-        let logg_bounds = self.logg.get_first_and_last();
-
-        new_param[0] = new_param[0].max(teff_bounds.0).min(teff_bounds.1);
-        new_param[1] = new_param[1].max(m_bounds.0).min(m_bounds.1);
-        new_param[2] = new_param[2].max(logg_bounds.0).min(logg_bounds.1);
-        new_param[3] = new_param[3].max(self.vsini.0).min(self.vsini.1);
-        new_param[4] = new_param[4].max(self.rv.0).min(self.rv.1);
-
-        new_param
     }
 
     fn clamp_1d(&self, param: na::SVector<f64, 5>, index: usize) -> f64 {
@@ -276,17 +303,6 @@ impl Bounds for SquareBounds {
                 self.rv.1,
             ),
         )
-    }
-
-    fn generate_random_within_bounds(
-        &self,
-        rng: &mut impl Rng,
-        num_particles: usize,
-    ) -> Vec<na::SVector<f64, 5>> {
-        let (min, max) = self.minmax();
-        (0..num_particles)
-            .map(|_| na::SVector::rand_from_range(&min, &max, rng))
-            .collect()
     }
 }
 
@@ -464,147 +480,11 @@ impl CompoundBounds {
     }
 }
 
-impl Bounds for CompoundBounds {
+impl GridBounds for CompoundBounds {
     fn is_within_bounds(&self, param: na::SVector<f64, 5>) -> bool {
         self.bounds[0].is_within_bounds(param)
             || self.bounds[1].is_within_bounds(param)
             || self.bounds[2].is_within_bounds(param)
-    }
-
-    /// Clamp a point outside the grid to the closest point inside the grid
-    fn clamp(&self, param: na::SVector<f64, 5>) -> na::SVector<f64, 5> {
-        if self.is_within_bounds(param) {
-            return param;
-        };
-
-        let teff = param[0];
-        let m = param[1];
-        let logg = param[2];
-        let vsini = param[3];
-        let rv = param[4];
-
-        let new_m = m.max(self.m_bounds().0).min(self.m_bounds().1);
-        let new_vsini = vsini.max(self.vsini_bounds().0).min(self.vsini_bounds().1);
-        let new_rv = rv.max(self.rv_bounds().0).min(self.rv_bounds().1);
-        let new_param = na::Vector5::new(teff, new_m, logg, new_vsini, new_rv);
-
-        if self.is_within_bounds(new_param) {
-            return new_param;
-        };
-
-        let (lower_bound_teff, lower_edge_teff, upper_edge_teff, upper_bound_teff) =
-            self.teff_bounds();
-        let (lower_bound_logg, lower_edge_logg, upper_edge_logg, upper_bound_logg) =
-            self.logg_bounds();
-        let teff_distance = |other_teff: f64| (teff - other_teff) * 40.0 / teff;
-        let logg_distance = |other_logg: f64| (other_logg - logg) * 15.0;
-        let point_distance = |other_teff: f64, other_logg: f64| {
-            teff_distance(other_teff).hypot(logg_distance(other_logg))
-        };
-        let (new_teff, new_logg) = if logg < lower_bound_logg {
-            if teff < lower_edge_teff {
-                (teff.max(lower_bound_teff), lower_bound_logg)
-            } else if teff < upper_edge_teff {
-                let logg_distance = logg_distance(lower_edge_logg);
-                let corner_distance = point_distance(lower_edge_teff, lower_bound_logg);
-                if logg_distance < corner_distance {
-                    (teff, lower_edge_logg)
-                } else {
-                    (lower_edge_teff, lower_bound_logg)
-                }
-            } else if teff < upper_bound_teff {
-                let distance_corner1 = point_distance(lower_edge_teff, lower_bound_logg);
-                let distance_corner2 = point_distance(upper_edge_teff, lower_edge_logg);
-                let distance_logg = logg_distance(upper_edge_logg);
-                if distance_corner1 < distance_corner2 && distance_corner1 < distance_logg {
-                    (lower_edge_teff, lower_bound_logg)
-                } else if distance_corner2 < distance_corner1 && distance_corner2 < distance_logg {
-                    (upper_edge_teff, lower_edge_logg)
-                } else {
-                    (teff, upper_edge_logg)
-                }
-            } else {
-                let distance_corner1 = point_distance(lower_edge_teff, lower_bound_logg);
-                let distance_corner2 = point_distance(upper_edge_teff, lower_edge_logg);
-                let distance_corner3 = point_distance(upper_bound_teff, upper_edge_logg);
-                if distance_corner1 < distance_corner2 && distance_corner1 < distance_corner3 {
-                    (lower_edge_teff, lower_bound_logg)
-                } else if distance_corner2 < distance_corner1 && distance_corner2 < distance_corner3
-                {
-                    (upper_edge_teff, lower_edge_logg)
-                } else {
-                    (upper_bound_teff, upper_edge_logg)
-                }
-            }
-        } else if logg < lower_edge_logg {
-            if teff < lower_bound_teff {
-                (lower_bound_teff, logg)
-            } else if teff < lower_edge_teff {
-                unreachable!()
-            } else if teff < upper_edge_teff {
-                let teff_distance = teff_distance(lower_edge_teff);
-                let logg_distance = logg_distance(lower_edge_logg);
-                if teff_distance < logg_distance {
-                    (lower_edge_teff, logg)
-                } else {
-                    (teff, lower_edge_logg)
-                }
-            } else if teff < upper_bound_teff {
-                let teff_distance = teff_distance(lower_edge_teff);
-                let logg_distance = logg_distance(upper_edge_logg);
-                let corner_distance = point_distance(upper_edge_teff, lower_edge_logg);
-
-                if corner_distance < teff_distance && corner_distance < logg_distance {
-                    (upper_edge_teff, lower_edge_logg)
-                } else if teff_distance < corner_distance && teff_distance < logg_distance {
-                    (lower_edge_teff, logg)
-                } else {
-                    (teff, upper_edge_logg)
-                }
-            } else {
-                let teff_distance = teff_distance(lower_edge_teff);
-                let corner_distance1 = point_distance(upper_edge_teff, lower_edge_logg);
-                let corner_distance2 = point_distance(upper_bound_teff, upper_edge_logg);
-                if corner_distance1 < corner_distance2 && corner_distance1 < teff_distance {
-                    (upper_edge_teff, lower_edge_logg)
-                } else if corner_distance2 < corner_distance1 && corner_distance2 < teff_distance {
-                    (upper_bound_teff, upper_edge_logg)
-                } else {
-                    (lower_edge_teff, logg)
-                }
-            }
-        } else if logg < upper_edge_logg {
-            if teff < lower_bound_teff {
-                (lower_bound_teff, logg)
-            } else if teff < upper_edge_teff {
-                unreachable!()
-            } else if teff < upper_bound_teff {
-                let teff_distance = teff_distance(upper_edge_teff);
-                let logg_distance = logg_distance(upper_edge_logg);
-                if teff_distance < logg_distance {
-                    (upper_edge_teff, logg)
-                } else {
-                    (teff, upper_edge_logg)
-                }
-            } else {
-                let teff_distance = teff_distance(upper_edge_teff);
-                let corner_distance = point_distance(upper_edge_teff, upper_bound_logg);
-                if teff_distance < corner_distance {
-                    (upper_edge_teff, logg)
-                } else {
-                    (upper_bound_teff, upper_bound_logg)
-                }
-            }
-        } else if logg < upper_bound_logg {
-            (teff.max(lower_bound_teff).min(upper_bound_teff), logg)
-        } else {
-            (
-                teff.max(lower_bound_teff).min(upper_bound_teff),
-                upper_bound_logg,
-            )
-        };
-
-        na::Vector5::new(new_teff, new_m, new_logg, new_vsini, new_rv)
     }
 
     fn clamp_1d(&self, param: na::SVector<f64, 5>, index: usize) -> f64 {
@@ -642,9 +522,9 @@ impl Bounds for CompoundBounds {
     }
 
     fn minmax(&self) -> (na::SVector<f64, 5>, na::SVector<f64, 5>) {
-        let (min1, max1) = self.bounds[0].minmax();
-        let (min2, max2) = self.bounds[1].minmax();
-        let (min3, max3) = self.bounds[2].minmax();
+        let (min1, max1) = GridBounds::minmax(&self.bounds[0]);
+        let (min2, max2) = GridBounds::minmax(&self.bounds[1]);
+        let (min3, max3) = GridBounds::minmax(&self.bounds[2]);
         (
             na::Vector5::new(
                 min1[0].min(min2[0]).min(min3[0]),
@@ -661,22 +541,6 @@ impl Bounds for CompoundBounds {
                 max1[4].max(max2[4]).max(max3[4]),
             ),
         )
-    }
-
-    fn generate_random_within_bounds(
-        &self,
-        rng: &mut impl Rng,
-        num_particles: usize,
-    ) -> Vec<na::SVector<f64, 5>> {
-        let mut particles = Vec::with_capacity(num_particles);
-        let (min, max) = self.minmax();
-        while particles.len() < num_particles {
-            let param = na::SVector::rand_from_range(&min, &max, rng);
-            if self.is_within_bounds(param) {
-                particles.push(param);
-            }
-        }
-        particles
     }
 }
 
@@ -744,6 +608,7 @@ impl<'a, F: ModelFetcher> Interpolator for CompoundInterpolator<F> {
         let i = self.choose_grid(teff, logg);
         self.interpolators[i].produce_model(target_dispersion, teff, m, logg, vsini, rv)
     }
+
     fn produce_model_on_grid(
         &self,
         target_dispersion: &impl WavelengthDispersion,

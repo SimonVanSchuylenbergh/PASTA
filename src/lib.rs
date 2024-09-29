@@ -18,7 +18,7 @@ use fitting::{
 use fitting::{ConstantContinuum, ContinuumFitter};
 use indicatif::ProgressBar;
 use interpolate::{
-    Bounds, CompoundInterpolator, FluxFloat, Interpolator, Range, SquareGridInterpolator,
+    GridBounds, CompoundInterpolator, FluxFloat, Interpolator, Range, SquareGridInterpolator,
 };
 use model_fetchers::{CachedFetcher, InMemFetcher, OnDiskFetcher};
 use nalgebra as na;
@@ -672,14 +672,6 @@ macro_rules! implement_methods {
                 self.interpolator
                     .bounds()
                     .is_within_bounds(na::Vector5::new(teff, m, logg, vsini, rv))
-            }
-
-            /// Clamp a set of labels to the bounds of the grid
-            pub fn clamp(&self, teff: f64, m: f64, logg: f64, vsini: f64, rv: f64) -> [f64; 5] {
-                self.interpolator
-                    .bounds()
-                    .clamp(na::Vector5::new(teff, m, logg, vsini, rv))
-                    .into()
             }
 
             /// Clamp a single parameter to the bounds of the grid

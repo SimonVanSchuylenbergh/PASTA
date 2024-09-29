@@ -1,5 +1,5 @@
 use crate::convolve_rv::WavelengthDispersion;
-use crate::interpolate::{Bounds, FluxFloat, Interpolator};
+use crate::interpolate::{GridBounds, FluxFloat, Interpolator};
 use crate::particleswarm;
 use anyhow::{anyhow, Context, Result};
 use argmin::core::observers::{Observe, ObserverMode};
@@ -465,7 +465,7 @@ fn get_pso_fitter<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitt
     parallelize: bool,
 ) -> Executor<
     FitCostFunction<'a, I, T, F>,
-    particleswarm::ParticleSwarm<I::B, f64, rand::rngs::StdRng>,
+    particleswarm::ParticleSwarm<5, I::B, f64>,
     PopulationState<particleswarm::Particle<na::SVector<f64, 5>, f64>, f64>,
 > {
     let cost_function = FitCostFunction {

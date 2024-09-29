@@ -21,7 +21,6 @@
 //! \[1\] <https://en.wikipedia.org/wiki/Particle_swarm_optimization>
 
 use crate::fitting::SCALING;
-use crate::interpolate::Bounds;
 use argmin::{
     argmin_error, argmin_error_closure,
     core::{ArgminFloat, CostFunction, Error, PopulationState, Problem, Solver, SyncAlias, KV},
@@ -32,8 +31,22 @@ use argmin_math::{ArgminRandom, ArgminSub};
 use nalgebra as na;
 use rand::{Rng, SeedableRng};
 
+pub trait PSOBounds<const N: usize>: Clone {
+    fn clamp_1d(&self, param: na::SVector<f64, N>, index: usize) -> f64;
+    fn minmax(&self) -> (na::SVector<f64, N>, na::SVector<f64, N>);
+    fn widths(&self) -> na::SVector<f64, N> {
+        let (min, max) = self.minmax();
+        max.sub(&min)
+    }
+    fn generate_random_within_bounds(
+        &self,
+        rng: &mut impl Rng,
+        num_particles: usize,
+    ) -> Vec<na::SVector<f64, N>>;
+}
+
 #[derive(Clone)]
-pub struct ParticleSwarm<B: Bounds, F, R> {
+pub struct ParticleSwarm<const N: usize, B: PSOBounds<N>, F> {
     /// Inertia weight
     weight_inertia: F,
     /// Cognitive acceleration coefficient
@@ -41,18 +54,18 @@ pub struct ParticleSwarm<B: Bounds, F, R> {
     /// Social acceleration coefficient
     weight_social: F,
     /// Delta (potential)
-    delta: F,
+    delta: na::SVector<F, N>,
     /// Bounds on parameter space
     bounds: B,
     /// Number of particles
     num_particles: usize,
     /// Random number generator
-    rng_generator: R,
+    rng_generator: rand::rngs::StdRng,
 }
 
-impl<B, F> ParticleSwarm<B, F, rand::rngs::StdRng>
+impl<const N: usize, B, F> ParticleSwarm<N, B, F>
 where
-    B: Bounds,
+    B: PSOBounds<N>,
     F: ArgminFloat,
 {
     pub fn new(bounds: B, num_particles: usize) -> Self {
@@ -60,7 +73,7 @@ where
             weight_inertia: float!(1.0f64 / (2.0 * 2.0f64.ln())),
             weight_cognitive: float!(0.5 + 2.0f64.ln()),
             weight_social: float!(0.5 + 2.0f64.ln()),
-            delta: float!(1e-7),
+            delta: bounds.widths().map(|x| float!(x * 1e-7)),
             bounds,
             num_particles,
             rng_generator: rand::rngs::StdRng::from_entropy(),
@@ -68,14 +81,12 @@ where
     }
 }
 
-const N: usize = 5;
-type P = na::SVector<f64, 5>;
+type V<const N: usize> = na::SVector<f64, N>;
 
-impl<B, F, R> ParticleSwarm<B, F, R>
+impl<const N: usize, B, F> ParticleSwarm<N, B, F>
 where
-    B: Bounds,
+    B: PSOBounds<N>,
     F: ArgminFloat,
-    R: Rng,
 {
     pub fn with_inertia_factor(mut self, factor: F) -> Result<Self, Error> {
         if factor < float!(0.0) {
@@ -110,6 +121,7 @@ where
         Ok(self)
     }
 
+    // In the future we may want to allow for different delta values for each dimension
     pub fn with_delta(mut self, delta: F) -> Result<Self, Error> {
         if delta < float!(0.0) {
             return Err(argmin_error!(
@@ -117,15 +129,15 @@ where
                 "`ParticleSwarm`: delta must be >=0."
             ));
         }
-        self.delta = delta;
+        self.delta = self.bounds.widths().map(|x| float!(x) * delta);
         Ok(self)
     }
 
     /// Initializes all particles randomly and sorts them by their cost function values
-    fn initialize_particles<O: CostFunction<Param = P, Output = F> + SyncAlias>(
+    fn initialize_particles<O: CostFunction<Param = V<N>, Output = F> + SyncAlias>(
         &mut self,
         problem: &mut Problem<O>,
-    ) -> Result<Vec<Particle<P, F>>, Error> {
+    ) -> Result<Vec<Particle<V<N>, F>>, Error> {
         let (positions, velocities) = self.initialize_positions_and_velocities();
 
         let costs = problem.bulk_cost(&positions)?;
@@ -148,18 +160,17 @@ where
     }
 
     /// Initializes positions and velocities for all particles
-    fn initialize_positions_and_velocities(&mut self) -> (Vec<P>, Vec<P>) {
+    fn initialize_positions_and_velocities(&mut self) -> (Vec<V<N>>, Vec<V<N>>) {
         let (min, max) = self.bounds.minmax();
-        let delta = max.sub(&min).component_div(&SCALING);
+        let delta = max.sub(&min);
         let delta_neg = -delta;
         let positions = self
             .bounds
             .generate_random_within_bounds(&mut self.rng_generator, self.num_particles)
             .into_iter()
-            .map(|p| p.component_div(&SCALING))
             .collect();
         let velocities = (0..self.num_particles)
-            .map(|_| P::rand_from_range(&delta_neg, &delta, &mut self.rng_generator))
+            .map(|_| V::<N>::rand_from_range(&delta_neg, &delta, &mut self.rng_generator))
             .collect();
         (positions, velocities)
     }
@@ -183,20 +194,20 @@ fn calculate_potential<const N: usize>(
     particle.velocity[dim].abs() + (global_best - particle.position[dim]).abs()
 }
 
-impl<B, O, R> Solver<O, PopulationState<Particle<P, f64>, f64>> for ParticleSwarm<B, f64, R>
+impl<const N: usize, B, O> Solver<O, PopulationState<Particle<V<N>, f64>, f64>>
+    for ParticleSwarm<N, B, f64>
 where
-    B: Bounds,
-    O: CostFunction<Param = P, Output = f64> + SyncAlias,
+    B: PSOBounds<N>,
+    O: CostFunction<Param = V<N>, Output = f64> + SyncAlias,
     f64: ArgminFloat,
-    R: Rng,
 {
     const NAME: &'static str = "ParticleSwarm";
 
     fn init(
         &mut self,
         problem: &mut Problem<O>,
-        mut state: PopulationState<Particle<P, f64>, f64>,
-    ) -> Result<(PopulationState<Particle<P, f64>, f64>, Option<KV>), Error> {
+        mut state: PopulationState<Particle<V<N>, f64>, f64>,
+    ) -> Result<(PopulationState<Particle<V<N>, f64>, f64>, Option<KV>), Error> {
         // Users can provide a population or it will be randomly created.
         let particles = match state.take_population() {
             Some(mut particles) if particles.len() == self.num_particles => {
@@ -234,8 +245,8 @@ where
     fn next_iter(
         &mut self,
         problem: &mut Problem<O>,
-        mut state: PopulationState<Particle<P, f64>, f64>,
-    ) -> Result<(PopulationState<Particle<P, f64>, f64>, Option<KV>), Error> {
+        mut state: PopulationState<Particle<V<N>, f64>, f64>,
+    ) -> Result<(PopulationState<Particle<V<N>, f64>, f64>, Option<KV>), Error> {
         let mut best_particle = state.take_individual().ok_or_else(argmin_error_closure!(
             PotentialBug,
             "`ParticleSwarm`: No current best individual in state."
@@ -251,12 +262,12 @@ where
             for d in 0..N {
                 let condition = particles
                     .iter()
-                    .all(|p| calculate_potential(p, best_particle.position[d], d) < self.delta);
+                    .all(|p| calculate_potential(p, best_particle.position[d], d) < self.delta[d]);
                 if condition {
                     // forced update
                     // println!("Forced update in d={}, i={}, p={}", d, state.iter, p);
                     particles[p].velocity[d] =
-                        random_uniform(&mut self.rng_generator, -self.delta, self.delta);
+                        random_uniform(&mut self.rng_generator, -self.delta[d], self.delta[d]);
                 } else {
                     // Regular PSO update
                     let momentum = particles[p].velocity[d] * self.weight_inertia;
@@ -271,15 +282,13 @@ where
                             * self.weight_social;
 
                     particles[p].velocity[d] = momentum + pull_to_optimum + pull_to_global_optimum;
-                    new_position[d] = particles[p].position[d] + particles[p].velocity[d];
+                    new_position[d] = self
+                        .bounds
+                        .clamp_1d(particles[p].position + particles[p].velocity, d);
                 }
             }
-            particles[p].position = self
-                .bounds
-                .clamp(new_position.component_mul(&SCALING))
-                .component_div(&SCALING);
         }
-        let positions: Vec<P> = particles.iter().map(|p| p.position).collect();
+        let positions: Vec<V<N>> = particles.iter().map(|p| p.position).collect();
 
         let costs = problem.bulk_cost(&positions)?;
 
@@ -311,7 +320,7 @@ where
 
     fn terminate(
         &mut self,
-        state: &PopulationState<Particle<P, f64>, f64>,
+        state: &PopulationState<Particle<V<N>, f64>, f64>,
     ) -> argmin::core::TerminationStatus {
         let particles = state.get_population().unwrap();
         let global_best = match state.best_individual.as_ref() {
@@ -320,7 +329,7 @@ where
         };
         let condition = particles.iter().all(|p| {
             for d in 0..N {
-                if p.position[d] - global_best[d] > self.delta {
+                if p.position[d] - global_best[d] > self.delta[d] {
                     return false;
                 }
             }

@@ -8,7 +8,7 @@ mod interpolate;
 mod model_fetchers;
 mod particleswarm;
 use crate::fitting::ObservedSpectrum;
-use crate::interpolate::{Bounds, CompoundInterpolator, SquareBounds};
+use crate::interpolate::{GridBounds, CompoundInterpolator, SquareBounds};
 use anyhow::Result;
 use convolve_rv::{
     oa_convolve, rot_broad_rv, NoConvolutionDispersionTarget, VariableTargetDispersion,
