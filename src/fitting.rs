@@ -1,6 +1,6 @@
 use crate::convolve_rv::WavelengthDispersion;
-use crate::interpolate::{GridBounds, FluxFloat, Interpolator};
-use crate::particleswarm;
+use crate::interpolate::{FluxFloat, Interpolator};
+use crate::particleswarm::{self, PSOBounds};
 use anyhow::{anyhow, Context, Result};
 use argmin::core::observers::{Observe, ObserverMode};
 use argmin::core::{CostFunction, Error, Executor, PopulationState, State, KV};
@@ -461,7 +461,7 @@ fn get_pso_fitter<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitt
     parallelize: bool,
 ) -> Executor<
     FitCostFunction<'a, I, T, F>,
-    particleswarm::ParticleSwarm<5, I::B, f64>,
+    particleswarm::ParticleSwarm<5, I::BS, f64>,
     PopulationState<particleswarm::Particle<na::SVector<f64, 5>, f64>, f64>,
 > {
     let cost_function = FitCostFunction {
@@ -471,7 +471,7 @@ fn get_pso_fitter<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitt
         continuum_fitter,
         parallelize,
     };
-    let bounds = interpolator.bounds().clone();
+    let bounds = interpolator.bounds_single().clone();
     let solver = particleswarm::ParticleSwarm::new(bounds, settings.num_particles)
         .with_inertia_factor(settings.inertia_factor)
         .unwrap()
@@ -668,7 +668,7 @@ pub fn uncertainty_chi2<I: Interpolator>(
     let n = 4.0 * spec_res * (last_wl - first_wl) / (first_wl + last_wl);
     let target_chi = best_chi2 * (1.0 + (2.0 / n).sqrt());
     Ok(core::array::from_fn(|i| {
-        let bounds = interpolator.bounds().clone();
+        let bounds = interpolator.bounds_single().clone();
         let costfunction = ModelFitCost {
             interpolator,
             target_dispersion,
@@ -681,7 +681,7 @@ pub fn uncertainty_chi2<I: Interpolator>(
         };
         let mut left_bound_label = label;
         left_bound_label[i] -= search_radius[i];
-        let left_bound = bounds.clamp_1d(left_bound_label, i);
+        let left_bound = bounds.clamp_1d(left_bound_label, i)?;
         let left_bound_rescaled = (left_bound - label[i]) / search_radius[i];
         let solver_left = BrentRoot::new(left_bound_rescaled, 0.0, 1e-3);
         let executor_left = Executor::new(costfunction, solver_left);
@@ -707,7 +707,7 @@ pub fn uncertainty_chi2<I: Interpolator>(
         };
         let mut right_bound_label = label;
         right_bound_label[i] += search_radius[i];
-        let right_bound = bounds.clamp_1d(right_bound_label, i);
+        let right_bound = bounds.clamp_1d(right_bound_label, i)?;
         let right_bound_rescaled = (right_bound - label[i]) / search_radius[i];
         let solver_right = BrentRoot::new(0.0, right_bound_rescaled.min(1.0), 1e-3);
         let executor_right = Executor::new(costfunction, solver_right);

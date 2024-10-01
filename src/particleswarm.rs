@@ -20,21 +20,21 @@
 //!
 //! \[1\] <https://en.wikipedia.org/wiki/Particle_swarm_optimization>
 
+use anyhow::Result;
 use argmin::{
     argmin_error, argmin_error_closure,
     core::{ArgminFloat, CostFunction, Error, PopulationState, Problem, Solver, SyncAlias, KV},
     float,
 };
 use argmin_math::{ArgminRandom, ArgminSub};
-
 use nalgebra as na;
 use rand::{Rng, SeedableRng};
 
 pub trait PSOBounds<const N: usize>: Clone {
-    fn clamp_1d(&self, param: na::SVector<f64, N>, index: usize) -> f64;
-    fn minmax(&self) -> (na::SVector<f64, N>, na::SVector<f64, N>);
+    fn clamp_1d(&self, param: na::SVector<f64, N>, index: usize) -> Result<f64>;
+    fn limits(&self) -> (na::SVector<f64, N>, na::SVector<f64, N>);
     fn widths(&self) -> na::SVector<f64, N> {
-        let (min, max) = self.minmax();
+        let (min, max) = self.limits();
         max.sub(&min)
     }
     fn generate_random_within_bounds(
@@ -160,7 +160,7 @@ where
 
     /// Initializes positions and velocities for all particles
     fn initialize_positions_and_velocities(&mut self) -> (Vec<V<N>>, Vec<V<N>>) {
-        let (min, max) = self.bounds.minmax();
+        let (min, max) = self.bounds.limits();
         let delta = max.sub(&min);
         let delta_neg = -delta;
         let positions = self
@@ -283,7 +283,7 @@ where
                     particles[p].velocity[d] = momentum + pull_to_optimum + pull_to_global_optimum;
                     new_position[d] = self
                         .bounds
-                        .clamp_1d(particles[p].position + particles[p].velocity, d);
+                        .clamp_1d(particles[p].position + particles[p].velocity, d)?;
                 }
             }
         }

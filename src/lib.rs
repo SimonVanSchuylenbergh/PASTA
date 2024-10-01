@@ -5,6 +5,7 @@ mod interpolate;
 mod model_fetchers;
 mod particleswarm;
 
+use crate::particleswarm::PSOBounds;
 use anyhow::Result;
 use convolve_rv::{
     FixedTargetDispersion, NoConvolutionDispersionTarget, VariableTargetDispersion,
@@ -17,9 +18,7 @@ use fitting::{
 };
 use fitting::{ConstantContinuum, ContinuumFitter};
 use indicatif::ProgressBar;
-use interpolate::{
-    GridBounds, CompoundInterpolator, FluxFloat, Interpolator, Range, SquareGridInterpolator,
-};
+use interpolate::{FluxFloat, GridInterpolator, Interpolator, Range};
 use model_fetchers::{CachedFetcher, InMemFetcher, OnDiskFetcher};
 use nalgebra as na;
 use nalgebra::Storage;
@@ -660,20 +659,6 @@ macro_rules! implement_methods {
                     .collect()
             }
 
-            /// Check whether a set of labels is within the bounds of the grid
-            pub fn is_within_bounds(
-                &self,
-                teff: f64,
-                m: f64,
-                logg: f64,
-                vsini: f64,
-                rv: f64,
-            ) -> bool {
-                self.interpolator
-                    .bounds()
-                    .is_within_bounds(na::Vector5::new(teff, m, logg, vsini, rv))
-            }
-
             /// Clamp a single parameter to the bounds of the grid
             pub fn clamp_1d(
                 &self,
@@ -685,8 +670,9 @@ macro_rules! implement_methods {
                 index: usize,
             ) -> f64 {
                 self.interpolator
-                    .bounds()
+                    .bounds_single()
                     .clamp_1d(na::Vector5::new(teff, m, logg, vsini, rv), index)
+                    .unwrap()
             }
         }
     };
@@ -696,7 +682,7 @@ macro_rules! implement_methods {
 #[pyclass]
 #[derive(Clone)]
 pub struct OnDiskInterpolator {
-    interpolator: SquareGridInterpolator<OnDiskFetcher>,
+    interpolator: GridInterpolator<OnDiskFetcher>,
 }
 
 #[pymethods]
@@ -705,22 +691,17 @@ impl OnDiskInterpolator {
     pub fn new(
         dir: &str,
         wavelength: WlGrid,
-        teff_range: Vec<f64>,
-        m_range: Vec<f64>,
-        logg_range: Vec<f64>,
         vsini_range: Option<(f64, f64)>,
         rv_range: Option<(f64, f64)>,
     ) -> Self {
         let fetcher = OnDiskFetcher::new(
             dir,
-            Range::new(teff_range),
-            Range::new(m_range),
-            Range::new(logg_range),
             vsini_range.unwrap_or((1.0, 600.0)),
             rv_range.unwrap_or((-150.0, 150.0)),
-        );
+        )
+        .unwrap();
         Self {
-            interpolator: SquareGridInterpolator::new(fetcher, wavelength.0),
+            interpolator: GridInterpolator::new(fetcher, wavelength.0),
         }
     }
 }
@@ -731,9 +712,6 @@ impl OnDiskInterpolator {
 pub struct InMemInterpolator {
     dir: String,
     wavelength: WlGrid,
-    teff_range: Vec<f64>,
-    m_range: Vec<f64>,
-    logg_range: Vec<f64>,
     vsini_range: Option<(f64, f64)>,
     rv_range: Option<(f64, f64)>,
 }
@@ -741,7 +719,7 @@ pub struct InMemInterpolator {
 /// Interpolator where all spectra have been loaded into memory.
 #[pyclass]
 pub struct LoadedInMemInterpolator {
-    interpolator: SquareGridInterpolator<InMemFetcher>,
+    interpolator: GridInterpolator<InMemFetcher>,
 }
 
 #[pymethods]
@@ -750,18 +728,12 @@ impl InMemInterpolator {
     pub fn new(
         dir: &str,
         wavelength: WlGrid,
-        teff_range: Vec<f64>,
-        m_range: Vec<f64>,
-        logg_range: Vec<f64>,
         vsini_range: Option<(f64, f64)>,
         rv_range: Option<(f64, f64)>,
     ) -> Self {
         Self {
             dir: dir.to_string(),
             wavelength,
-            teff_range,
-            m_range,
-            logg_range,
             vsini_range,
             rv_range,
         }
@@ -770,15 +742,12 @@ impl InMemInterpolator {
     fn load(&self) -> LoadedInMemInterpolator {
         let fetcher = InMemFetcher::new(
             &self.dir,
-            Range::new(self.teff_range.clone()),
-            Range::new(self.m_range.clone()),
-            Range::new(self.logg_range.clone()),
             self.vsini_range.unwrap_or((1.0, 600.0)),
             self.rv_range.unwrap_or((-150.0, 150.0)),
         )
         .unwrap();
         LoadedInMemInterpolator {
-            interpolator: SquareGridInterpolator::new(fetcher, self.wavelength.0),
+            interpolator: GridInterpolator::new(fetcher, self.wavelength.0),
         }
     }
 }
@@ -786,7 +755,7 @@ impl InMemInterpolator {
 #[pyclass]
 #[derive(Clone)]
 pub struct CachedInterpolator {
-    interpolator: SquareGridInterpolator<CachedFetcher>,
+    interpolator: GridInterpolator<CachedFetcher>,
 }
 
 #[pymethods]
@@ -795,27 +764,21 @@ impl CachedInterpolator {
     pub fn new(
         dir: &str,
         wavelength: WlGrid,
-        teff_range: Vec<f64>,
-        m_range: Vec<f64>,
-        logg_range: Vec<f64>,
         vsini_range: Option<(f64, f64)>,
         rv_range: Option<(f64, f64)>,
         lrucap: Option<usize>,
     ) -> Self {
         let fetcher = CachedFetcher::new(
             dir,
-            Range::new(teff_range),
-            Range::new(m_range),
-            Range::new(logg_range),
             vsini_range.unwrap_or((1.0, 600.0)),
             rv_range.unwrap_or((-150.0, 150.0)),
             lrucap.unwrap_or(4000),
-        );
+        )
+        .unwrap();
         Self {
-            interpolator: SquareGridInterpolator::new(fetcher, wavelength.0),
+            interpolator: GridInterpolator::new(fetcher, wavelength.0),
         }
     }
-
     pub fn cache_size(&self) -> usize {
         self.interpolator.fetcher.cache_size()
     }
@@ -824,101 +787,6 @@ impl CachedInterpolator {
 implement_methods!(OnDiskInterpolator, interpolators::OnDiskInterpolator);
 implement_methods!(LoadedInMemInterpolator, interpolators::InMemInterpolator);
 implement_methods!(CachedInterpolator, interpolators::CachedInterpolator);
-
-/// Compount Interpolator: uses multiple square grids of OnDiskInterpolator
-#[pyclass]
-pub struct OnDiskCompound {
-    interpolator: CompoundInterpolator<OnDiskFetcher>,
-}
-
-#[pymethods]
-impl OnDiskCompound {
-    #[new]
-    pub fn new(
-        interpolator1: OnDiskInterpolator,
-        interpolator2: OnDiskInterpolator,
-        interpolator3: OnDiskInterpolator,
-    ) -> Self {
-        Self {
-            interpolator: CompoundInterpolator::new(
-                interpolator1.interpolator,
-                interpolator2.interpolator,
-                interpolator3.interpolator,
-            ),
-        }
-    }
-}
-
-/// Compount Interpolator: uses multiple square grids of InMemInterpolator
-
-#[pyclass]
-pub struct InMemCompound {
-    interpolator: CompoundInterpolator<InMemFetcher>,
-}
-
-#[pymethods]
-impl InMemCompound {
-    #[new]
-    fn new(
-        interpolator1: InMemInterpolator,
-        interpolator2: InMemInterpolator,
-        interpolator3: InMemInterpolator,
-    ) -> Self {
-        Self {
-            interpolator: CompoundInterpolator::new(
-                interpolator1.load().interpolator,
-                interpolator2.load().interpolator,
-                interpolator3.load().interpolator,
-            ),
-        }
-    }
-}
-
-/// Compount Interpolator: uses multiple square grids of CachedInterpolator
-
-#[pyclass]
-pub struct CachedCompound {
-    interpolator: CompoundInterpolator<CachedFetcher>,
-}
-
-#[pymethods]
-impl CachedCompound {
-    #[new]
-    pub fn new(
-        interpolator1: CachedInterpolator,
-        interpolator2: CachedInterpolator,
-        interpolator3: CachedInterpolator,
-    ) -> Self {
-        Self {
-            interpolator: CompoundInterpolator::new(
-                interpolator1.interpolator,
-                interpolator2.interpolator,
-                interpolator3.interpolator,
-            ),
-        }
-    }
-
-    pub fn cache_size(&self) -> (usize, usize, usize) {
-        (
-            self.interpolator.interpolators[0].fetcher.cache_size(),
-            self.interpolator.interpolators[1].fetcher.cache_size(),
-            self.interpolator.interpolators[2].fetcher.cache_size(),
-        )
-    }
-}
-
-implement_methods!(
-    OnDiskCompound,
-    interpolate::CompoundInterpolator<interpolators::OnDiskInterpolator>
-);
-implement_methods!(
-    InMemCompound,
-    interpolate::CompoundInterpolator<interpolators::InMemInterpolator>
-);
-implement_methods!(
-    CachedCompound,
-    interpolate::CompoundInterpolator<interpolators::CachedInterpolator>
-);
 
 #[pyfunction]
 pub fn get_vsini_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<FluxFloat> {
@@ -934,9 +802,6 @@ fn pasta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CachedInterpolator>()?;
     m.add_class::<OnDiskInterpolator>()?;
     m.add_class::<InMemInterpolator>()?;
-    m.add_class::<OnDiskCompound>()?;
-    m.add_class::<InMemCompound>()?;
-    m.add_class::<CachedCompound>()?;
     m.add_class::<WlGrid>()?;
     m.add_class::<PSOSettings>()?;
     m.add_function(wrap_pyfunction!(NoConvolutionDispersion, m)?)?;

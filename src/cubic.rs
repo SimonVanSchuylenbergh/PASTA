@@ -1,4 +1,4 @@
-use crate::interpolate::{FluxFloat, Range, SquareBounds};
+use crate::interpolate::{FluxFloat, Grid, Range};
 use anyhow::{bail, Result};
 use itertools::Itertools;
 use nalgebra as na;
@@ -53,8 +53,8 @@ fn calculate_factors_cubic(x: f64, x0: f64, x1: f64, x2: f64, x3: f64) -> [f64; 
     [f0, f1, f2, f3]
 }
 
-pub fn calculate_factors(x: f64, index: usize, range: &Range) -> [f64; 4] {
-    if index == 0 {
+pub fn calculate_factors(x: f64, index: usize, range: &Range, limits: (usize, usize)) -> [f64; 4] {
+    if index == limits.0 {
         // Quadratic interpolation on left edge
         let neighbors = [range.values[0], range.values[1], range.values[2]];
         calculate_factors_quadratic(
@@ -64,7 +64,7 @@ pub fn calculate_factors(x: f64, index: usize, range: &Range) -> [f64; 4] {
             1.0,
             true,
         )
-    } else if index == range.n() - 2 {
+    } else if index == limits.1 {
         // Quadratic interpolation on right edge
         let neighbors = [
             range.values[index - 1],
@@ -78,7 +78,7 @@ pub fn calculate_factors(x: f64, index: usize, range: &Range) -> [f64; 4] {
             1.0,
             false,
         )
-    } else {
+    } else if index > 0 && index < range.n() - 2 {
         // Cubic interpolation
         let neighbors = [
             range.values[index - 1],
@@ -93,45 +93,52 @@ pub fn calculate_factors(x: f64, index: usize, range: &Range) -> [f64; 4] {
             (neighbors[2] - neighbors[0]) / (neighbors[3] - neighbors[0]),
             1.0,
         )
+    } else {
+        panic!("Index out of bounds ({})", index);
     }
 }
 
 pub fn calculate_interpolation_coefficients_flat(
-    ranges: &SquareBounds,
+    grid: &Grid,
     teff: f64,
     m: f64,
     logg: f64,
 ) -> Result<[[f64; 4]; 3]> {
-    // 3D cubic interpolation followed by convolution
-    if !ranges.teff.between_bounds(teff) {
-        bail!("Teff out of bounds ({})", teff);
-    }
-    if !ranges.m.between_bounds(m) {
-        bail!("M out of bounds ({})", m);
-    }
-    if !ranges.logg.between_bounds(logg) {
-        bail!("Logg out of bounds ({})", logg);
-    }
+    let i = grid.teff.get_left_index(teff).unwrap();
+    let j = grid.m.get_left_index(m).unwrap();
+    let k = grid.logg.get_left_index(logg).unwrap();
 
-    let i = ranges.teff.get_left_index(teff);
-    let j = ranges.m.get_left_index(m);
-    let k = ranges.logg.get_left_index(logg);
-
-    let factors_teff = calculate_factors(teff, i, &ranges.teff);
-    let factors_m = calculate_factors(m, j, &ranges.m);
-    let factors_logg = calculate_factors(logg, k, &ranges.logg);
+    let factors_teff = calculate_factors(
+        teff,
+        i,
+        &grid.teff,
+        grid.get_teff_index_limits_at(logg).unwrap(),
+    );
+    let factors_m = calculate_factors(m, j, &grid.m, (0, grid.m.n() - 1));
+    let factors_logg = calculate_factors(
+        logg,
+        k,
+        &grid.logg,
+        grid.get_logg_index_limits_at(teff).unwrap(),
+    );
 
     Ok([factors_teff, factors_m, factors_logg])
 }
 
 pub fn calculate_interpolation_coefficients(
-    ranges: &SquareBounds,
+    grid: &Grid,
     teff: f64,
     m: f64,
     logg: f64,
 ) -> Result<na::DVector<FluxFloat>> {
+    if !grid.is_teff_logg_between_bounds(teff, logg) {
+        bail!("Teff, logg out of bounds ({}, {})", teff, logg);
+    }
+    if !grid.is_m_between_bounds(m) {
+        bail!("M out of bounds ({})", m);
+    }
     let [factors_teff, factors_m, factors_logg] =
-        calculate_interpolation_coefficients_flat(ranges, teff, m, logg)?;
+        calculate_interpolation_coefficients_flat(grid, teff, m, logg)?;
     Ok(na::DVector::from_iterator(
         64,
         factors_teff
