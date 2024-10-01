@@ -506,12 +506,18 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         let j = m_range.get_left_index(m).unwrap();
         let k = logg_range.get_left_index(logg).unwrap();
 
+        let teff_limits = self.ranges().get_teff_index_limits_at(logg).unwrap();
+        let logg_limits = self.ranges().get_logg_index_limits_at(teff).unwrap();
         let neighbors = (-1..3)
             .flat_map(|di| (-1..3).flat_map(move |dj| (-1..3).map(move |dk| (di, dj, dk))))
             .map(|(di, dj, dk)| {
-                let i = ((i as i64 + di).max(0).min(teff_range.n() as i64 - 1)) as usize;
+                let i = ((i as i64 + di)
+                    .max(teff_limits.0 as i64)
+                    .min(teff_limits.1 as i64)) as usize;
                 let j = ((j as i64 + dj).max(0).min(m_range.n() as i64 - 1)) as usize;
-                let k = ((k as i64 + dk).max(0).min(logg_range.n() as i64 - 1)) as usize;
+                let k = ((k as i64 + dk)
+                    .max(logg_limits.0 as i64)
+                    .min(logg_limits.1 as i64)) as usize;
                 self.fetcher.find_spectrum(i, j, k)
             })
             .collect::<Result<Vec<CowVector>>>()?;

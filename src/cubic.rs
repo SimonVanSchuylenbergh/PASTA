@@ -56,7 +56,11 @@ fn calculate_factors_cubic(x: f64, x0: f64, x1: f64, x2: f64, x3: f64) -> [f64; 
 pub fn calculate_factors(x: f64, index: usize, range: &Range, limits: (usize, usize)) -> [f64; 4] {
     if index == limits.0 {
         // Quadratic interpolation on left edge
-        let neighbors = [range.values[0], range.values[1], range.values[2]];
+        let neighbors = [
+            range.values[index],
+            range.values[index + 1],
+            range.values[index + 2],
+        ];
         calculate_factors_quadratic(
             (x - neighbors[0]) / (neighbors[2] - neighbors[0]),
             0.0,
@@ -64,7 +68,7 @@ pub fn calculate_factors(x: f64, index: usize, range: &Range, limits: (usize, us
             1.0,
             true,
         )
-    } else if index == limits.1 {
+    } else if index == limits.1 - 1 {
         // Quadratic interpolation on right edge
         let neighbors = [
             range.values[index - 1],
@@ -78,7 +82,7 @@ pub fn calculate_factors(x: f64, index: usize, range: &Range, limits: (usize, us
             1.0,
             false,
         )
-    } else if index > 0 && index < range.n() - 2 {
+    } else if index > limits.0 && index < limits.1 - 1 {
         // Cubic interpolation
         let neighbors = [
             range.values[index - 1],
@@ -94,7 +98,7 @@ pub fn calculate_factors(x: f64, index: usize, range: &Range, limits: (usize, us
             1.0,
         )
     } else {
-        panic!("Index out of bounds ({})", index);
+        panic!("Index out of bounds ({}, limits={:?})", index, limits);
     }
 }
 
