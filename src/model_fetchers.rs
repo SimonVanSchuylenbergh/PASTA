@@ -20,9 +20,9 @@ fn labels_from_filename(filename: &str) -> Result<(f64, f64, f64)> {
     } else {
         1.0
     };
-    let m = sign * parts[0][2..].parse::<f64>()?/100.0;
+    let m = sign * parts[0][2..].parse::<f64>()? / 100.0;
     let teff = parts[1].parse::<f64>()?;
-    let logg = parts[2].parse::<f64>()?/100.0;
+    let logg = parts[2].parse::<f64>()? / 100.0;
     Ok((teff, m, logg))
 }
 
@@ -79,8 +79,14 @@ fn load_spectra(dir: PathBuf, grid: &Grid) -> Result<na::DMatrix<FluxFloat>> {
         .teff
         .values
         .iter()
+        .enumerate()
+        .flat_map(|(i, teff)| {
+            let (left, right) = grid.logg_limits[i];
+            grid.logg.values[left..=right]
+                .iter()
+                .map(move |logg| (teff, logg))
+        })
         .cartesian_product(grid.m.values.iter())
-        .cartesian_product(grid.logg.values.iter())
         .map(|((teff, m), logg)| [*teff, *m, *logg])
         .collect();
 
@@ -101,6 +107,7 @@ impl InMemFetcher {
         let grid = Grid::new(model_labels, vsini_range, rv_range)?;
         let loaded_spectra = load_spectra(PathBuf::from(dir), &grid)?;
         let n = loaded_spectra.shape().0;
+        let n_teff_logg = n / grid.m.n();
         Ok(Self {
             grid,
             loaded_spectra,
@@ -115,7 +122,9 @@ impl ModelFetcher for InMemFetcher {
     }
 
     fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<CowVector> {
-        let idx = i * self.grid.m.n() * self.grid.logg.n() + j * self.grid.logg.n() + k;
+        let idx = (self.grid.cumulative_grid_size[i] + j - self.grid.logg_limits[i].0)
+            * self.grid.m.n()
+            + k;
         Ok(CowVector::Borrowed(self.loaded_spectra.column(idx)))
     }
 }

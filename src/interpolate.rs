@@ -139,6 +139,8 @@ pub struct Grid {
     pub m: Range,
     pub logg: Range,
     pub logg_limits: Vec<(usize, usize)>, // For every Teff value, the min and max logg index
+    // For every Teff value, the number of (teff, logg) pairs with lower Teff
+    pub cumulative_grid_size: Vec<usize>,
     pub vsini: (f64, f64),
     pub rv: (f64, f64),
 }
@@ -172,6 +174,7 @@ impl Grid {
                 loggs.insert(pos, *logg);
             }
         }
+
         let mut logg_limits = vec![(loggs.len() - 1, 0); teffs.len()];
         for (teff, _, logg) in model_labels {
             let i = teffs
@@ -194,11 +197,22 @@ impl Grid {
             }
         }
 
+        let cumulative_grid_size = logg_limits
+            .iter()
+            .scan(0, |acc, (left, right)| {
+                let n = right - left + 1;
+                let old = *acc;
+                *acc += n;
+                Some(old)
+            })
+            .collect();
+
         Ok(Grid {
             teff: Range { values: teffs },
             m: Range { values: ms },
             logg: Range { values: loggs },
             logg_limits,
+            cumulative_grid_size,
             vsini,
             rv,
         })
