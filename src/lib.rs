@@ -535,7 +535,6 @@ macro_rules! implement_methods {
                 settings: PSOSettings,
             ) -> PyResult<Vec<PyOptimizationResult>> {
                 let pso_settings: fitting::PSOSettings = settings.into();
-                println!("{:?}", fitters.len());
                 Ok(fitters
                     .into_par_iter()
                     .zip(dispersions)

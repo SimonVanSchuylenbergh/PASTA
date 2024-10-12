@@ -54,14 +54,16 @@ impl OnDiskFetcher {
 }
 
 impl ModelFetcher for OnDiskFetcher {
-    fn ranges(&self) -> &Grid {
+    fn grid(&self) -> &Grid {
         &self.grid
     }
 
     fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<CowVector> {
-        let teff = self.grid.teff.get_value(i);
-        let m = self.grid.m.get_value(j);
-        let logg = self.grid.logg.get_value(k);
+        let teff = self.grid.teff.get(i)?;
+        let m = self.grid.m.get(j)?;
+        let logg = self.grid.logg.get(k)?;
+        // println!("Finding i={}, j={}, k={}", i, j, k);
+        // println!("teff={}, m={}, logg={}", teff, m, logg);
         let spec = read_spectrum(&self.dir, teff, m, logg)?;
         Ok(CowVector::Owned(spec))
     }
@@ -87,7 +89,7 @@ fn load_spectra(dir: PathBuf, grid: &Grid) -> Result<na::DMatrix<FluxFloat>> {
                 .map(move |logg| (teff, logg))
         })
         .cartesian_product(grid.m.values.iter())
-        .map(|((teff, m), logg)| [*teff, *m, *logg])
+        .map(|((teff, logg), m)| [*teff, *m, *logg])
         .collect();
 
     let bar = ProgressBar::new(combinations.len() as u64);
@@ -117,7 +119,7 @@ impl InMemFetcher {
 }
 
 impl ModelFetcher for InMemFetcher {
-    fn ranges(&self) -> &Grid {
+    fn grid(&self) -> &Grid {
         &self.grid
     }
 
@@ -160,7 +162,7 @@ impl CachedFetcher {
 }
 
 impl ModelFetcher for CachedFetcher {
-    fn ranges(&self) -> &Grid {
+    fn grid(&self) -> &Grid {
         &self.grid
     }
 
@@ -170,9 +172,9 @@ impl ModelFetcher for CachedFetcher {
             Ok(CowVector::Owned(spec.clone()))
         } else {
             std::mem::drop(cache);
-            let teff = self.grid.teff.get_value(i);
-            let m = self.grid.m.get_value(j);
-            let logg = self.grid.logg.get_value(k);
+            let teff = self.grid.teff.get(i)?;
+            let m = self.grid.m.get(j)?;
+            let logg = self.grid.logg.get(k)?;
             let spec = read_spectrum(&self.dir, teff, m, logg)?;
             let mut cache = self.cache.lock().unwrap();
             cache.put((i, j, k), spec.clone());

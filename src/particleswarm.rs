@@ -20,7 +20,7 @@
 //!
 //! \[1\] <https://en.wikipedia.org/wiki/Particle_swarm_optimization>
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use argmin::{
     argmin_error, argmin_error_closure,
     core::{ArgminFloat, CostFunction, Error, PopulationState, Problem, Solver, SyncAlias, KV},
@@ -257,11 +257,11 @@ where
         ))?;
 
         for p in 0..particles.len() {
-            let mut new_position = na::SVector::<f64, 5>::zeros();
+            // println!("Iterate particle {}: {}", p, particles[p].position);
             for d in 0..N {
-                let condition = particles
-                    .iter()
-                    .all(|p| calculate_potential(p, best_particle.position[d], d) < self.delta[d]);
+                let condition = particles.iter().all(|particle| {
+                    calculate_potential(particle, best_particle.position[d], d) < self.delta[d]
+                });
                 if condition {
                     // forced update
                     // println!("Forced update in d={}, i={}, p={}", d, state.iter, p);
@@ -281,11 +281,16 @@ where
                             * self.weight_social;
 
                     particles[p].velocity[d] = momentum + pull_to_optimum + pull_to_global_optimum;
-                    new_position[d] = self
+                    let mut new_position = particles[p].position;
+                    new_position[d] += particles[p].velocity[d];
+                    particles[p].position[d] = self
                         .bounds
-                        .clamp_1d(particles[p].position + particles[p].velocity, d)?;
+                        .clamp_1d(new_position, d)
+                        .with_context(|| format!("Error clamping {:?} dim {}", new_position, d))?;
+                    // println!("Particle {}: dim {} at {}", p, d, particles[p].position[d]);
                 }
             }
+            // println!("Done particle {}: {}", p, particles[p].position);
         }
         let positions: Vec<V<N>> = particles.iter().map(|p| p.position).collect();
 

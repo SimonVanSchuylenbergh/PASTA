@@ -1,5 +1,5 @@
 use crate::convolve_rv::{rot_broad_rv, WavelengthDispersion};
-use crate::cubic::calculate_interpolation_coefficients;
+use crate::cubic::{calculate_interpolation_coefficients, LocalGrid};
 use crate::particleswarm::PSOBounds;
 use anyhow::{anyhow, bail, Context, Result};
 use argmin_math::ArgminRandom;
@@ -85,17 +85,21 @@ pub struct Range {
 }
 
 impl Range {
-    pub fn get_left_index(&self, x: f64) -> Option<usize> {
-        match self.values.binary_search_by(|v| v.partial_cmp(&x).unwrap()) {
+    pub fn get_right_index(&self, x: f64) -> Result<usize, usize> {
+        self.values.binary_search_by(|v| v.partial_cmp(&x).unwrap())
+    }
+
+    pub fn find_left_neighbor_index(&self, x: f64, limits: (usize, usize)) -> Option<usize> {
+        match self.get_right_index(x) {
             Ok(i) => {
-                if i == 0 {
-                    Some(0)
+                if i == limits.0 {
+                    Some(limits.0)
                 } else {
                     Some(i - 1)
                 }
             }
             Err(i) => {
-                if i == 0 {
+                if i == limits.0 {
                     None
                 } else {
                     Some(i - 1)
@@ -104,9 +108,39 @@ impl Range {
         }
     }
 
-    pub fn try_get_index(&self, x: f64) -> Option<usize> {
+    pub fn find_neighbors(&self, x: f64, limits: (usize, usize)) -> Result<[Option<usize>; 4]> {
+        let (left, right) = limits;
+        match self.get_right_index(x) {
+            Ok(i) => {
+                if i == left {
+                    Ok([None, Some(i), Some(i + 1), Some(i + 2)])
+                } else if i == right {
+                    Ok([Some(i - 2), Some(i - 1), Some(i), None])
+                } else if i == right - 1 {
+                    Ok([Some(i - 2), Some(i - 1), Some(i), Some(i + 1)])
+                } else {
+                    Ok([Some(i - 1), Some(i), Some(i + 1), Some(i + 2)])
+                }
+            }
+            Err(i) => {
+                if i == left {
+                    Err(anyhow!("Index out of left bound {}", i))
+                } else if i == right + 1 {
+                    Err(anyhow!("Index out of right bound {}", i))
+                } else if i == left + 1 {
+                    Ok([None, Some(i - 1), Some(i), Some(i + 1)])
+                } else if i == right {
+                    Ok([Some(i - 2), Some(i - 1), Some(i), None])
+                } else {
+                    Ok([Some(i - 2), Some(i - 1), Some(i), Some(i + 1)])
+                }
+            }
+        }
+    }
+
+    pub fn try_get_index(&self, x: f64, limits: (usize, usize)) -> Option<usize> {
         let precision = 0.001;
-        let i = match self.get_left_index(x) {
+        let i = match self.find_left_neighbor_index(x, limits) {
             Some(i) => i,
             None => return None,
         };
@@ -120,8 +154,11 @@ impl Range {
         }
     }
 
-    pub fn get_value(&self, i: usize) -> f64 {
-        self.values[i]
+    pub fn get(&self, i: usize) -> Result<f64> {
+        self.values
+            .get(i)
+            .ok_or_else(|| anyhow!("Index out of bounds ({})", i))
+            .map(|x| *x)
     }
 
     pub fn n(&self) -> usize {
@@ -219,29 +256,23 @@ impl Grid {
     }
 
     pub fn is_teff_logg_between_bounds(&self, teff: f64, logg: f64) -> bool {
-        let teff_index = match self.teff.get_left_index(teff) {
-            Some(i) => i,
-            None => return false,
-        };
-        if teff_index == self.teff.n() - 1 {
-            return false;
+        match self.teff.get_right_index(teff) {
+            Ok(i) => {
+                let bounds = self.logg_limits[i];
+                logg >= self.logg.get(bounds.0).unwrap() && logg <= self.logg.get(bounds.1).unwrap()
+            }
+            Err(i) => {
+                if i == 0 || i == self.teff.n() {
+                    return false;
+                }
+                let bounds_left = self.logg_limits[i - 1];
+                let bounds_right = self.logg_limits[i];
+                logg >= self.logg.get(bounds_left.0).unwrap()
+                    && logg <= self.logg.get(bounds_left.1).unwrap()
+                    && logg >= self.logg.get(bounds_right.0).unwrap()
+                    && logg <= self.logg.get(bounds_right.1).unwrap()
+            }
         }
-        let logg_index = match self.logg.get_left_index(logg) {
-            Some(i) => i,
-            None => return false,
-        };
-        if logg_index == self.logg.n() - 1 {
-            return false;
-        }
-        let left_limits = self.logg_limits[teff_index];
-        let right_limits = self.logg_limits[teff_index + 1];
-        if logg_index < left_limits.0 || logg_index > left_limits.1 {
-            return false;
-        }
-        if logg_index < right_limits.0 || logg_index > right_limits.1 {
-            return false;
-        }
-        return true;
     }
 
     pub fn is_m_between_bounds(&self, m: f64) -> bool {
@@ -265,36 +296,140 @@ impl Grid {
     }
 
     pub fn get_logg_index_limits_at(&self, teff: f64) -> Result<(usize, usize)> {
-        let teff_index = self
-            .teff
-            .get_left_index(teff)
-            .ok_or(anyhow!("teff out of bounds {}", teff))?;
-        let left_limits = self.logg_limits[teff_index];
-        let right_limits = self.logg_limits[teff_index + 1];
-        let min_index = left_limits.0.max(right_limits.0);
-        let max_index = left_limits.1.min(right_limits.1);
-        Ok((min_index, max_index))
+        match self.teff.get_right_index(teff) {
+            Ok(i) => {
+                if i == self.teff.n() - 1 {
+                    Ok(self.logg_limits[i])
+                } else {
+                    let left = self.logg_limits[i];
+                    let right = self.logg_limits[i + 1];
+                    Ok((left.0.max(right.0), left.1.min(right.1)))
+                }
+            }
+            Err(i) => {
+                if i == 0 || i == self.teff.n() {
+                    bail!("Teff out of bounds");
+                }
+                let left = self.logg_limits[i - 1];
+                let right = self.logg_limits[i];
+                Ok((left.0.max(right.0), left.1.min(right.1)))
+            }
+        }
     }
 
     pub fn get_teff_index_limits_at(&self, logg: f64) -> Result<(usize, usize)> {
-        let logg_index = self
-            .logg
-            .get_left_index(logg)
-            .ok_or(anyhow!("logg out of bounds"))?;
         let min_index = self
             .logg_limits
             .iter()
-            .position(|(left, right)| logg_index >= *left && logg_index + 1 <= *right)
-            .ok_or(anyhow!("No teff bounds found at logg={}", logg))?;
+            .position(|(left, right)| {
+                logg >= self.logg.values[*left] && logg <= self.logg.values[*right]
+            })
+            .ok_or(anyhow!("No teff bounds at logg={}", logg))?;
         let max_index = self.logg_limits.len()
             - 1
             - self
                 .logg_limits
                 .iter()
                 .rev()
-                .position(|(left, right)| logg_index >= *left && logg_index + 1 <= *right)
-                .ok_or(anyhow!("No teff bounds found at logg={}", logg))?;
+                .position(|(left, right)| {
+                    logg >= self.logg.values[*left] && logg <= self.logg.values[*right]
+                })
+                .ok_or(anyhow!("No teff bounds at logg={}", logg))?;
         Ok((min_index, max_index))
+    }
+
+    pub fn get_local_grid(&self, teff: f64, m: f64, logg: f64) -> Result<LocalGrid> {
+        if !self.is_teff_logg_between_bounds(teff, logg) {
+            bail!("Teff, logg out of bounds ({}, {})", teff, logg);
+        }
+        if !self.is_m_between_bounds(m) {
+            bail!("M out of bounds ({})", m);
+        }
+        let teff_limits = self.get_teff_index_limits_at(logg)?;
+        let m_limits = (0, self.m.n() - 1);
+        let logg_limits = self.get_logg_index_limits_at(teff)?;
+
+        let teff_neighbors = self
+            .teff
+            .find_neighbors(teff, teff_limits)
+            .with_context(|| {
+                format!(
+                    "failed getting neighbors for teff: {}, {:?}",
+                    teff, teff_limits
+                )
+            })?;
+        let m_neighbors = self.m.find_neighbors(m, m_limits).with_context(|| {
+            format!(
+                "failed getting neighbors for m: {}, {:?}",
+                logg, logg_limits
+            )
+        })?;
+        let logg_neighbors = self
+            .logg
+            .find_neighbors(logg, logg_limits)
+            .with_context(|| format!("failed getting neighbors for logg: {}, {:?}", m, m_limits))?;
+
+        let teff_logg_indices =
+            na::SMatrix::from_columns(&teff_neighbors.map(|teff_neighbor| match teff_neighbor {
+                Some(i) => {
+                    let (left, right) = self.logg_limits[i];
+                    logg_neighbors
+                        .map(|k| match k {
+                            Some(k) => {
+                                if k >= left && k <= right {
+                                    Some((i, k))
+                                } else {
+                                    None
+                                }
+                            }
+                            None => None,
+                        })
+                        .into()
+                }
+                None => [None; 4].into(),
+            }));
+
+        Ok(LocalGrid {
+            teff: (
+                teff,
+                teff_neighbors.map(|x| {
+                    x.map(|x| {
+                        self.teff
+                            .get(x)
+                            .with_context(|| {
+                                format!("teff={}, neighbors: {:?}", teff, teff_neighbors)
+                            })
+                            .unwrap()
+                    })
+                }),
+            ),
+            logg: (
+                logg,
+                logg_neighbors.map(|x| {
+                    x.map(|x| {
+                        self.logg
+                            .get(x)
+                            .with_context(|| {
+                                format!("logg={}, neighbors: {:?}", logg, logg_neighbors)
+                            })
+                            .unwrap()
+                    })
+                }),
+            ),
+            teff_logg_indices,
+            m: (
+                m,
+                m_neighbors.map(|x| {
+                    x.map(|x| {
+                        self.m
+                            .get(x)
+                            .with_context(|| format!("m={}, neighbors: {:?}", m, m_neighbors))
+                            .unwrap()
+                    })
+                }),
+            ),
+            m_indices: m_neighbors.into(),
+        })
     }
 }
 
@@ -325,20 +460,18 @@ impl PSOBounds<5> for Grid {
                 if self.is_within_bounds(param) {
                     return Ok(param[0]);
                 } else {
-                    let (left_index, right_index) = self.get_teff_index_limits_at(param[2])?;
-                    (
-                        self.teff.get_value(left_index),
-                        self.teff.get_value(right_index),
-                    )
+                    let (left_index, right_index) = self
+                        .get_teff_index_limits_at(param[2])
+                        .context(anyhow!("Cannot clamp teff at logg={}", param[2]))?;
+                    (self.teff.get(left_index)?, self.teff.get(right_index)?)
                 }
             }
             1 => self.m.get_first_and_last(),
             2 => {
-                let (left_index, right_index) = self.get_logg_index_limits_at(param[0])?;
-                (
-                    self.logg.get_value(left_index),
-                    self.logg.get_value(right_index),
-                )
+                let (left_index, right_index) = self
+                    .get_logg_index_limits_at(param[0])
+                    .context(anyhow!("Cannot clamp logg at Teff={}", param[0]))?;
+                (self.logg.get(left_index)?, self.logg.get(right_index)?)
             }
             3 => self.vsini,
             4 => self.rv,
@@ -462,7 +595,7 @@ pub trait Interpolator: Send + Sync {
 }
 
 pub trait ModelFetcher: Send + Sync {
-    fn ranges(&self) -> &Grid;
+    fn grid(&self) -> &Grid;
     fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<CowVector>;
 }
 
@@ -480,8 +613,8 @@ impl<F: ModelFetcher> GridInterpolator<F> {
         }
     }
 
-    pub fn ranges(&self) -> &Grid {
-        self.fetcher.ranges()
+    pub fn grid(&self) -> &Grid {
+        self.fetcher.grid()
     }
 }
 
@@ -493,32 +626,23 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         self.synth_wl
     }
     fn bounds_single(&self) -> &Grid {
-        self.ranges()
+        self.grid()
     }
     fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<na::DVector<FluxFloat>> {
-        let factors = calculate_interpolation_coefficients(self.ranges(), teff, m, logg)?;
+        let local_grid = self.grid().get_local_grid(teff, m, logg)?;
 
-        let teff_range = self.ranges().teff.clone();
-        let m_range = self.ranges().m.clone();
-        let logg_range = self.ranges().logg.clone();
-
-        let i = teff_range.get_left_index(teff).unwrap();
-        let j = m_range.get_left_index(m).unwrap();
-        let k = logg_range.get_left_index(logg).unwrap();
-
-        let teff_limits = self.ranges().get_teff_index_limits_at(logg).unwrap();
-        let logg_limits = self.ranges().get_logg_index_limits_at(teff).unwrap();
-        let neighbors = (-1..3)
-            .flat_map(|di| (-1..3).flat_map(move |dj| (-1..3).map(move |dk| (di, dj, dk))))
-            .map(|(di, dj, dk)| {
-                let i = ((i as i64 + di)
-                    .max(teff_limits.0 as i64)
-                    .min(teff_limits.1 as i64)) as usize;
-                let j = ((j as i64 + dj).max(0).min(m_range.n() as i64 - 1)) as usize;
-                let k = ((k as i64 + dk)
-                    .max(logg_limits.0 as i64)
-                    .min(logg_limits.1 as i64)) as usize;
-                self.fetcher.find_spectrum(i, j, k)
+        let factors = calculate_interpolation_coefficients(&local_grid)?;
+        let neighbors = local_grid
+            .teff_logg_indices
+            .iter()
+            .flat_map(|teff_logg_index| {
+                local_grid
+                    .m_indices
+                    .iter()
+                    .map(move |m_index| match (teff_logg_index, m_index) {
+                        (Some((i, j)), Some(k)) => self.fetcher.find_spectrum(*i, *k, *j),
+                        _ => Ok(CowVector::Owned(na::DVector::zeros(self.synth_wl.n()))),
+                    })
             })
             .collect::<Result<Vec<CowVector>>>()?;
 
@@ -557,9 +681,14 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
     ) -> Result<na::DVector<FluxFloat>> {
         let interpolated = self
             .interpolate(teff, m, logg)
-            .context("Error during interpolation step.")?;
+            .with_context(|| format!("Error while interpolating at ({}, {}, {})", teff, m, logg))?;
         let broadened = rot_broad_rv(interpolated, self.synth_wl(), target_dispersion, vsini, rv)
-            .context("Error during convolution/resampling step.")?;
+            .with_context(|| {
+            format!(
+                "Error during convolution/resampling step at ({}, {}, {})",
+                teff, m, logg
+            )
+        })?;
         Ok(broadened)
     }
 
@@ -572,23 +701,27 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         vsini: f64,
         rv: f64,
     ) -> Result<na::DVector<FluxFloat>> {
+        let teff_limits = self.grid().get_teff_index_limits_at(logg).unwrap();
+        let m_limits = (0, self.grid().m.n() - 1);
+        let logg_limits = self.grid().get_logg_index_limits_at(teff).unwrap();
+
         let i = self
             .fetcher
-            .ranges()
+            .grid()
             .teff
-            .try_get_index(teff)
+            .try_get_index(teff, teff_limits)
             .context("Teff not in grid")?;
         let j = self
             .fetcher
-            .ranges()
+            .grid()
             .m
-            .try_get_index(m)
+            .try_get_index(m, m_limits)
             .context("m not in grid")?;
         let k = self
             .fetcher
-            .ranges()
+            .grid()
             .logg
-            .try_get_index(logg)
+            .try_get_index(logg, logg_limits)
             .context("logg not in grid")?;
         let spec = self.fetcher.find_spectrum(i, j, k)?;
         let broadened = rot_broad_rv(
