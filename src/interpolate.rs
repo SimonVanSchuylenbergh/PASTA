@@ -701,9 +701,9 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         vsini: f64,
         rv: f64,
     ) -> Result<na::DVector<FluxFloat>> {
-        let teff_limits = self.grid().get_teff_index_limits_at(logg).unwrap();
+        let teff_limits = self.grid().get_teff_index_limits_at(logg)?;
         let m_limits = (0, self.grid().m.n() - 1);
-        let logg_limits = self.grid().get_logg_index_limits_at(teff).unwrap();
+        let logg_limits = self.grid().get_logg_index_limits_at(teff)?;
 
         let i = self
             .fetcher

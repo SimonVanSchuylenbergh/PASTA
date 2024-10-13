@@ -11,6 +11,7 @@ use convolve_rv::{
     FixedTargetDispersion, NoConvolutionDispersionTarget, VariableTargetDispersion,
     WavelengthDispersion,
 };
+use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
 use enum_dispatch::enum_dispatch;
 use fitting::{
     fit_pso, uncertainty_chi2, ChunkFitter, FixedContinuum, LinearModelFitter, ObservedSpectrum,
@@ -672,6 +673,63 @@ macro_rules! implement_methods {
                     .bounds_single()
                     .clamp_1d(na::Vector5::new(teff, m, logg, vsini, rv), index)
                     .unwrap()
+            }
+
+            pub fn calculate_interpolation_coefficients_flat(
+                &self,
+                teff: f64,
+                m: f64,
+                logg: f64,
+            ) -> ([[f64; 4]; 4], [[f64; 4]; 4], [f64; 4]) {
+                let local_grid = self
+                    .interpolator
+                    .grid()
+                    .get_local_grid(teff, m, logg)
+                    .unwrap();
+                let (x, y, z) = calculate_interpolation_coefficients_flat(&local_grid).unwrap();
+                (x.into(), y.into(), z.into())
+            }
+
+            pub fn calculate_interpolation_coefficients(
+                &self,
+                teff: f64,
+                m: f64,
+                logg: f64,
+            ) -> Vec<FluxFloat> {
+                let local_grid = self
+                    .interpolator
+                    .grid()
+                    .get_local_grid(teff, m, logg)
+                    .unwrap();
+                calculate_interpolation_coefficients(&local_grid)
+                    .unwrap()
+                    .data
+                    .into()
+            }
+
+            pub fn get_neighbor_indices(
+                &self,
+                teff: f64,
+                m: f64,
+                logg: f64,
+            ) -> Vec<(usize, usize, usize)> {
+                let local_grid = self
+                    .interpolator
+                    .grid()
+                    .get_local_grid(teff, m, logg)
+                    .unwrap();
+                local_grid
+                    .teff_logg_indices
+                    .iter()
+                    .flat_map(|teff_logg_index| {
+                        local_grid.m_indices.iter().map(move |m_index| {
+                            match (teff_logg_index, m_index) {
+                                (Some((i, j)), Some(k)) => (*i, *k, *j),
+                                _ => (0, 0, 0),
+                            }
+                        })
+                    })
+                    .collect()
             }
         }
     };

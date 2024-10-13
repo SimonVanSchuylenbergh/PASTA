@@ -61,10 +61,14 @@ pub enum Neighbors {
 
 pub fn calculate_factors(x: f64, neighbors: Neighbors) -> na::SVector<f64, 4> {
     match neighbors {
-        Neighbors::LeftOnly([x0, x1, x2]) => {
-            calculate_factors_quadratic((x - x0) / (x2 - x0), 0.0, (x1 - x0) / (x2 - x0), 1.0, true)
-                .into()
-        }
+        Neighbors::LeftOnly([x0, x1, x2]) => calculate_factors_quadratic(
+            (x - x0) / (x2 - x0),
+            0.0,
+            (x1 - x0) / (x2 - x0),
+            1.0,
+            false,
+        )
+        .into(),
         Neighbors::Both([x0, x1, x2, x3]) => calculate_factors_cubic(
             (x - x0) / (x3 - x0),
             0.0,
@@ -73,62 +77,11 @@ pub fn calculate_factors(x: f64, neighbors: Neighbors) -> na::SVector<f64, 4> {
             1.0,
         )
         .into(),
-        Neighbors::RightOnly([x0, x1, x2]) => calculate_factors_quadratic(
-            (x - x0) / (x2 - x0),
-            0.0,
-            (x1 - x0) / (x2 - x0),
-            1.0,
-            false,
-        )
-        .into(),
+        Neighbors::RightOnly([x0, x1, x2]) => {
+            calculate_factors_quadratic((x - x0) / (x2 - x0), 0.0, (x1 - x0) / (x2 - x0), 1.0, true)
+                .into()
+        }
     }
-
-    // if index == limits.0 {
-    //     // Quadratic interpolation on left edge
-    //     let neighbors = [
-    //         range.values[index],
-    //         range.values[index + 1],
-    //         range.values[index + 2],
-    //     ];
-    //     Ok(calculate_factors_quadratic(
-    //         (x - neighbors[0]) / (neighbors[2] - neighbors[0]),
-    //         0.0,
-    //         (neighbors[1] - neighbors[0]) / (neighbors[2] - neighbors[0]),
-    //         1.0,
-    //         true,
-    //     ))
-    // } else if index == limits.1 - 1 {
-    //     // Quadratic interpolation on right edge
-    //     let neighbors = [
-    //         range.values[index - 1],
-    //         range.values[index],
-    //         range.values[index + 1],
-    //     ];
-    //     Ok(calculate_factors_quadratic(
-    //         (x - neighbors[0]) / (neighbors[2] - neighbors[0]),
-    //         0.0,
-    //         (neighbors[1] - neighbors[0]) / (neighbors[2] - neighbors[0]),
-    //         1.0,
-    //         false,
-    //     ))
-    // } else if index > limits.0 && index < limits.1 - 1 {
-    //     // Cubic interpolation
-    //     let neighbors = [
-    //         range.values[index - 1],
-    //         range.values[index],
-    //         range.values[index + 1],
-    //         range.values[index + 2],
-    //     ];
-    //     Ok(calculate_factors_cubic(
-    //         (x - neighbors[0]) / (neighbors[3] - neighbors[0]),
-    //         0.0,
-    //         (neighbors[1] - neighbors[0]) / (neighbors[3] - neighbors[0]),
-    //         (neighbors[2] - neighbors[0]) / (neighbors[3] - neighbors[0]),
-    //         1.0,
-    //     ))
-    // } else {
-    //     bail!("Index out of bounds ({}, limits={:?})", index, limits);
-    // }
 }
 
 fn map_columns<const R: usize, const C: usize>(
@@ -202,10 +155,16 @@ pub fn calculate_interpolation_coefficients_flat(
                     None => Ok(None),
                 })
                 .collect::<Result<Vec<_>>>()
-                .with_context(|| anyhow!("teff={}, neighbors: {:?}, row: {:?}", teff, teff_neighbors, row))?
+                .with_context(|| {
+                    anyhow!(
+                        "teff={}, neighbors: {:?}, row: {:?}",
+                        teff,
+                        teff_neighbors,
+                        row
+                    )
+                })?
                 .as_slice()
-                .try_into()
-                .unwrap(),
+                .try_into()?,
         )
         .with_context(|| format!("Error get teff coefficients: row={:?}", row))
     })?;
@@ -224,10 +183,16 @@ pub fn calculate_interpolation_coefficients_flat(
                     None => Ok(None),
                 })
                 .collect::<Result<Vec<_>>>()
-                .with_context(|| anyhow!("logg={}, neighbors: {:?}, col: {:?}", logg, logg_neighbors, col))?
+                .with_context(|| {
+                    anyhow!(
+                        "logg={}, neighbors: {:?}, col: {:?}",
+                        logg,
+                        logg_neighbors,
+                        col
+                    )
+                })?
                 .as_slice()
-                .try_into()
-                .unwrap(),
+                .try_into()?,
         )
         .context("Error get logg coefficients")
     })?;
@@ -244,7 +209,7 @@ pub fn calculate_interpolation_coefficients(
         calculate_interpolation_coefficients_flat(local_grid)?;
     Ok(na::DVector::from_iterator(
         64,
-        (factors_teff * factors_logg)
+        (factors_teff.component_mul(&factors_logg))
             .iter()
             .cartesian_product(factors_m.iter())
             .map(|(a, b)| (a * b) as f32),
