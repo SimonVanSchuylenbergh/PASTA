@@ -124,9 +124,9 @@ impl ModelFetcher for InMemFetcher {
     }
 
     fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<CowVector> {
-        let idx = (self.grid.cumulative_grid_size[i] + j - self.grid.logg_limits[i].0)
+        let idx = (self.grid.cumulative_grid_size[i] + k - self.grid.logg_limits[i].0)
             * self.grid.m.n()
-            + k;
+            + j;
         Ok(CowVector::Borrowed(self.loaded_spectra.column(idx)))
     }
 }
