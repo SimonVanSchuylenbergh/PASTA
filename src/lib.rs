@@ -179,6 +179,20 @@ pub struct PyContinuumFitter(ContinuumFitterWrapper);
 
 #[pymethods]
 impl PyContinuumFitter {
+    fn fit_continuum(
+        &self,
+        synth: Vec<FluxFloat>,
+        y: Vec<FluxFloat>,
+        yerr: Vec<FluxFloat>,
+    ) -> PyResult<(Vec<FluxFloat>, f64)> {
+        let observed_spectrum = ObservedSpectrum::from_vecs(y, yerr);
+        let (params, ls) = self
+            .0
+            .fit_continuum(&observed_spectrum, &na::DVector::from_vec(synth))
+            .unwrap();
+        Ok((params.data.into(), ls))
+    }
+
     fn fit_and_return_continuum(
         &self,
         synth: Vec<FluxFloat>,
@@ -508,7 +522,7 @@ macro_rules! implement_methods {
                 observed_flux: PyArrayLike<FluxFloat, Ix1>,
                 observed_var: PyArrayLike<FluxFloat, Ix1>,
                 settings: PSOSettings,
-                save_directory: Option<String>,
+                trace_directory: Option<String>,
                 parallelize: Option<bool>,
             ) -> PyResult<PyOptimizationResult> {
                 let observed_spectrum = ObservedSpectrum {
@@ -521,7 +535,7 @@ macro_rules! implement_methods {
                     &observed_spectrum.into(),
                     &fitter.0,
                     &settings.into(),
-                    save_directory,
+                    trace_directory,
                     parallelize.unwrap_or(true),
                 );
                 Ok(result?.into())
@@ -730,6 +744,30 @@ macro_rules! implement_methods {
                         })
                     })
                     .collect()
+            }
+
+            pub fn teffs(&self) -> Vec<f64> {
+                self.interpolator.grid().teff.values.clone()
+            }
+
+            pub fn ms(&self) -> Vec<f64> {
+                self.interpolator.grid().m.values.clone()
+            }
+
+            pub fn loggs(&self) -> Vec<f64> {
+                self.interpolator.grid().logg.values.clone()
+            }
+
+            pub fn logg_limits(&self) -> Vec<(usize, usize)> {
+                self.interpolator.grid().logg_limits.clone()
+            }
+
+            pub fn cumulative_grid_size(&self) -> Vec<usize> {
+                self.interpolator.grid().cumulative_grid_size.clone()
+            }
+
+            pub fn list_gridpoints(&self) -> Vec<[f64; 3]> {
+                self.interpolator.grid().list_gridpoints()
             }
         }
     };

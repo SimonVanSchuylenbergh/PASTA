@@ -547,7 +547,7 @@ pub fn fit_pso<I: Interpolator>(
     observed_spectrum: &ObservedSpectrum,
     continuum_fitter: &impl ContinuumFitter,
     settings: &PSOSettings,
-    save_directory: Option<String>,
+    trace_directory: Option<String>,
     parallelize: bool,
 ) -> Result<OptimizationResult> {
     let fitter = get_pso_fitter(
@@ -558,7 +558,7 @@ pub fn fit_pso<I: Interpolator>(
         settings,
         parallelize,
     );
-    let result = if let Some(dir) = save_directory {
+    let result = if let Some(dir) = trace_directory {
         let observer = PSObserver::new(&dir, "iteration");
         fitter.add_observer(observer, ObserverMode::Always).run()?
     } else {

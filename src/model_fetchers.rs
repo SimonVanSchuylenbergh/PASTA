@@ -77,20 +77,7 @@ pub struct InMemFetcher {
 }
 
 fn load_spectra(dir: PathBuf, grid: &Grid) -> Result<na::DMatrix<FluxFloat>> {
-    let combinations: Vec<[f64; 3]> = grid
-        .teff
-        .values
-        .iter()
-        .enumerate()
-        .flat_map(|(i, teff)| {
-            let (left, right) = grid.logg_limits[i];
-            grid.logg.values[left..=right]
-                .iter()
-                .map(move |logg| (teff, logg))
-        })
-        .cartesian_product(grid.m.values.iter())
-        .map(|((teff, logg), m)| [*teff, *m, *logg])
-        .collect();
+    let combinations = grid.list_gridpoints();
 
     let bar = ProgressBar::new(combinations.len() as u64);
     let vec_of_spectra = combinations
@@ -109,7 +96,6 @@ impl InMemFetcher {
         let grid = Grid::new(model_labels, vsini_range, rv_range)?;
         let loaded_spectra = load_spectra(PathBuf::from(dir), &grid)?;
         let n = loaded_spectra.shape().0;
-        let n_teff_logg = n / grid.m.n();
         Ok(Self {
             grid,
             loaded_spectra,

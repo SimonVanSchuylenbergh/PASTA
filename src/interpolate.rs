@@ -3,6 +3,7 @@ use crate::cubic::{calculate_interpolation_coefficients, LocalGrid};
 use crate::particleswarm::PSOBounds;
 use anyhow::{anyhow, bail, Context, Result};
 use argmin_math::ArgminRandom;
+use itertools::Itertools;
 use nalgebra as na;
 use npy::NpyData;
 use rand::Rng;
@@ -255,6 +256,41 @@ impl Grid {
         })
     }
 
+    pub fn minmax(&self) -> (na::SVector<f64, 5>, na::SVector<f64, 5>) {
+        (
+            na::Vector5::new(
+                *self.teff.values.first().unwrap(),
+                *self.m.values.first().unwrap(),
+                *self.logg.values.first().unwrap(),
+                self.vsini.0,
+                self.rv.0,
+            ),
+            na::Vector5::new(
+                *self.teff.values.last().unwrap(),
+                *self.m.values.last().unwrap(),
+                *self.logg.values.last().unwrap(),
+                self.vsini.1,
+                self.rv.1,
+            ),
+        )
+    }
+
+    pub fn list_gridpoints(&self) -> Vec<[f64; 3]> {
+        self.teff
+            .values
+            .iter()
+            .enumerate()
+            .flat_map(|(i, teff)| {
+                let (left, right) = self.logg_limits[i];
+                self.logg.values[left..=right]
+                    .iter()
+                    .map(move |logg| (teff, logg))
+            })
+            .cartesian_product(self.m.values.iter())
+            .map(|((teff, logg), m)| [*teff, *m, *logg])
+            .collect()
+    }
+
     pub fn is_teff_logg_between_bounds(&self, teff: f64, logg: f64) -> bool {
         match self.teff.get_right_index(teff) {
             Ok(i) => {
@@ -486,7 +522,7 @@ impl PSOBounds<5> for Grid {
         num_particles: usize,
     ) -> Vec<na::SVector<f64, 5>> {
         let mut particles = Vec::with_capacity(num_particles);
-        let (min, max) = self.limits();
+        let (min, max) = self.minmax();
         while particles.len() < num_particles {
             let param = na::SVector::rand_from_range(&min, &max, rng);
             if self.is_within_bounds(param) {
