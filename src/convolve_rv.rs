@@ -380,6 +380,13 @@ pub fn rot_broad_rv(
     if vsini < 0.0 {
         return Err(anyhow!("vsini must be positive"));
     }
+    if synth_wl.n() != input_array.len() {
+        return Err(anyhow!(
+            "Length of input_array and wavelength grid don't match. input_array: {:?}, synth_wl: {:?}",
+            input_array.len(),
+            synth_wl.n()
+        ));
+    }
     let convolved_for_rotation = convolve_rotation(&synth_wl, &input_array, vsini)?;
     // Convolve for resolution
     let output = target_dispersion.convolve(convolved_for_rotation)?;

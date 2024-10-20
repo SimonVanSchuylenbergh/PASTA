@@ -5,20 +5,17 @@ use anyhow::{anyhow, bail, Context, Result};
 use argmin_math::ArgminRandom;
 use itertools::Itertools;
 use nalgebra as na;
-use npy::NpyData;
 use rand::Rng;
-use std::io::Read;
-use std::path::{Path, PathBuf};
 
 pub type FluxFloat = f32; // Float type used for spectra
 
 pub enum CowVector<'a> {
-    Borrowed(na::DVectorView<'a, FluxFloat>),
-    Owned(na::DVector<FluxFloat>),
+    Borrowed(na::DVectorView<'a, u16>),
+    Owned(na::DVector<u16>),
 }
 
 impl<'a> CowVector<'a> {
-    pub fn into_owned(self) -> na::DVector<FluxFloat> {
+    pub fn into_owned(self) -> na::DVector<u16> {
         match self {
             CowVector::Borrowed(view) => view.into_owned(),
             CowVector::Owned(vec) => vec,
@@ -32,7 +29,7 @@ impl<'a> CowVector<'a> {
         }
     }
 
-    pub fn rows(&self, start: usize, len: usize) -> na::DVectorView<FluxFloat> {
+    pub fn rows(&self, start: usize, len: usize) -> na::DVectorView<u16> {
         match self {
             CowVector::Borrowed(view) => view.rows(start, len),
             CowVector::Owned(vec) => vec.rows(start, len),
@@ -43,41 +40,16 @@ impl<'a> CowVector<'a> {
         &'a self,
         start: usize,
     ) -> na::Matrix<
-        FluxFloat,
+        u16,
         na::Const<N>,
         na::Const<1>,
-        na::ViewStorage<'a, FluxFloat, na::Const<N>, na::Const<1>, na::Const<1>, na::Dyn>,
+        na::ViewStorage<'a, u16, na::Const<N>, na::Const<1>, na::Const<1>, na::Dyn>,
     > {
         match self {
             CowVector::Borrowed(view) => view.fixed_rows::<N>(start),
             CowVector::Owned(vec) => vec.fixed_rows::<N>(start),
         }
     }
-}
-
-pub fn read_npy_file<F: npy::Serializable>(file_path: PathBuf) -> Result<Vec<F>> {
-    let mut file = std::fs::File::open(file_path.clone())
-        .context(format!("Error loading {}", file_path.to_str().unwrap()))?;
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
-    let data: NpyData<F> = NpyData::from_bytes(&buf)
-        .context(format!("Error loading {}", file_path.to_str().unwrap()))?;
-    Ok(data.to_vec())
-}
-
-pub fn read_spectrum(dir: &Path, teff: f64, m: f64, logg: f64) -> Result<na::DVector<FluxFloat>> {
-    // e.g. 00027_lm0050_07000_0350_0020_0000_Vsini_0000.npy
-    let _teff = teff.round() as i32;
-    let _m = (m * 100.0).round() as i32;
-    let _logg = (logg * 100.0).round() as i32;
-    let sign = if _m < 0 { "m" } else { "p" };
-    let filename = format!("l{}{:04}_{:05}_{:04}", sign, _m.abs(), _teff, _logg);
-    let file_path = dir.join(format!("{}.npy", filename));
-    let result = read_npy_file::<FluxFloat>(file_path.clone())?;
-    Ok(na::DVector::from_iterator(
-        result.len(),
-        result.into_iter().map(|x| x as FluxFloat),
-    ))
 }
 
 #[derive(Clone)]
@@ -690,7 +662,7 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         for i in 0..(model_length / BATCH_SIZE) {
             let start = i * BATCH_SIZE;
             for j in 0..64 {
-                mat.set_column(j, &neighbors[j].fixed_rows::<BATCH_SIZE>(start));
+                mat.set_column(j, &neighbors[j].fixed_rows::<BATCH_SIZE>(start).map(|x| (x as FluxFloat) / 65535.0));
             }
 
             mat.mul_to(&factors_s, &mut interpolated.rows_mut(start, BATCH_SIZE));
@@ -700,7 +672,7 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         let remaining = model_length - start;
         let mut mat = na::Matrix::<FluxFloat, na::Dyn, na::Const<64>, _>::zeros(remaining);
         for j in 0..64 {
-            mat.set_column(j, &neighbors[j].rows(start, remaining));
+            mat.set_column(j, &neighbors[j].rows(start, remaining).map(|x| (x as FluxFloat) / 65535.0));
         }
         mat.mul_to(&factors_s, &mut interpolated.rows_mut(start, remaining));
         Ok(interpolated)
@@ -761,7 +733,7 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
             .context("logg not in grid")?;
         let spec = self.fetcher.find_spectrum(i, j, k)?;
         let broadened = rot_broad_rv(
-            spec.into_owned(),
+            spec.into_owned().map(|x| (x as FluxFloat) / 65535.0),
             self.synth_wl(),
             target_dispersion,
             vsini,

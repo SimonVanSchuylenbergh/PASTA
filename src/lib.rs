@@ -8,8 +8,8 @@ mod particleswarm;
 use crate::particleswarm::PSOBounds;
 use anyhow::Result;
 use convolve_rv::{
-    FixedTargetDispersion, NoConvolutionDispersionTarget, VariableTargetDispersion,
-    WavelengthDispersion,
+    shift_and_resample, FixedTargetDispersion, NoConvolutionDispersionTarget,
+    VariableTargetDispersion, WavelengthDispersion,
 };
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
 use enum_dispatch::enum_dispatch;
@@ -20,13 +20,16 @@ use fitting::{
 use fitting::{ConstantContinuum, ContinuumFitter};
 use indicatif::ProgressBar;
 use interpolate::{FluxFloat, GridInterpolator, Interpolator, Range};
-use model_fetchers::{CachedFetcher, InMemFetcher, OnDiskFetcher};
+use model_fetchers::{read_npy_file, CachedFetcher, InMemFetcher, OnDiskFetcher};
 use nalgebra as na;
 use nalgebra::Storage;
+use npy::to_file;
 use numpy::array::PyArray;
 use numpy::{Ix1, Ix2, PyArrayLike};
+use pyo3::ffi::PyErr_CheckSignals;
 use pyo3::{prelude::*, pyclass};
 use rayon::prelude::*;
+use std::path::{Path, PathBuf};
 
 /// Parameters to the PSO algorithm
 #[derive(Clone, Debug)]
@@ -133,6 +136,55 @@ enum WavelengthDispersionWrapper {
 #[derive(Clone, Debug)]
 #[pyclass(module = "normalization", frozen)]
 pub struct PyWavelengthDispersion(WavelengthDispersionWrapper);
+
+#[pymethods]
+impl PyWavelengthDispersion {
+    /// Convolve a spectrum with the dispersion kernel.
+    pub fn convolve(&self, flux: Vec<FluxFloat>) -> Vec<FluxFloat> {
+        self.0
+            .convolve(na::DVector::from_vec(flux))
+            .unwrap()
+            .data
+            .into()
+    }
+
+    /// Get the wavelength grid.
+    pub fn wavelength(&self) -> Vec<f64> {
+        self.0.wavelength().clone().data.into()
+    }
+
+    pub fn convolve_and_resample_directory(
+        &self,
+        input_directory: String,
+        output_directory: String,
+        input_wavelength: WlGrid,
+    ) {
+        let out_dir = Path::new(output_directory.as_str());
+        let files: Vec<PathBuf> = std::fs::read_dir(input_directory)
+            .unwrap()
+            .map(|x| x.unwrap().path())
+            .collect();
+        let bar = ProgressBar::new(files.len() as u64);
+        files.into_par_iter().for_each(|file| {
+            let out_file = out_dir.join(file.file_name().unwrap());
+            if out_file.exists() {
+                return;
+            }
+            let spectrum: na::DVector<u16> = read_npy_file(file).unwrap().into();
+            let spectrum_float = spectrum.map(|x| (x as FluxFloat) / 65535.0);
+            let convolved = self.0.convolve(spectrum_float).unwrap();
+            let resampled =
+                shift_and_resample(&convolved, input_wavelength.0, &self.0.wavelength(), 0.0)
+                    .unwrap();
+            let resampled_u16 = resampled
+                .into_iter()
+                .map(|x| (x.min(65535.0).max(0.0) * 65535.0) as u16);
+
+            to_file(out_file, resampled_u16).unwrap();
+            bar.inc(1);
+        });
+    }
+}
 
 #[pyfunction]
 fn VariableResolutionDispersion(

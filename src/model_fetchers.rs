@@ -1,13 +1,36 @@
-use crate::interpolate::{read_spectrum, CowVector, FluxFloat, Grid, ModelFetcher, Range};
-use anyhow::{bail, Result};
+use crate::interpolate::{CowVector, FluxFloat, Grid, ModelFetcher};
+use anyhow::{bail, Context, Result};
 use indicatif::ProgressBar;
-use itertools::Itertools;
 use lru::LruCache;
 use nalgebra as na;
+use npy::NpyData;
 use rayon::prelude::*;
+use std::io::Read;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+pub fn read_npy_file(file_path: PathBuf) -> Result<Vec<u16>> {
+    let mut file = std::fs::File::open(file_path.clone())
+        .context(format!("Error loading {}", file_path.to_str().unwrap()))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    let data: NpyData<u16> = NpyData::from_bytes(&buf)
+        .context(format!("Error loading {}", file_path.to_str().unwrap()))?;
+    Ok(data.to_vec())
+}
+
+pub fn read_spectrum(dir: &Path, teff: f64, m: f64, logg: f64) -> Result<na::DVector<u16>> {
+    // e.g. 00027_lm0050_07000_0350_0020_0000_Vsini_0000.npy
+    let _teff = teff.round() as i32;
+    let _m = (m * 100.0).round() as i32;
+    let _logg = (logg * 100.0).round() as i32;
+    let sign = if _m < 0 { "m" } else { "p" };
+    let filename = format!("l{}{:04}_{:05}_{:04}", sign, _m.abs(), _teff, _logg);
+    let file_path = dir.join(format!("{}.npy", filename));
+    let result = read_npy_file(file_path.clone())?;
+    Ok(na::DVector::from_iterator(result.len(), result.into_iter()))
+}
 
 fn labels_from_filename(filename: &str) -> Result<(f64, f64, f64)> {
     // e.g. lp0020_08000_0430.npy
@@ -72,11 +95,11 @@ impl ModelFetcher for OnDiskFetcher {
 #[derive(Clone)]
 pub struct InMemFetcher {
     pub grid: Grid,
-    pub loaded_spectra: na::DMatrix<FluxFloat>,
+    pub loaded_spectra: na::DMatrix<u16>,
     pub n: usize,
 }
 
-fn load_spectra(dir: PathBuf, grid: &Grid) -> Result<na::DMatrix<FluxFloat>> {
+fn load_spectra(dir: PathBuf, grid: &Grid) -> Result<na::DMatrix<u16>> {
     let combinations = grid.list_gridpoints();
 
     let bar = ProgressBar::new(combinations.len() as u64);
@@ -113,7 +136,10 @@ impl ModelFetcher for InMemFetcher {
         let idx = (self.grid.cumulative_grid_size[i] + k - self.grid.logg_limits[i].0)
             * self.grid.m.n()
             + j;
-        Ok(CowVector::Borrowed(self.loaded_spectra.column(idx)))
+        Ok(CowVector::Borrowed(
+            self.loaded_spectra
+                .column(idx)
+        ))
     }
 }
 
@@ -121,7 +147,7 @@ impl ModelFetcher for InMemFetcher {
 pub struct CachedFetcher {
     pub dir: PathBuf,
     pub grid: Grid,
-    cache: Arc<Mutex<LruCache<(usize, usize, usize), na::DVector<FluxFloat>>>>,
+    cache: Arc<Mutex<LruCache<(usize, usize, usize), na::DVector<u16>>>>,
 }
 
 impl CachedFetcher {
