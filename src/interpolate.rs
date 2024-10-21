@@ -375,7 +375,7 @@ impl Grid {
         let logg_neighbors = self
             .logg
             .find_neighbors(logg, logg_limits)
-            .with_context(|| format!("failed getting neighbors for logg: {}, {:?}", m, m_limits))?;
+            .with_context(|| format!("failed getting neighbors for logg: {}, {:?}", logg, logg_limits))?;
 
         let teff_logg_indices =
             na::SMatrix::from_columns(&teff_neighbors.map(|teff_neighbor| match teff_neighbor {
