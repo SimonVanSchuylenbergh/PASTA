@@ -16,7 +16,7 @@ use convolve_rv::{
 };
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
 use fitting::{fit_pso, uncertainty_chi2, ChunkFitter, ContinuumFitter, PSOSettings};
-use interpolate::{read_npy_file, Interpolator, Range, WlGrid};
+use interpolate::{Interpolator, Range, WlGrid};
 use iter_num_tools::arange;
 use itertools::Itertools;
 use model_fetchers::{InMemFetcher, OnDiskFetcher};
@@ -47,5 +47,13 @@ pub fn main() -> Result<()> {
             .bounds_single()
             .clamp_1d(na::Vector5::new(35_000.0, 0.0, 2.99, 5.0, 0.0), 0)?
     );
+
+    // let dispersion = NoConvolutionDispersionTarget();
+    // let start = Instant::now();
+    // (0..500).into_par_iter().for_each(|_| {
+    //     let _ = interpolator1
+    //         .produce_model(&dispersion, teff, m, logg, vsini, rv)
+    //         .unwrap();
+    // });
     Ok(())
 }
