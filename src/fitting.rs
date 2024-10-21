@@ -651,7 +651,10 @@ pub fn uncertainty_chi2<I: Interpolator>(
     spec_res: f64,
     label: na::SVector<f64, 5>,
     search_radius: na::SVector<f64, 5>,
-) -> Result<[Result<(f64, f64)>; 5]> {
+) -> Result<[(Result<f64>, Result<f64>); 5]> {
+    let mut search_radius = search_radius.clone();
+    search_radius[0] = label[0] * search_radius[0];
+    search_radius[3] = (label[3] * search_radius[3]).max(100.0);
     let best_synth_spec = interpolator.produce_model(
         target_dispersion,
         label[0],
@@ -667,59 +670,50 @@ pub fn uncertainty_chi2<I: Interpolator>(
     let last_wl = observed_wavelength[n_p - 1];
     let n = 4.0 * spec_res * (last_wl - first_wl) / (first_wl + last_wl);
     let target_chi = best_chi2 * (1.0 + (2.0 / n).sqrt());
+
     Ok(core::array::from_fn(|i| {
         let bounds = interpolator.bounds_single().clone();
-        let costfunction = ModelFitCost {
-            interpolator,
-            target_dispersion,
-            observed_spectrum,
-            continuum_fitter,
-            label: &label,
-            label_index: i,
-            target_value: target_chi,
-            search_radius: search_radius[i],
-        };
-        let mut left_bound_label = label;
-        left_bound_label[i] -= search_radius[i];
-        let left_bound = bounds.clamp_1d(left_bound_label, i)?;
-        let left_bound_rescaled = (left_bound - label[i]) / search_radius[i];
-        let solver_left = BrentRoot::new(left_bound_rescaled, 0.0, 1e-3);
-        let executor_left = Executor::new(costfunction, solver_left);
-        let result_left = executor_left.run().context(format!(
-            "Error while running uncertainty_chi2 on {:?} (left), bound={}",
-            label, left_bound
-        ))?;
-        let left_sol = result_left
-            .state
-            .get_best_param()
-            .context("result_left.state.get_best_param()")?;
-        let left = -left_sol * search_radius[i]; // Minus because we are looking for the negative of the solution
 
-        let costfunction = ModelFitCost {
-            interpolator,
-            target_dispersion,
-            observed_spectrum,
-            continuum_fitter,
-            label: &label,
-            label_index: i,
-            target_value: target_chi,
-            search_radius: search_radius[i],
+        let get_bound = |right: bool| {
+            let costfunction = ModelFitCost {
+                interpolator,
+                target_dispersion,
+                observed_spectrum,
+                continuum_fitter,
+                label: &label,
+                label_index: i,
+                target_value: target_chi,
+                search_radius: search_radius[i],
+            };
+            let mut bound_label = label;
+            if right {
+                bound_label[i] += search_radius[i];
+            } else {
+                bound_label[i] -= search_radius[i];
+            }
+            let bound = bounds.clamp_1d(bound_label, i)?;
+            let bound_rescaled = (bound - label[i]) / search_radius[i];
+            let solver = if right {
+                BrentRoot::new(0.0, bound_rescaled.min(1.0), 1e-3)
+            } else {
+                BrentRoot::new(bound_rescaled, 0.0, 1e-3)
+            };
+            let executor = Executor::new(costfunction, solver);
+            let result = executor.run().context(format!(
+                "Error while running uncertainty_chi2 on {:?}, bound={}",
+                label, bound
+            ))?;
+            let sol = result
+                .state
+                .get_best_param()
+                .context("result.state.get_best_param()")?;
+            if right {
+                Ok(sol * search_radius[i])
+            } else {
+                Ok(-sol * search_radius[i]) // Minus because we are looking for the negative of the solution
+            }
         };
-        let mut right_bound_label = label;
-        right_bound_label[i] += search_radius[i];
-        let right_bound = bounds.clamp_1d(right_bound_label, i)?;
-        let right_bound_rescaled = (right_bound - label[i]) / search_radius[i];
-        let solver_right = BrentRoot::new(0.0, right_bound_rescaled.min(1.0), 1e-3);
-        let executor_right = Executor::new(costfunction, solver_right);
-        let result_right = executor_right.run().context(format!(
-            "Error while running uncertainty_chi2 on {:?} (right), bound={}",
-            label, right_bound
-        ))?;
-        let right_sol = result_right
-            .state
-            .get_best_param()
-            .context("result_right.state.get_best_param()")?;
-        let right = right_sol * search_radius[i];
-        Ok((left, right))
+
+        (get_bound(false), get_bound(true))
     }))
 }

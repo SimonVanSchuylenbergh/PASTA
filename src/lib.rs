@@ -635,7 +635,7 @@ macro_rules! implement_methods {
                 spec_res: f64,
                 parameters: [f64; 5],
                 search_radius: Option<[f64; 5]>,
-            ) -> [Option<(f64, f64)>; 5] {
+            ) -> [(Option<f64>, Option<f64>); 5] {
                 let search_radius = search_radius.unwrap_or([2000.0, 0.3, 0.3, 40.0, 40.0]);
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
                 uncertainty_chi2(
@@ -648,7 +648,7 @@ macro_rules! implement_methods {
                     search_radius.into(),
                 )
                 .unwrap()
-                .map(|x| x.ok())
+                .map(|(l, r)| (l.ok(), r.ok()))
             }
 
             /// Uncertainties with the chi2 landscape method,
@@ -662,7 +662,7 @@ macro_rules! implement_methods {
                 spec_res: f64,
                 parameters: Vec<[f64; 5]>,
                 search_radius: Option<[f64; 5]>,
-            ) -> Vec<[Option<(f64, f64)>; 5]> {
+            ) -> Vec<[(Option<f64>, Option<f64>); 5]> {
                 let search_radius = search_radius.unwrap_or([2000.0, 0.3, 0.3, 40.0, 40.0]);
                 let bar = ProgressBar::new(fitters.len() as u64);
                 fitters
@@ -684,7 +684,7 @@ macro_rules! implement_methods {
                             search_radius.into(),
                         )
                         .unwrap()
-                        .map(|x| x.ok())
+                        .map(|(l, r)| (l.ok(), r.ok()))
                     })
                     .collect()
             }
@@ -702,7 +702,7 @@ macro_rules! implement_methods {
                 spec_res: f64,
                 parameters: Vec<[f64; 5]>,
                 search_radius: Option<[f64; 5]>,
-            ) -> Vec<[Option<(f64, f64)>; 5]> {
+            ) -> Vec<[(Option<f64>, Option<f64>); 5]> {
                 let search_radius = search_radius.unwrap_or([2000.0, 0.3, 0.3, 40.0, 40.0]);
                 observed_fluxes
                     .into_par_iter()
@@ -720,7 +720,7 @@ macro_rules! implement_methods {
                             search_radius.into(),
                         )
                         .unwrap()
-                        .map(|x| x.ok())
+                        .map(|(l, r)| (l.ok(), r.ok()))
                     })
                     .collect()
             }
@@ -820,6 +820,10 @@ macro_rules! implement_methods {
 
             pub fn list_gridpoints(&self) -> Vec<[f64; 3]> {
                 self.interpolator.grid().list_gridpoints()
+            }
+
+            pub fn is_teff_logg_between_bounds(&self, teff: f64, logg: f64) -> bool {
+                self.interpolator.grid().is_teff_logg_between_bounds(teff, logg)
             }
         }
     };
