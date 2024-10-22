@@ -212,7 +212,7 @@ This class specifies the wavelength grid of the model spectra
 ```python
 WlGrid(min: float, step: float, len: int, log=False: bool)
 ```
-For linearly spaced models (`log=False`, not fully supported), the arguments are the wavelength of the first pixel ($\AA$), the step size between two pixels ($\AA$), and the total number of pixels.
+For linearly spaced models (`log=False`, not fully supported), the arguments are the wavelength of the first pixel (Å), the step size between two pixels (Å), and the total number of pixels.
 For log-spaced models (`log=True`), these are the $\log_{10}$ of the first wavelength, the step in $\log_{10}$ wavelength and the total number of pixels.
 
 ### WavelengthDispersion
