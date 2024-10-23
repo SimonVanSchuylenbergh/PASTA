@@ -19,14 +19,13 @@ use fitting::{
 };
 use fitting::{ConstantContinuum, ContinuumFitter};
 use indicatif::ProgressBar;
-use interpolate::{FluxFloat, GridInterpolator, Interpolator, Range};
+use interpolate::{FluxFloat, GridInterpolator, Interpolator};
 use model_fetchers::{read_npy_file, CachedFetcher, InMemFetcher, OnDiskFetcher};
 use nalgebra as na;
 use nalgebra::Storage;
 use npy::to_file;
 use numpy::array::PyArray;
 use numpy::{Ix1, Ix2, PyArrayLike};
-use pyo3::ffi::PyErr_CheckSignals;
 use pyo3::{prelude::*, pyclass};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
@@ -591,6 +590,34 @@ macro_rules! implement_methods {
                     parallelize.unwrap_or(true),
                 );
                 Ok(result?.into())
+            }
+
+            pub fn fit_pso_bulk_fixed_wl(
+                &self,
+                fitter: PyContinuumFitter,
+                dispersion: PyWavelengthDispersion,
+                observed_fluxes: Vec<Vec<FluxFloat>>,
+                observed_vars: Vec<Vec<FluxFloat>>,
+                settings: PSOSettings,
+            ) -> PyResult<Vec<PyOptimizationResult>> {
+                let pso_settings: fitting::PSOSettings = settings.into();
+                Ok(observed_fluxes
+                    .into_par_iter()
+                    .zip(observed_vars)
+                    .map(|(flux, var)| {
+                        let observed_spectrum = ObservedSpectrum::from_vecs(flux, var);
+                        let result = fit_pso(
+                            &self.interpolator,
+                            &dispersion.0,
+                            &observed_spectrum.into(),
+                            &fitter.0,
+                            &pso_settings,
+                            None,
+                            false,
+                        );
+                        result.unwrap().into()
+                    })
+                    .collect::<Vec<_>>())
             }
 
             pub fn fit_pso_bulk(

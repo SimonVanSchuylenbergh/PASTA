@@ -541,8 +541,8 @@ impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 5>, f64>, 
     }
 }
 
-pub fn fit_pso<I: Interpolator>(
-    interpolator: &I,
+pub fn fit_pso(
+    interpolator: &impl Interpolator,
     target_dispersion: &impl WavelengthDispersion,
     observed_spectrum: &ObservedSpectrum,
     continuum_fitter: &impl ContinuumFitter,

@@ -1,6 +1,5 @@
 use crate::interpolate::{FluxFloat, WlGrid};
 use anyhow::{anyhow, Result};
-use core::f32;
 use enum_dispatch::enum_dispatch;
 use nalgebra as na;
 use realfft::RealFftPlanner;
@@ -320,9 +319,16 @@ pub fn convolve_rotation(
         }
     };
     let kernel = build_rotation_kernel(vsini, dvelo);
-    // If vsini is very small, no convolution is done
     if kernel.len() <= 2 {
         return Ok(input_array.clone());
+    }
+    if kernel.len() > FFTSIZE {
+        return Err(anyhow!(
+            "Kernel size is larger than FFTSIZE. Kernel size: {}, FFTSIZE: {}, vsini: {}",
+            kernel.len(),
+            FFTSIZE,
+            vsini
+        ));
     }
     let convolved = oa_convolve(input_array, &kernel);
     Ok(convolved

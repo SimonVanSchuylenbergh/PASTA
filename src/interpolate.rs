@@ -85,7 +85,11 @@ impl Range {
         let (left, right) = limits;
         match self.get_right_index(x) {
             Ok(i) => {
-                if i == left {
+                if i < left {
+                    Err(anyhow!("Index {} out of left bound, limits={:?}", i, limits))
+                } else if i > right {
+                    Err(anyhow!("Index {} out of right bound, limits={:?}", i, limits))
+                } else if i == left {
                     Ok([None, Some(i), Some(i + 1), Some(i + 2)])
                 } else if i == right {
                     Ok([Some(i - 2), Some(i - 1), Some(i), None])
@@ -96,10 +100,10 @@ impl Range {
                 }
             }
             Err(i) => {
-                if i == left {
-                    Err(anyhow!("Index out of left bound {}", i))
-                } else if i == right + 1 {
-                    Err(anyhow!("Index out of right bound {}", i))
+                if i <= left {
+                    Err(anyhow!("Index {} out of left bound, limits={:?}", i, limits))
+                } else if i >= right + 1 {
+                    Err(anyhow!("Index {} out of right bound, limits={:?}", i, limits))
                 } else if i == left + 1 {
                     Ok([None, Some(i - 1), Some(i), Some(i + 1)])
                 } else if i == right {
@@ -375,7 +379,12 @@ impl Grid {
         let logg_neighbors = self
             .logg
             .find_neighbors(logg, logg_limits)
-            .with_context(|| format!("failed getting neighbors for logg: {}, {:?}", logg, logg_limits))?;
+            .with_context(|| {
+                format!(
+                    "failed getting neighbors for logg: {}, {:?}",
+                    logg, logg_limits
+                )
+            })?;
 
         let teff_logg_indices =
             na::SMatrix::from_columns(&teff_neighbors.map(|teff_neighbor| match teff_neighbor {
@@ -405,7 +414,10 @@ impl Grid {
                         self.teff
                             .get(x)
                             .with_context(|| {
-                                format!("teff={}, neighbors: {:?}", teff, teff_neighbors)
+                                format!(
+                                    "teff={}, neighbors: {:?}, limits: {:?}",
+                                    teff, teff_neighbors, teff_limits
+                                )
                             })
                             .unwrap()
                     })
@@ -418,7 +430,10 @@ impl Grid {
                         self.logg
                             .get(x)
                             .with_context(|| {
-                                format!("logg={}, neighbors: {:?}", logg, logg_neighbors)
+                                format!(
+                                    "logg={}, neighbors: {:?}, limits: {:?}",
+                                    logg, logg_neighbors, logg_limits
+                                )
                             })
                             .unwrap()
                     })
@@ -431,7 +446,12 @@ impl Grid {
                     x.map(|x| {
                         self.m
                             .get(x)
-                            .with_context(|| format!("m={}, neighbors: {:?}", m, m_neighbors))
+                            .with_context(|| {
+                                format!(
+                                    "m={}, neighbors: {:?}, limits: {:?}",
+                                    m, m_neighbors, m_limits
+                                )
+                            })
                             .unwrap()
                     })
                 }),
@@ -662,7 +682,12 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         for i in 0..(model_length / BATCH_SIZE) {
             let start = i * BATCH_SIZE;
             for j in 0..64 {
-                mat.set_column(j, &neighbors[j].fixed_rows::<BATCH_SIZE>(start).map(|x| (x as FluxFloat) / 65535.0));
+                mat.set_column(
+                    j,
+                    &neighbors[j]
+                        .fixed_rows::<BATCH_SIZE>(start)
+                        .map(|x| (x as FluxFloat) / 65535.0),
+                );
             }
 
             mat.mul_to(&factors_s, &mut interpolated.rows_mut(start, BATCH_SIZE));
@@ -672,7 +697,12 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         let remaining = model_length - start;
         let mut mat = na::Matrix::<FluxFloat, na::Dyn, na::Const<64>, _>::zeros(remaining);
         for j in 0..64 {
-            mat.set_column(j, &neighbors[j].rows(start, remaining).map(|x| (x as FluxFloat) / 65535.0));
+            mat.set_column(
+                j,
+                &neighbors[j]
+                    .rows(start, remaining)
+                    .map(|x| (x as FluxFloat) / 65535.0),
+            );
         }
         mat.mul_to(&factors_s, &mut interpolated.rows_mut(start, remaining));
         Ok(interpolated)
