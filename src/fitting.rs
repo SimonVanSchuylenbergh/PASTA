@@ -65,7 +65,7 @@ pub trait ContinuumFitter: Send + Sync {
 }
 
 /// Continuum fitting function that is a linear model
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LinearModelFitter {
     design_matrix: na::DMatrix<FluxFloat>,
     svd: na::linalg::SVD<FluxFloat, na::Dyn, na::Dyn>,

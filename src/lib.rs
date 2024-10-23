@@ -14,10 +14,10 @@ use convolve_rv::{
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
 use enum_dispatch::enum_dispatch;
 use fitting::{
-    fit_pso, uncertainty_chi2, ChunkFitter, FixedContinuum, LinearModelFitter, ObservedSpectrum,
-    OptimizationResult, PSOSettings as FittingPSOSettings,
+    fit_pso, uncertainty_chi2, ChunkFitter, ConstantContinuum as RsConstantContinuum,
+    ContinuumFitter, FixedContinuum as RsFixedContinuum, LinearModelFitter, ObservedSpectrum, OptimizationResult,
+    PSOSettings as FittingPSOSettings,
 };
-use fitting::{ConstantContinuum, ContinuumFitter};
 use indicatif::ProgressBar;
 use interpolate::{FluxFloat, GridInterpolator, Interpolator};
 use model_fetchers::{read_npy_file, CachedFetcher, InMemFetcher, OnDiskFetcher};
@@ -220,8 +220,9 @@ fn NoConvolutionDispersion(wl: Vec<f64>) -> PyWavelengthDispersion {
 #[derive(Clone, Debug)]
 enum ContinuumFitterWrapper {
     ChunkFitter,
-    FixedContinuum,
-    ConstantContinuum,
+    LinearModelFitter,
+    RsFixedContinuum,
+    RsConstantContinuum,
 }
 
 #[derive(Clone, Debug)]
@@ -301,18 +302,23 @@ fn ChunkContinuumFitter(
 }
 
 #[pyfunction]
-fn FixedContinuumFitter(
+fn LinearModelContinuumFitter(design_matrix: PyArrayLike<FluxFloat, Ix2>) -> PyContinuumFitter {
+    PyContinuumFitter(LinearModelFitter::new(design_matrix.as_matrix().into()).into())
+}
+
+#[pyfunction]
+fn FixedContinuum(
     continuum: Vec<FluxFloat>,
     ignore_first_and_last: Option<usize>,
 ) -> PyContinuumFitter {
     PyContinuumFitter(
-        FixedContinuum::new(continuum.into(), ignore_first_and_last.unwrap_or(0)).into(),
+        RsFixedContinuum::new(continuum.into(), ignore_first_and_last.unwrap_or(0)).into(),
     )
 }
 
 #[pyfunction]
-fn ConstantContinuumFitter() -> PyContinuumFitter {
-    PyContinuumFitter(ConstantContinuum().into())
+fn ConstantContinuum() -> PyContinuumFitter {
+    PyContinuumFitter(RsConstantContinuum().into())
 }
 
 /// Implement methods for all the interpolator classes.
@@ -850,7 +856,9 @@ macro_rules! implement_methods {
             }
 
             pub fn is_teff_logg_between_bounds(&self, teff: f64, logg: f64) -> bool {
-                self.interpolator.grid().is_teff_logg_between_bounds(teff, logg)
+                self.interpolator
+                    .grid()
+                    .is_teff_logg_between_bounds(teff, logg)
             }
         }
     };
@@ -986,8 +994,8 @@ fn pasta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(FixedResolutionDispersion, m)?)?;
     m.add_function(wrap_pyfunction!(VariableResolutionDispersion, m)?)?;
     m.add_function(wrap_pyfunction!(ChunkContinuumFitter, m)?)?;
-    m.add_function(wrap_pyfunction!(FixedContinuumFitter, m)?)?;
-    m.add_function(wrap_pyfunction!(ConstantContinuumFitter, m)?)?;
+    m.add_function(wrap_pyfunction!(FixedContinuum, m)?)?;
+    m.add_function(wrap_pyfunction!(ConstantContinuum, m)?)?;
     m.add_function(wrap_pyfunction!(get_vsini_kernel, m)?)?;
     Ok(())
 }

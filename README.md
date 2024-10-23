@@ -6,6 +6,7 @@
 4. [Python API docs](#python-api-docs)
 5. [Rust code overview](#rust-code-overview)
 
+### [Rust docs here](https://simonvanschuylenbergh.github.io/PASTA/pasta/struct.OnDiskInterpolator.html)
 
 ## Introduction
 PASTA is a fully automatic pipeline for estimating stellar labels from unnormalized spectra of single stars by comparison to model spectra.
@@ -90,9 +91,9 @@ The code will automatically detect the available range in $\log g$ for every dif
 The full range in [M/H] must exist for every $T_\text{eff}$, $\log g$ combination however.
 
 ## Python API overview
-All the functionality of the code can be accessed from Python through a few exposed classes and functions.
+All the functionality of the code can be accessed from Python through a few exposed classes and functions. API level documentation can be found in the [generated Rust docs](https://simonvanschuylenbergh.github.io/PASTA). Below is an overview of the classes.
 
-### Interpolator
+### [Interpolator](https://simonvanschuylenbergh.github.io/PASTA/pasta/struct.OnDiskInterpolator.html)
 This is the central object that exposes methods for generating synthetic spectra, fitting observed spectra and calculating error margins.
 There are three different `Interpolator` classes available that differ in the way they load the files from the grid.
 `OnDiskInterpolator` loads the files straight from the disk every time they are needed.
@@ -123,7 +124,7 @@ Since the model files only contain flux values, the wavelength information needs
 The third and fourth argument specify the range of $v \sin i$ and RV values that will be searched by the fitter.
 The last argument is exclusive to `CachedInterpolator` and specifies the maximum number of models that are kept in memory at a time.
 
-A full list of available methods on this object can be found [here]().
+A full list of available methods on this object can be found [here](https://simonvanschuylenbergh.github.io/PASTA/pasta/struct.OnDiskInterpolator.html).
 Below an overview of the most important ones:
 
 #### fit_pso
@@ -139,6 +140,27 @@ fit_pso(
     parallelize=True: bool,
 ) -> PyOptimizationResult
 ```
+
+This is the method for fitting an observed spectrum through particle swarm optimization.
+
+The first argument specifies the function that will be fitted against the pseudo continuum before $\chi^2$ is evaluated.
+Currently three classes for this are provided. [ChunkContinuumFitter](#chunkcontinuumfitter) divides the spectrum in a specified number of chunks, fits every chunk by a polynomial of specified degree, and blends them together. This method is generally recommended. [LinearModelContinuumFitter](#linearmodelcontinuumfitter) allows using any linear model by supplying a design matrix. [FixedContinuum](#fixedcontinuum) and [ConstantContinuum](#constantcontinuum) turn off continuum fitting and use a user specified pseudo continuum or an array of ones respectively.
+
+The second argument specifies the wavelength dispersion of the instrument that the spectrum was taken with.
+It provides the information of the wavelength corresponding to every pixel, as well as the spectral resolution of the instrument, which the synthetic spectra will be convolved to.
+Three classes are provided: [FixedResolutionDispersion](#fixedresolutiondispersion) can be used when the spectral resolution of the instrument is constant across the wavelength range.
+In this case the synthetic spectrum will be convolved with a single gaussian kernel.
+[VariableResolutionDispersion](#variableresolutiondispersion) is used when the spectral resolution varies throughout the wavelength range, as is often the case with low resolution instruments. In this case every pixel will be convolved with its own gaussian kernel.
+This does come at a computational cost.
+[NoConvolutionDispersion](#noconvolutiondispersion) skips the convolution step, and is to be used in case the grid of models has already been convolved to the appropriate resolution. 
+
+The third and fourth arguments provide the flux and variance values of the observed spectrum. The lengths of these arrays must match with the wavelength array that is provided through the dispersion argument.
+
+The fifth argument specifies the metaparameters to the particle swarm optimization. See [PSOSettings](#psosettings).
+The sixth argument is optional and is used to save the particle positions throughout the optimization run.
+The data will be stored in json files in the specified directory.
+Finally, the last argument specifies whether to speed up computations by multithreading over particles, i.e. let every particle be processed by its own thread.
+
 
 #### produce_model
 ```python
@@ -167,7 +189,7 @@ fit_continuum_and_return_model(
 
 #### uncertainty_chi2
 ```python
-pub fn uncertainty_chi2(
+uncertainty_chi2(
     self,
     fitter: PyContinuumFitter,
     dispersion: PyWavelengthDispersion,
@@ -207,7 +229,7 @@ chi2(
 ```
 
 
-### WlGrid
+### [WlGrid](https://simonvanschuylenbergh.github.io/PASTA/pasta/struct.WlGrid.html)
 This class specifies the wavelength grid of the model spectra
 ```python
 WlGrid(min: float, step: float, len: int, log=False: bool)
@@ -215,11 +237,23 @@ WlGrid(min: float, step: float, len: int, log=False: bool)
 For linearly spaced models (`log=False`, not fully supported), the arguments are the wavelength of the first pixel (Å), the step size between two pixels (Å), and the total number of pixels.
 For log-spaced models (`log=True`), these are the $\log_{10}$ of the first wavelength, the step in $\log_{10}$ wavelength and the total number of pixels.
 
-### WavelengthDispersion
+### [FixedResolutionDispersion](https://simonvanschuylenbergh.github.io/PASTA/pasta/fn.FixedResolutionDispersion.html)
 
-### ContinuumFitter
+### [VariableResolutionDispersion](https://simonvanschuylenbergh.github.io/PASTA/pasta/fn.VariableResolutionDispersion.html)
 
-### PSOSettings
+### [NoConvolutionDispersion](https://simonvanschuylenbergh.github.io/PASTA/pasta/fn.NoConvolutionDispersion.html)
+
+### [ChunkContinuumFitter](https://simonvanschuylenbergh.github.io/PASTA/pasta/fn.ChunkContinuumFitter.html)
+
+
+### [LinearModelContinuumFitter](https://simonvanschuylenbergh.github.io/PASTA/pasta/fn.LinearModelContinuumFitter.html)
+
+### [FixedContinuum](https://simonvanschuylenbergh.github.io/PASTA/pasta/fn.FixedContinuum.html)
+
+### [ConstantContinuum](https://simonvanschuylenbergh.github.io/PASTA/pasta/fn.ConstantContinuum.html)
+
+### [PSOSettings](https://simonvanschuylenbergh.github.io/PASTA/pasta/struct.PSOSettings.html)
+
 ```python
 PSOSetttings(
     num_particles: int,
