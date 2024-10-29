@@ -6,6 +6,7 @@ use argmin_math::ArgminRandom;
 use itertools::Itertools;
 use nalgebra as na;
 use rand::Rng;
+use std::iter::once;
 
 pub type FluxFloat = f32; // Float type used for spectra
 
@@ -86,9 +87,17 @@ impl Range {
         match self.get_right_index(x) {
             Ok(i) => {
                 if i < left {
-                    Err(anyhow!("Index {} out of left bound, limits={:?}", i, limits))
+                    Err(anyhow!(
+                        "Index {} out of left bound, limits={:?}",
+                        i,
+                        limits
+                    ))
                 } else if i > right {
-                    Err(anyhow!("Index {} out of right bound, limits={:?}", i, limits))
+                    Err(anyhow!(
+                        "Index {} out of right bound, limits={:?}",
+                        i,
+                        limits
+                    ))
                 } else if i == left {
                     Ok([None, Some(i), Some(i + 1), Some(i + 2)])
                 } else if i == right {
@@ -101,9 +110,17 @@ impl Range {
             }
             Err(i) => {
                 if i <= left {
-                    Err(anyhow!("Index {} out of left bound, limits={:?}", i, limits))
+                    Err(anyhow!(
+                        "Index {} out of left bound, limits={:?}",
+                        i,
+                        limits
+                    ))
                 } else if i >= right + 1 {
-                    Err(anyhow!("Index {} out of right bound, limits={:?}", i, limits))
+                    Err(anyhow!(
+                        "Index {} out of right bound, limits={:?}",
+                        i,
+                        limits
+                    ))
                 } else if i == left + 1 {
                     Ok([None, Some(i - 1), Some(i), Some(i + 1)])
                 } else if i == right {
@@ -525,6 +542,60 @@ impl PSOBounds<5> for Grid {
     }
 }
 
+#[derive(Clone)]
+pub struct BinaryGrid {
+    pub grid: Grid,
+    pub light_ratio: (f64, f64),
+}
+
+impl PSOBounds<11> for BinaryGrid {
+    fn limits(&self) -> (na::SVector<f64, 11>, na::SVector<f64, 11>) {
+        let (min, max) = self.grid.limits();
+        (
+            na::SVector::from_iterator(min.iter().copied().chain(once(self.light_ratio.0))),
+            na::SVector::from_iterator(max.iter().copied().chain(once(self.light_ratio.1))),
+        )
+    }
+
+    fn clamp_1d(&self, param: na::SVector<f64, 11>, index: usize) -> Result<f64> {
+        if index < 5 {
+            self.grid
+                .clamp_1d(param.fixed_rows::<5>(0).into_owned(), index)
+        } else if index < 10 {
+            self.grid
+                .clamp_1d(param.fixed_rows::<5>(5).into_owned(), index - 5)
+        } else {
+            Ok(param[10].max(self.light_ratio.0).min(self.light_ratio.1))
+        }
+    }
+
+    fn generate_random_within_bounds(
+        &self,
+        rng: &mut impl Rng,
+        num_particles: usize,
+    ) -> Vec<na::SVector<f64, 11>> {
+        let first = self.grid.generate_random_within_bounds(rng, num_particles);
+        let second = self.grid.generate_random_within_bounds(rng, num_particles);
+        let light_ratios = (0..num_particles)
+            .map(|_| rng.gen_range(self.light_ratio.0..self.light_ratio.1))
+            .collect::<Vec<f64>>();
+        first
+            .into_iter()
+            .zip(second.into_iter())
+            .zip(light_ratios.into_iter())
+            .map(|((first, second), light_ratio)| {
+                na::SVector::from_iterator(
+                    first
+                        .iter()
+                        .copied()
+                        .chain(second.iter().copied())
+                        .chain(once(light_ratio)),
+                )
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum WlGrid {
     Linspace(f64, f64, usize), // first, step, total
@@ -570,7 +641,7 @@ impl WlGrid {
 
 pub trait Interpolator: Send + Sync {
     type BS: PSOBounds<5>; // Bounds for single star
-                           // type BB: PSOBounds<11>; // Bounds for binary star
+    type BB: PSOBounds<11>; // Bounds for binary star
 
     fn synth_wl(&self) -> WlGrid;
     fn bounds_single(&self) -> &Self::BS;
@@ -600,7 +671,7 @@ pub trait Interpolator: Send + Sync {
         target_dispersion: &impl WavelengthDispersion,
         star1_parameters: (f64, f64, f64, f64, f64),
         star2_parameters: (f64, f64, f64, f64, f64),
-        light_ratio: f64,
+        light_ratio: f32,
     ) -> Result<na::DVector<FluxFloat>> {
         let model1 = self.produce_model(
             target_dispersion,
@@ -618,7 +689,54 @@ pub trait Interpolator: Send + Sync {
             star2_parameters.3,
             star2_parameters.4,
         )?;
-        Ok(model1 * (light_ratio as f32) + model2 * (1.0 - light_ratio as f32))
+        Ok(model1 * light_ratio + model2 * (1.0 - light_ratio))
+    }
+
+    fn produce_binary_model_norm(
+        &self,
+        continuum_interpolator: &impl Interpolator,
+        target_dispersion: &impl WavelengthDispersion,
+        star1_parameters: (f64, f64, f64, f64, f64),
+        star2_parameters: (f64, f64, f64, f64, f64),
+        light_ratio: f32,
+    ) -> Result<na::DVector<FluxFloat>> {
+        let model1 = self.produce_model(
+            target_dispersion,
+            star1_parameters.0,
+            star1_parameters.1,
+            star1_parameters.2,
+            star1_parameters.3,
+            star1_parameters.4,
+        )?;
+        let continuum1 = continuum_interpolator.produce_model(
+            target_dispersion,
+            star1_parameters.0,
+            star1_parameters.1,
+            star1_parameters.2,
+            star1_parameters.3,
+            star1_parameters.4,
+        )?;
+
+        let model2 = self.produce_model(
+            target_dispersion,
+            star2_parameters.0,
+            star2_parameters.1,
+            star2_parameters.2,
+            star2_parameters.3,
+            star2_parameters.4,
+        )?;
+        let continuum2 = continuum_interpolator.produce_model(
+            target_dispersion,
+            star2_parameters.0,
+            star2_parameters.1,
+            star2_parameters.2,
+            star2_parameters.3,
+            star2_parameters.4,
+        )?;
+
+        let flux = model1.component_mul(&continuum1) * light_ratio + model2.component_mul(&continuum2) * (1.0 - light_ratio);
+        let continuum = continuum1 * light_ratio + continuum2 * (1.0 - light_ratio);
+        Ok(flux.component_div(&continuum))
     }
 }
 
@@ -650,6 +768,8 @@ const BATCH_SIZE: usize = 128;
 
 impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
     type BS = Grid;
+    type BB = BinaryGrid;
+
     fn synth_wl(&self) -> WlGrid {
         self.synth_wl
     }
