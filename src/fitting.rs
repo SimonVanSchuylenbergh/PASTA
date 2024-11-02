@@ -413,12 +413,11 @@ impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> CostFunct
     type Output = f64;
 
     fn cost(&self, params: &Self::Param) -> Result<Self::Output> {
-        let rescaled = params;
-        let teff = rescaled[0];
-        let m = rescaled[1];
-        let logg = rescaled[2];
-        let vsini = rescaled[3];
-        let rv = rescaled[4];
+        let teff = params[0];
+        let m = params[1];
+        let logg = params[2];
+        let vsini = params[3];
+        let rv = params[4];
         let synth_spec =
             self.interpolator
                 .produce_model(self.target_dispersion, teff, m, logg, vsini, rv)?;
@@ -436,6 +435,14 @@ impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> CostFunct
 #[derive(Debug)]
 pub struct OptimizationResult {
     pub labels: [f64; 5],
+    pub continuum_params: na::DVector<FluxFloat>,
+    pub ls: f64,
+    pub iters: u64,
+    pub time: f64,
+}
+
+pub struct BinaryOptimizationResult {
+    pub labels: [f64; 11],
     pub continuum_params: na::DVector<FluxFloat>,
     pub ls: f64,
     pub iters: u64,
@@ -543,6 +550,66 @@ impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 5>, f64>, 
 
 pub fn fit_pso(
     interpolator: &impl Interpolator,
+    target_dispersion: &impl WavelengthDispersion,
+    observed_spectrum: &ObservedSpectrum,
+    continuum_fitter: &impl ContinuumFitter,
+    settings: &PSOSettings,
+    trace_directory: Option<String>,
+    parallelize: bool,
+) -> Result<OptimizationResult> {
+    let fitter = get_pso_fitter(
+        interpolator,
+        target_dispersion,
+        observed_spectrum,
+        continuum_fitter,
+        settings,
+        parallelize,
+    );
+    let result = if let Some(dir) = trace_directory {
+        let observer = PSObserver::new(&dir, "iteration");
+        fitter.add_observer(observer, ObserverMode::Always).run()?
+    } else {
+        fitter.run()?
+    };
+
+    let best_param = result
+        .state
+        .best_individual
+        .ok_or(anyhow!("No best parameter found"))?
+        .position;
+
+    let best_rescaled = best_param;
+    let best_teff = best_rescaled[0];
+    let best_m = best_rescaled[1];
+    let best_logg = best_rescaled[2];
+    let best_vsini = best_rescaled[3];
+    let best_rv = best_rescaled[4];
+
+    let synth_spec = interpolator.produce_model(
+        target_dispersion,
+        best_teff,
+        best_m,
+        best_logg,
+        best_vsini,
+        best_rv,
+    )?;
+    let (continuum_params, _) = continuum_fitter.fit_continuum(observed_spectrum, &synth_spec)?;
+    let time = match result.state.time {
+        Some(t) => t.as_secs_f64(),
+        None => 0.0,
+    };
+    Ok(OptimizationResult {
+        labels: [best_teff, best_m, best_logg, best_vsini, best_rv],
+        continuum_params,
+        ls: result.state.best_cost,
+        time,
+        iters: result.state.iter,
+    })
+}
+
+pub fn fit_pso_binary_norm(
+    interpolator: &impl Interpolator,
+    continuum_interpolator: &impl Interpolator,
     target_dispersion: &impl WavelengthDispersion,
     observed_spectrum: &ObservedSpectrum,
     continuum_fitter: &impl ContinuumFitter,
