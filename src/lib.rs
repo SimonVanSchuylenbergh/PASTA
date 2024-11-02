@@ -20,7 +20,7 @@ use fitting::{
 };
 use indicatif::ProgressBar;
 use interpolate::{FluxFloat, GridInterpolator, Interpolator};
-use model_fetchers::{read_npy_file, CachedFetcher, InMemFetcher, OnDiskFetcher};
+use model_fetchers::{read_npy_file, CachedFetcher, InMemFetcher, OnDiskFetcher, FullyCachedFetcher};
 use nalgebra as na;
 use nalgebra::Storage;
 use npy::to_file;
@@ -256,6 +256,21 @@ impl PyContinuumFitter {
             .0
             .fit_continuum_and_return_continuum(&observed_spectrum, &na::DVector::from_vec(synth))
             .unwrap();
+        Ok(result.data.into())
+    }
+
+    fn fit_continuum_and_return_normalized_spec(
+        &self,
+        synth: Vec<FluxFloat>,
+        y: Vec<FluxFloat>,
+        yerr: Vec<FluxFloat>,
+    ) -> PyResult<Vec<FluxFloat>> {
+        let observed_spectrum = ObservedSpectrum::from_vecs(y, yerr);
+        let continuum = self
+            .0
+            .fit_continuum_and_return_continuum(&observed_spectrum, &na::DVector::from_vec(synth))
+            .unwrap();
+        let result = observed_spectrum.flux.component_div(&continuum);
         Ok(result.data.into())
     }
 
@@ -953,12 +968,14 @@ impl CachedInterpolator {
         vsini_range: Option<(f64, f64)>,
         rv_range: Option<(f64, f64)>,
         lrucap: Option<usize>,
+        n_shards: Option<usize>,
     ) -> Self {
         let fetcher = CachedFetcher::new(
             dir,
             vsini_range.unwrap_or((1.0, 600.0)),
             rv_range.unwrap_or((-150.0, 150.0)),
             lrucap.unwrap_or(4000),
+            n_shards.unwrap_or(4),
         )
         .unwrap();
         Self {
@@ -970,9 +987,37 @@ impl CachedInterpolator {
     }
 }
 
+#[pyclass]
+#[derive(Clone)]
+pub struct FullyCachedInterpolator {
+    interpolator: GridInterpolator<FullyCachedFetcher>,
+}
+
+#[pymethods]
+impl FullyCachedInterpolator {
+    #[new]
+    pub fn new(
+        dir: &str,
+        wavelength: WlGrid,
+        vsini_range: Option<(f64, f64)>,
+        rv_range: Option<(f64, f64)>,
+    ) -> Self {
+        let fetcher = FullyCachedFetcher::new(
+            dir,
+            vsini_range.unwrap_or((1.0, 600.0)),
+            rv_range.unwrap_or((-150.0, 150.0)),
+        )
+        .unwrap();
+        Self {
+            interpolator: GridInterpolator::new(fetcher, wavelength.0),
+        }
+    }
+}
+
 implement_methods!(OnDiskInterpolator, interpolators::OnDiskInterpolator);
 implement_methods!(LoadedInMemInterpolator, interpolators::InMemInterpolator);
 implement_methods!(CachedInterpolator, interpolators::CachedInterpolator);
+implement_methods!(FullyCachedInterpolator, interpolators::FullyCachedInterpolator);
 
 #[pyfunction]
 pub fn get_vsini_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<FluxFloat> {
@@ -985,9 +1030,10 @@ pub fn get_vsini_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<FluxFloat> {
 
 #[pymodule]
 fn pasta(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<CachedInterpolator>()?;
     m.add_class::<OnDiskInterpolator>()?;
     m.add_class::<InMemInterpolator>()?;
+    m.add_class::<CachedInterpolator>()?;
+    m.add_class::<FullyCachedInterpolator>()?;
     m.add_class::<WlGrid>()?;
     m.add_class::<PSOSettings>()?;
     m.add_function(wrap_pyfunction!(NoConvolutionDispersion, m)?)?;

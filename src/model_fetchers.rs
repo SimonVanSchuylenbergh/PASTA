@@ -1,4 +1,4 @@
-use crate::interpolate::{CowVector, FluxFloat, Grid, ModelFetcher};
+use crate::interpolate::{CowVector, Grid, ModelFetcher};
 use anyhow::{bail, Context, Result};
 use indicatif::ProgressBar;
 use lru::LruCache;
@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use std::io::Read;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 pub fn read_npy_file(file_path: PathBuf) -> Result<Vec<u16>> {
     let mut file = std::fs::File::open(file_path.clone())
@@ -136,10 +136,7 @@ impl ModelFetcher for InMemFetcher {
         let idx = (self.grid.cumulative_grid_size[i] + k - self.grid.logg_limits[i].0)
             * self.grid.m.n()
             + j;
-        Ok(CowVector::Borrowed(
-            self.loaded_spectra
-                .column(idx)
-        ))
+        Ok(CowVector::Borrowed(self.loaded_spectra.column(idx)))
     }
 }
 
@@ -147,7 +144,7 @@ impl ModelFetcher for InMemFetcher {
 pub struct CachedFetcher {
     pub dir: PathBuf,
     pub grid: Grid,
-    cache: Arc<Mutex<LruCache<(usize, usize, usize), na::DVector<u16>>>>,
+    shards: Vec<Arc<Mutex<LruCache<(usize, usize, usize), na::DVector<u16>>>>>,
 }
 
 impl CachedFetcher {
@@ -156,20 +153,29 @@ impl CachedFetcher {
         vsini_range: (f64, f64),
         rv_range: (f64, f64),
         lrucap: usize,
+        n_shards: usize,
     ) -> Result<Self> {
         let model_labels = get_model_labels_in_dir(&PathBuf::from(dir))?;
         let grid = Grid::new(model_labels, vsini_range, rv_range)?;
+        let shards = (0..n_shards)
+            .map(|_| {
+                Arc::new(Mutex::new(LruCache::new(
+                    NonZeroUsize::new(lrucap).unwrap(),
+                )))
+            })
+            .collect();
         Ok(Self {
             dir: PathBuf::from(dir),
             grid,
-            cache: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(lrucap).unwrap(),
-            ))),
+            shards,
         })
     }
 
     pub fn cache_size(&self) -> usize {
-        self.cache.lock().unwrap().len()
+        self.shards
+            .iter()
+            .map(|shard| shard.lock().unwrap().len())
+            .sum()
     }
 }
 
@@ -179,8 +185,55 @@ impl ModelFetcher for CachedFetcher {
     }
 
     fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<CowVector> {
-        let mut cache = self.cache.lock().unwrap();
-        if let Some(spec) = cache.get(&(i, j, k)) {
+        let shard_idx = (i + j + k) % self.shards.len();
+        let mut shard = self.shards[shard_idx].lock().unwrap();
+        if let Some(spec) = shard.get(&(i, j, k)) {
+            Ok(CowVector::Owned(spec.clone()))
+        } else {
+            std::mem::drop(shard);
+            let teff = self.grid.teff.get(i)?;
+            let m = self.grid.m.get(j)?;
+            let logg = self.grid.logg.get(k)?;
+            let spec = read_spectrum(&self.dir, teff, m, logg)?;
+            let mut shard = self.shards[shard_idx].lock().unwrap();
+            shard.put((i, j, k), spec.clone());
+            Ok(CowVector::Owned(spec))
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct FullyCachedFetcher {
+    pub dir: PathBuf,
+    pub grid: Grid,
+    pub cache: Vec<Arc<RwLock<Option<na::DVector<u16>>>>>,
+}
+
+impl FullyCachedFetcher {
+    pub fn new(dir: &str, vsini_range: (f64, f64), rv_range: (f64, f64)) -> Result<Self> {
+        let model_labels = get_model_labels_in_dir(&PathBuf::from(dir)).unwrap();
+        let n = model_labels.len();
+        let grid = Grid::new(model_labels, vsini_range, rv_range)?;
+        let cache = vec![Arc::new(RwLock::new(None)); n];
+        Ok(Self {
+            dir: PathBuf::from(dir),
+            grid,
+            cache,
+        })
+    }
+}
+
+impl ModelFetcher for FullyCachedFetcher {
+    fn grid(&self) -> &Grid {
+        &self.grid
+    }
+
+    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<CowVector> {
+        let idx = (self.grid.cumulative_grid_size[i] + k - self.grid.logg_limits[i].0)
+            * self.grid.m.n()
+            + j;
+        let cache = self.cache[idx].read().unwrap();
+        if let Some(spec) = &*cache {
             Ok(CowVector::Owned(spec.clone()))
         } else {
             std::mem::drop(cache);
@@ -188,8 +241,8 @@ impl ModelFetcher for CachedFetcher {
             let m = self.grid.m.get(j)?;
             let logg = self.grid.logg.get(k)?;
             let spec = read_spectrum(&self.dir, teff, m, logg)?;
-            let mut cache = self.cache.lock().unwrap();
-            cache.put((i, j, k), spec.clone());
+            let mut writable_cache = self.cache[idx].write().unwrap();
+            *writable_cache = Some(spec.clone());
             Ok(CowVector::Owned(spec))
         }
     }
