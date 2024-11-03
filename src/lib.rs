@@ -14,13 +14,15 @@ use convolve_rv::{
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
 use enum_dispatch::enum_dispatch;
 use fitting::{
-    fit_pso, uncertainty_chi2, ChunkFitter, ConstantContinuum as RsConstantContinuum,
-    ContinuumFitter, FixedContinuum as RsFixedContinuum, LinearModelFitter, ObservedSpectrum, OptimizationResult,
-    PSOSettings as FittingPSOSettings,
+    fit_pso, fit_pso_binary_norm, uncertainty_chi2, BinaryOptimizationResult, ChunkFitter,
+    ConstantContinuum as RsConstantContinuum, ContinuumFitter, FixedContinuum as RsFixedContinuum,
+    LinearModelFitter, ObservedSpectrum, OptimizationResult, PSOSettings as FittingPSOSettings,
 };
 use indicatif::ProgressBar;
 use interpolate::{FluxFloat, GridInterpolator, Interpolator};
-use model_fetchers::{read_npy_file, CachedFetcher, InMemFetcher, OnDiskFetcher, FullyCachedFetcher};
+use model_fetchers::{
+    read_npy_file, CachedFetcher, FullyCachedFetcher, InMemFetcher, OnDiskFetcher,
+};
 use nalgebra as na;
 use nalgebra::Storage;
 use npy::to_file;
@@ -96,6 +98,47 @@ impl From<OptimizationResult> for PyOptimizationResult {
     fn from(result: fitting::OptimizationResult) -> Self {
         PyOptimizationResult {
             labels: result.labels.into(),
+            continuum_params: result.continuum_params.data.into(),
+            chi2: result.ls,
+            iterations: result.iters,
+            time: result.time,
+        }
+    }
+}
+
+/// Output of the PSO binary fitting algorithm.
+#[derive(Clone, Debug)]
+#[pyclass(module = "normalization", frozen)]
+pub struct PyBinaryOptimizationResult {
+    /// (Teff, [M/H], logg, vsini, RV)
+    #[pyo3(get)]
+    pub labels1: (f64, f64, f64, f64, f64),
+    #[pyo3(get)]
+    pub labels2: (f64, f64, f64, f64, f64),
+    #[pyo3(get)]
+    pub light_ratio: f64,
+    /// Fitted parameters for the continuum fitting function
+    /// (polynomial coefficients)
+    #[pyo3(get)]
+    pub continuum_params: Vec<FluxFloat>,
+    #[pyo3(get)]
+    /// Chi2 value
+    pub chi2: f64,
+    #[pyo3(get)]
+    /// Number of iterations used
+    pub iterations: u64,
+    /// Time taken
+    #[pyo3(get)]
+    pub time: f64,
+}
+
+/// Rust to Python bindings.
+impl From<BinaryOptimizationResult> for PyBinaryOptimizationResult {
+    fn from(result: fitting::BinaryOptimizationResult) -> Self {
+        PyBinaryOptimizationResult {
+            labels1: result.labels1.into(),
+            labels2: result.labels2.into(),
+            light_ratio: result.light_ratio,
             continuum_params: result.continuum_params.data.into(),
             chi2: result.ls,
             iterations: result.iters,
@@ -361,6 +404,29 @@ macro_rules! implement_methods {
                 PyArray::from_vec_bound(py, interpolated.iter().copied().collect())
             }
 
+            pub fn produce_binary_model_norm<'a>(
+                &mut self,
+                py: Python<'a>,
+                continuum_interpolator: &$name,
+                dispersion: PyWavelengthDispersion,
+                labels1: (f64, f64, f64, f64, f64),
+                labels2: (f64, f64, f64, f64, f64),
+                light_ratio: f64,
+            ) -> Bound<'a, PyArray<FluxFloat, Ix1>> {
+                let interpolated = self
+                    .interpolator
+                    .produce_binary_model_norm(
+                        &continuum_interpolator.interpolator,
+                        &dispersion.0,
+                        &na::Vector5::new(labels1.0, labels1.1, labels1.2, labels1.3, labels1.4),
+                        &na::Vector5::new(labels2.0, labels2.1, labels2.2, labels2.3, labels2.4),
+                        light_ratio as f32,
+                    )
+                    .unwrap();
+                // let interpolated = [0.0; LEN_C];
+                PyArray::from_vec_bound(py, interpolated.iter().copied().collect())
+            }
+
             /// Build the wavelength dispersion kernels (debugging purposes).
             pub fn get_kernels<'a>(
                 &mut self,
@@ -603,6 +669,34 @@ macro_rules! implement_methods {
                 };
                 let result = fit_pso(
                     &self.interpolator,
+                    &dispersion.0,
+                    &observed_spectrum.into(),
+                    &fitter.0,
+                    &settings.into(),
+                    trace_directory,
+                    parallelize.unwrap_or(true),
+                );
+                Ok(result?.into())
+            }
+
+            pub fn fit_pso_binary_norm(
+                &self,
+                continuum_interpolator: &$name,
+                fitter: PyContinuumFitter,
+                dispersion: PyWavelengthDispersion,
+                observed_flux: PyArrayLike<FluxFloat, Ix1>,
+                observed_var: PyArrayLike<FluxFloat, Ix1>,
+                settings: PSOSettings,
+                trace_directory: Option<String>,
+                parallelize: Option<bool>,
+            ) -> PyResult<PyBinaryOptimizationResult> {
+                let observed_spectrum = ObservedSpectrum {
+                    flux: observed_flux.as_matrix().column(0).into_owned(),
+                    var: observed_var.as_matrix().column(0).into_owned(),
+                };
+                let result = fit_pso_binary_norm(
+                    &self.interpolator,
+                    &continuum_interpolator.interpolator,
                     &dispersion.0,
                     &observed_spectrum.into(),
                     &fitter.0,
@@ -1017,7 +1111,10 @@ impl FullyCachedInterpolator {
 implement_methods!(OnDiskInterpolator, interpolators::OnDiskInterpolator);
 implement_methods!(LoadedInMemInterpolator, interpolators::InMemInterpolator);
 implement_methods!(CachedInterpolator, interpolators::CachedInterpolator);
-implement_methods!(FullyCachedInterpolator, interpolators::FullyCachedInterpolator);
+implement_methods!(
+    FullyCachedInterpolator,
+    interpolators::FullyCachedInterpolator
+);
 
 #[pyfunction]
 pub fn get_vsini_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<FluxFloat> {

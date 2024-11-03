@@ -440,9 +440,54 @@ pub struct OptimizationResult {
     pub iters: u64,
     pub time: f64,
 }
+struct BinaryFitCostFunction<
+    'a,
+    I1: Interpolator,
+    I2: Interpolator,
+    T: WavelengthDispersion,
+    F: ContinuumFitter,
+> {
+    interpolator: &'a I1,
+    continuum_interpolator: &'a I2,
+    target_dispersion: &'a T,
+    observed_spectrum: &'a ObservedSpectrum,
+    continuum_fitter: &'a F,
+    parallelize: bool,
+}
+
+impl<'a, I1: Interpolator, I2: Interpolator, T: WavelengthDispersion, F: ContinuumFitter>
+    CostFunction for BinaryFitCostFunction<'a, I1, I2, T, F>
+{
+    type Param = na::SVector<f64, 11>;
+    type Output = f64;
+
+    fn cost(&self, params: &Self::Param) -> Result<Self::Output> {
+        let star1_parameters = params.fixed_rows::<5>(0).into_owned();
+        let star2_parameters = params.fixed_rows::<5>(5).into_owned();
+        let light_ratio = params[10];
+
+        let synth_spec = self.interpolator.produce_binary_model_norm(
+            self.continuum_interpolator,
+            self.target_dispersion,
+            &star1_parameters,
+            &star2_parameters,
+            light_ratio as f32,
+        )?;
+        let (_, ls) = self
+            .continuum_fitter
+            .fit_continuum(self.observed_spectrum, &synth_spec)?;
+        Ok(ls)
+    }
+
+    fn parallelize(&self) -> bool {
+        self.parallelize
+    }
+}
 
 pub struct BinaryOptimizationResult {
-    pub labels: [f64; 11],
+    pub labels1: [f64; 5],
+    pub labels2: [f64; 5],
+    pub light_ratio: f64,
     pub continuum_params: na::DVector<FluxFloat>,
     pub ls: f64,
     pub iters: u64,
@@ -479,6 +524,46 @@ fn get_pso_fitter<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitt
         parallelize,
     };
     let bounds = interpolator.bounds_single().clone();
+    let solver = particleswarm::ParticleSwarm::new(bounds, settings.num_particles)
+        .with_inertia_factor(settings.inertia_factor)
+        .unwrap()
+        .with_cognitive_factor(settings.cognitive_factor)
+        .unwrap()
+        .with_social_factor(settings.social_factor)
+        .unwrap()
+        .with_delta(settings.delta)
+        .unwrap();
+    Executor::new(cost_function, solver).configure(|state| state.max_iters(settings.max_iters))
+}
+
+fn get_binary_pso_fitter<
+    'a,
+    I1: Interpolator,
+    I2: Interpolator,
+    T: WavelengthDispersion,
+    F: ContinuumFitter,
+>(
+    interpolator: &'a I1,
+    continuum_interpolator: &'a I2,
+    target_dispersion: &'a T,
+    observed_spectrum: &'a ObservedSpectrum,
+    continuum_fitter: &'a F,
+    settings: &PSOSettings,
+    parallelize: bool,
+) -> Executor<
+    BinaryFitCostFunction<'a, I1, I2, T, F>,
+    particleswarm::ParticleSwarm<11, I1::BB, f64>,
+    PopulationState<particleswarm::Particle<na::SVector<f64, 11>, f64>, f64>,
+> {
+    let cost_function = BinaryFitCostFunction {
+        interpolator,
+        continuum_interpolator,
+        target_dispersion,
+        observed_spectrum,
+        continuum_fitter,
+        parallelize,
+    };
+    let bounds = interpolator.bounds_binary().clone();
     let solver = particleswarm::ParticleSwarm::new(bounds, settings.num_particles)
         .with_inertia_factor(settings.inertia_factor)
         .unwrap()
@@ -548,6 +633,62 @@ impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 5>, f64>, 
     }
 }
 
+#[derive(Serialize)]
+struct BinaryParticleInfo {
+    teff1: f64,
+    m1: f64,
+    logg1: f64,
+    vsini1: f64,
+    rv1: f64,
+    teff2: f64,
+    m2: f64,
+    logg2: f64,
+    vsini2: f64,
+    rv2: f64,
+    light_ratio: f64,
+    cost: f64,
+}
+
+impl From<(na::SVector<f64, 11>, f64)> for BinaryParticleInfo {
+    fn from(p: (na::SVector<f64, 11>, f64)) -> Self {
+        Self {
+            teff1: p.0[0],
+            m1: p.0[1],
+            logg1: p.0[2],
+            vsini1: p.0[3],
+            rv1: p.0[4],
+            teff2: p.0[5],
+            m2: p.0[6],
+            logg2: p.0[7],
+            vsini2: p.0[8],
+            rv2: p.0[9],
+            light_ratio: p.0[10],
+            cost: p.1,
+        }
+    }
+}
+
+impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 11>, f64>, f64>>
+    for PSObserver
+{
+    fn observe_iter(
+        &mut self,
+        state: &PopulationState<particleswarm::Particle<na::SVector<f64, 11>, f64>, f64>,
+        _kv: &KV,
+    ) -> Result<()> {
+        let iter = state.get_iter();
+        let particles = state.get_population().ok_or(Error::msg("No particles"))?;
+        let values: Vec<BinaryParticleInfo> = particles
+            .iter()
+            .map(|p| (p.position, p.cost).into())
+            .collect();
+        let filename = self.dir.join(format!("{}_{}.json", self.file_prefix, iter));
+        let f = BufWriter::new(File::create(filename)?);
+        serde_json::to_writer(f, &values)?;
+        Ok(())
+    }
+}
+
 pub fn fit_pso(
     interpolator: &impl Interpolator,
     target_dispersion: &impl WavelengthDispersion,
@@ -578,12 +719,11 @@ pub fn fit_pso(
         .ok_or(anyhow!("No best parameter found"))?
         .position;
 
-    let best_rescaled = best_param;
-    let best_teff = best_rescaled[0];
-    let best_m = best_rescaled[1];
-    let best_logg = best_rescaled[2];
-    let best_vsini = best_rescaled[3];
-    let best_rv = best_rescaled[4];
+    let best_teff = best_param[0];
+    let best_m = best_param[1];
+    let best_logg = best_param[2];
+    let best_vsini = best_param[3];
+    let best_rv = best_param[4];
 
     let synth_spec = interpolator.produce_model(
         target_dispersion,
@@ -616,9 +756,10 @@ pub fn fit_pso_binary_norm(
     settings: &PSOSettings,
     trace_directory: Option<String>,
     parallelize: bool,
-) -> Result<OptimizationResult> {
-    let fitter = get_pso_fitter(
+) -> Result<BinaryOptimizationResult> {
+    let fitter = get_binary_pso_fitter(
         interpolator,
+        continuum_interpolator,
         target_dispersion,
         observed_spectrum,
         continuum_fitter,
@@ -638,28 +779,38 @@ pub fn fit_pso_binary_norm(
         .ok_or(anyhow!("No best parameter found"))?
         .position;
 
-    let best_rescaled = best_param;
-    let best_teff = best_rescaled[0];
-    let best_m = best_rescaled[1];
-    let best_logg = best_rescaled[2];
-    let best_vsini = best_rescaled[3];
-    let best_rv = best_rescaled[4];
+    let star1_parameters = best_param.fixed_rows::<5>(0).into_owned();
+    let star2_parameters = best_param.fixed_rows::<5>(5).into_owned();
+    let light_ratio = best_param[10];
 
-    let synth_spec = interpolator.produce_model(
+    let synth_spec = interpolator.produce_binary_model_norm(
+        continuum_interpolator,
         target_dispersion,
-        best_teff,
-        best_m,
-        best_logg,
-        best_vsini,
-        best_rv,
+        &star1_parameters,
+        &star2_parameters,
+        light_ratio as f32,
     )?;
     let (continuum_params, _) = continuum_fitter.fit_continuum(observed_spectrum, &synth_spec)?;
     let time = match result.state.time {
         Some(t) => t.as_secs_f64(),
         None => 0.0,
     };
-    Ok(OptimizationResult {
-        labels: [best_teff, best_m, best_logg, best_vsini, best_rv],
+    Ok(BinaryOptimizationResult {
+        labels1: [
+            best_param[0],
+            best_param[1],
+            best_param[2],
+            best_param[3],
+            best_param[4],
+        ],
+        labels2: [
+            best_param[5],
+            best_param[6],
+            best_param[7],
+            best_param[8],
+            best_param[9],
+        ],
+        light_ratio: best_param[10],
         continuum_params,
         ls: result.state.best_cost,
         time,

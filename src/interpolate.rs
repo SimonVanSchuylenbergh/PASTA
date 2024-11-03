@@ -552,8 +552,18 @@ impl PSOBounds<11> for BinaryGrid {
     fn limits(&self) -> (na::SVector<f64, 11>, na::SVector<f64, 11>) {
         let (min, max) = self.grid.limits();
         (
-            na::SVector::from_iterator(min.iter().copied().chain(once(self.light_ratio.0))),
-            na::SVector::from_iterator(max.iter().copied().chain(once(self.light_ratio.1))),
+            na::SVector::from_iterator(
+                min.iter()
+                    .copied()
+                    .chain(min.iter().copied())
+                    .chain(once(self.light_ratio.0)),
+            ),
+            na::SVector::from_iterator(
+                max.iter()
+                    .copied()
+                    .chain(max.iter().copied())
+                    .chain(once(self.light_ratio.1)),
+            ),
         )
     }
 
@@ -644,8 +654,8 @@ pub trait Interpolator: Send + Sync {
     type BB: PSOBounds<11>; // Bounds for binary star
 
     fn synth_wl(&self) -> WlGrid;
-    fn bounds_single(&self) -> &Self::BS;
-    // fn bounds_binary(&self) -> &Self::BB;
+    fn bounds_single(&self) -> Self::BS;
+    fn bounds_binary(&self) -> Self::BB;
     fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<na::DVector<FluxFloat>>;
     fn produce_model(
         &self,
@@ -669,25 +679,25 @@ pub trait Interpolator: Send + Sync {
     fn produce_binary_model(
         &self,
         target_dispersion: &impl WavelengthDispersion,
-        star1_parameters: (f64, f64, f64, f64, f64),
-        star2_parameters: (f64, f64, f64, f64, f64),
+        star1_parameters: na::SVector<f64, 5>,
+        star2_parameters: na::SVector<f64, 5>,
         light_ratio: f32,
     ) -> Result<na::DVector<FluxFloat>> {
         let model1 = self.produce_model(
             target_dispersion,
-            star1_parameters.0,
-            star1_parameters.1,
-            star1_parameters.2,
-            star1_parameters.3,
-            star1_parameters.4,
+            star1_parameters[0],
+            star1_parameters[1],
+            star1_parameters[2],
+            star1_parameters[3],
+            star1_parameters[4],
         )?;
         let model2 = self.produce_model(
             target_dispersion,
-            star2_parameters.0,
-            star2_parameters.1,
-            star2_parameters.2,
-            star2_parameters.3,
-            star2_parameters.4,
+            star2_parameters[0],
+            star2_parameters[1],
+            star2_parameters[2],
+            star2_parameters[3],
+            star2_parameters[4],
         )?;
         Ok(model1 * light_ratio + model2 * (1.0 - light_ratio))
     }
@@ -696,45 +706,46 @@ pub trait Interpolator: Send + Sync {
         &self,
         continuum_interpolator: &impl Interpolator,
         target_dispersion: &impl WavelengthDispersion,
-        star1_parameters: (f64, f64, f64, f64, f64),
-        star2_parameters: (f64, f64, f64, f64, f64),
+        star1_parameters: &na::SVector<f64, 5>,
+        star2_parameters: &na::SVector<f64, 5>,
         light_ratio: f32,
     ) -> Result<na::DVector<FluxFloat>> {
         let model1 = self.produce_model(
             target_dispersion,
-            star1_parameters.0,
-            star1_parameters.1,
-            star1_parameters.2,
-            star1_parameters.3,
-            star1_parameters.4,
+            star1_parameters[0],
+            star1_parameters[1],
+            star1_parameters[2],
+            star1_parameters[3],
+            star1_parameters[4],
         )?;
         let continuum1 = continuum_interpolator.produce_model(
             target_dispersion,
-            star1_parameters.0,
-            star1_parameters.1,
-            star1_parameters.2,
-            star1_parameters.3,
-            star1_parameters.4,
+            star1_parameters[0],
+            star1_parameters[1],
+            star1_parameters[2],
+            star1_parameters[3],
+            star1_parameters[4],
         )?;
 
         let model2 = self.produce_model(
             target_dispersion,
-            star2_parameters.0,
-            star2_parameters.1,
-            star2_parameters.2,
-            star2_parameters.3,
-            star2_parameters.4,
+            star2_parameters[0],
+            star2_parameters[1],
+            star2_parameters[2],
+            star2_parameters[3],
+            star2_parameters[4],
         )?;
         let continuum2 = continuum_interpolator.produce_model(
             target_dispersion,
-            star2_parameters.0,
-            star2_parameters.1,
-            star2_parameters.2,
-            star2_parameters.3,
-            star2_parameters.4,
+            star2_parameters[0],
+            star2_parameters[1],
+            star2_parameters[2],
+            star2_parameters[3],
+            star2_parameters[4],
         )?;
 
-        let flux = model1.component_mul(&continuum1) * light_ratio + model2.component_mul(&continuum2) * (1.0 - light_ratio);
+        let flux = model1.component_mul(&continuum1) * light_ratio
+            + model2.component_mul(&continuum2) * (1.0 - light_ratio);
         let continuum = continuum1 * light_ratio + continuum2 * (1.0 - light_ratio);
         Ok(flux.component_div(&continuum))
     }
@@ -742,7 +753,7 @@ pub trait Interpolator: Send + Sync {
 
 pub trait ModelFetcher: Send + Sync {
     fn grid(&self) -> &Grid;
-    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<CowVector>;
+    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<(CowVector, f32)>;
 }
 
 #[derive(Clone)]
@@ -773,8 +784,14 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
     fn synth_wl(&self) -> WlGrid {
         self.synth_wl
     }
-    fn bounds_single(&self) -> &Grid {
-        self.grid()
+    fn bounds_single(&self) -> Grid {
+        self.grid().clone()
+    }
+    fn bounds_binary(&self) -> BinaryGrid {
+        BinaryGrid {
+            grid: self.grid().clone(),
+            light_ratio: (0.0, 1.0),
+        }
     }
     fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<na::DVector<FluxFloat>> {
         let local_grid = self.grid().get_local_grid(teff, m, logg)?;
@@ -789,12 +806,12 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
                     .iter()
                     .map(move |m_index| match (teff_logg_index, m_index) {
                         (Some((i, j)), Some(k)) => self.fetcher.find_spectrum(*i, *k, *j),
-                        _ => Ok(CowVector::Owned(na::DVector::zeros(self.synth_wl.n()))),
+                        _ => Ok((CowVector::Owned(na::DVector::zeros(self.synth_wl.n())), 1.0)),
                     })
             })
-            .collect::<Result<Vec<CowVector>>>()?;
+            .collect::<Result<Vec<(CowVector, f32)>>>()?;
 
-        let model_length = neighbors[0].len();
+        let model_length = neighbors[0].0.len();
         let factors_s =
             na::SVector::<FluxFloat, 64>::from_iterator(factors.iter().map(|x| *x as FluxFloat));
         let mut interpolated: na::DVector<FluxFloat> = na::DVector::zeros(model_length);
@@ -802,11 +819,12 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         for i in 0..(model_length / BATCH_SIZE) {
             let start = i * BATCH_SIZE;
             for j in 0..64 {
+                let (column, factor) = &neighbors[j];
                 mat.set_column(
                     j,
-                    &neighbors[j]
+                    &column
                         .fixed_rows::<BATCH_SIZE>(start)
-                        .map(|x| (x as FluxFloat) / 65535.0),
+                        .map(|x| (x as FluxFloat) / 65535.0 * factor),
                 );
             }
 
@@ -817,11 +835,12 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         let remaining = model_length - start;
         let mut mat = na::Matrix::<FluxFloat, na::Dyn, na::Const<64>, _>::zeros(remaining);
         for j in 0..64 {
+            let (column, factor) = &neighbors[j];
             mat.set_column(
                 j,
-                &neighbors[j]
+                &column
                     .rows(start, remaining)
-                    .map(|x| (x as FluxFloat) / 65535.0),
+                    .map(|x| (x as FluxFloat) / 65535.0 * factor),
             );
         }
         mat.mul_to(&factors_s, &mut interpolated.rows_mut(start, remaining));
@@ -881,9 +900,10 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
             .logg
             .try_get_index(logg, logg_limits)
             .context("logg not in grid")?;
-        let spec = self.fetcher.find_spectrum(i, j, k)?;
+        let (spec, factor) = self.fetcher.find_spectrum(i, j, k)?;
         let broadened = rot_broad_rv(
-            spec.into_owned().map(|x| (x as FluxFloat) / 65535.0),
+            spec.into_owned()
+                .map(|x| (x as FluxFloat) / 65535.0 * factor),
             self.synth_wl(),
             target_dispersion,
             vsini,
