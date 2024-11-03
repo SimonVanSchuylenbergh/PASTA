@@ -199,6 +199,7 @@ impl PyWavelengthDispersion {
         &self,
         input_directory: String,
         output_directory: String,
+        includes_factor: bool,
         input_wavelength: WlGrid,
     ) {
         let out_dir = Path::new(output_directory.as_str());
@@ -212,17 +213,47 @@ impl PyWavelengthDispersion {
             if out_file.exists() {
                 return;
             }
-            let spectrum: na::DVector<u16> = read_npy_file(file).unwrap().into();
-            let spectrum_float = spectrum.map(|x| (x as FluxFloat) / 65535.0);
-            let convolved = self.0.convolve(spectrum_float).unwrap();
-            let resampled =
-                shift_and_resample(&convolved, input_wavelength.0, &self.0.wavelength(), 0.0)
-                    .unwrap();
-            let resampled_u16 = resampled
-                .into_iter()
-                .map(|x| (x.min(65535.0).max(0.0) * 65535.0) as u16);
+            let arr: na::DVector<u16> = read_npy_file(file).unwrap().into();
+            if includes_factor {
+                let bytes1 = arr[0].to_le_bytes();
+                let bytes2 = arr[1].to_le_bytes();
+                let factor = f32::from_le_bytes([bytes1[0], bytes1[1], bytes2[0], bytes2[1]]);
 
-            to_file(out_file, resampled_u16).unwrap();
+                let spectrum_float = arr
+                    .rows(2, arr.len() - 2)
+                    .map(|x| (x as FluxFloat) / 65535.0 * factor);
+                let convolved = self.0.convolve(spectrum_float).unwrap();
+                let resampled =
+                    shift_and_resample(&convolved, input_wavelength.0, &self.0.wavelength(), 0.0)
+                        .unwrap();
+
+                let max = resampled.max();
+                let max_bytes = max.to_le_bytes();
+                let first_u16 = u16::from_le_bytes([max_bytes[0], max_bytes[1]]);
+                let second_u16 = u16::from_le_bytes([max_bytes[2], max_bytes[3]]);
+
+                let resampled_u16 = [first_u16, second_u16]
+                    .into_iter()
+                    .chain(
+                        resampled
+                            .into_iter()
+                            .map(|x| (x.max(0.0) / max * 65535.0) as u16),
+                    )
+                    .collect::<Vec<_>>();
+                to_file(out_file, resampled_u16).unwrap();
+            } else {
+                let spectrum_float = arr.map(|x| (x as FluxFloat) / 65535.0);
+                let convolved = self.0.convolve(spectrum_float).unwrap();
+                let resampled =
+                    shift_and_resample(&convolved, input_wavelength.0, &self.0.wavelength(), 0.0)
+                        .unwrap();
+                let resampled_u16 = resampled
+                    .into_iter()
+                    .map(|x| (x.min(1.0).max(0.0) * 65535.0) as u16)
+                    .collect::<Vec<_>>();
+                to_file(out_file, resampled_u16).unwrap();
+            };
+
             bar.inc(1);
         });
     }
@@ -985,12 +1016,14 @@ impl OnDiskInterpolator {
     #[new]
     pub fn new(
         dir: &str,
+        includes_factor: bool,
         wavelength: WlGrid,
         vsini_range: Option<(f64, f64)>,
         rv_range: Option<(f64, f64)>,
     ) -> Self {
         let fetcher = OnDiskFetcher::new(
             dir,
+            includes_factor,
             vsini_range.unwrap_or((1.0, 600.0)),
             rv_range.unwrap_or((-150.0, 150.0)),
         )
@@ -1006,6 +1039,7 @@ impl OnDiskInterpolator {
 #[derive(Clone)]
 pub struct InMemInterpolator {
     dir: String,
+    includes_factor: bool,
     wavelength: WlGrid,
     vsini_range: Option<(f64, f64)>,
     rv_range: Option<(f64, f64)>,
@@ -1022,12 +1056,14 @@ impl InMemInterpolator {
     #[new]
     pub fn new(
         dir: &str,
+        includes_factor: bool,
         wavelength: WlGrid,
         vsini_range: Option<(f64, f64)>,
         rv_range: Option<(f64, f64)>,
     ) -> Self {
         Self {
             dir: dir.to_string(),
+            includes_factor,
             wavelength,
             vsini_range,
             rv_range,
@@ -1037,6 +1073,7 @@ impl InMemInterpolator {
     fn load(&self) -> LoadedInMemInterpolator {
         let fetcher = InMemFetcher::new(
             &self.dir,
+            self.includes_factor,
             self.vsini_range.unwrap_or((1.0, 600.0)),
             self.rv_range.unwrap_or((-150.0, 150.0)),
         )
@@ -1058,6 +1095,7 @@ impl CachedInterpolator {
     #[new]
     pub fn new(
         dir: &str,
+        includes_factor: bool,
         wavelength: WlGrid,
         vsini_range: Option<(f64, f64)>,
         rv_range: Option<(f64, f64)>,
@@ -1066,6 +1104,7 @@ impl CachedInterpolator {
     ) -> Self {
         let fetcher = CachedFetcher::new(
             dir,
+            includes_factor,
             vsini_range.unwrap_or((1.0, 600.0)),
             rv_range.unwrap_or((-150.0, 150.0)),
             lrucap.unwrap_or(4000),
@@ -1092,12 +1131,14 @@ impl FullyCachedInterpolator {
     #[new]
     pub fn new(
         dir: &str,
+        includes_factor: bool,
         wavelength: WlGrid,
         vsini_range: Option<(f64, f64)>,
         rv_range: Option<(f64, f64)>,
     ) -> Self {
         let fetcher = FullyCachedFetcher::new(
             dir,
+            includes_factor,
             vsini_range.unwrap_or((1.0, 600.0)),
             rv_range.unwrap_or((-150.0, 150.0)),
         )

@@ -20,7 +20,13 @@ pub fn read_npy_file(file_path: PathBuf) -> Result<Vec<u16>> {
     Ok(data.to_vec())
 }
 
-pub fn read_spectrum(dir: &Path, teff: f64, m: f64, logg: f64) -> Result<na::DVector<u16>> {
+pub fn read_spectrum(
+    dir: &Path,
+    teff: f64,
+    m: f64,
+    logg: f64,
+    includes_factor: bool,
+) -> Result<(na::DVector<u16>, Option<f32>)> {
     // e.g. 00027_lm0050_07000_0350_0020_0000_Vsini_0000.npy
     let _teff = teff.round() as i32;
     let _m = (m * 100.0).round() as i32;
@@ -29,7 +35,20 @@ pub fn read_spectrum(dir: &Path, teff: f64, m: f64, logg: f64) -> Result<na::DVe
     let filename = format!("l{}{:04}_{:05}_{:04}", sign, _m.abs(), _teff, _logg);
     let file_path = dir.join(format!("{}.npy", filename));
     let result = read_npy_file(file_path.clone())?;
-    Ok(na::DVector::from_iterator(result.len(), result.into_iter()))
+    if includes_factor {
+        let bytes1 = result[0].to_le_bytes();
+        let bytes2 = result[1].to_le_bytes();
+        let factor = f32::from_le_bytes([bytes1[0], bytes1[1], bytes2[0], bytes2[1]]);
+        Ok((
+            na::DVector::from_iterator(result.len()-2, result.into_iter().skip(2)),
+            Some(factor),
+        ))
+    } else {
+        Ok((
+            na::DVector::from_iterator(result.len(), result.into_iter()),
+            None,
+        ))
+    }
 }
 
 fn labels_from_filename(filename: &str) -> Result<(f64, f64, f64)> {
@@ -63,15 +82,22 @@ fn get_model_labels_in_dir(dir: &PathBuf) -> Result<Vec<(f64, f64, f64)>> {
 pub struct OnDiskFetcher {
     pub dir: PathBuf,
     pub grid: Grid,
+    pub includes_factor: bool,
 }
 
 impl OnDiskFetcher {
-    pub fn new(dir: &str, vsini_range: (f64, f64), rv_range: (f64, f64)) -> Result<Self> {
+    pub fn new(
+        dir: &str,
+        includes_factor: bool,
+        vsini_range: (f64, f64),
+        rv_range: (f64, f64),
+    ) -> Result<Self> {
         let model_labels = get_model_labels_in_dir(&PathBuf::from(dir))?;
         let grid = Grid::new(model_labels, vsini_range, rv_range)?;
         Ok(Self {
             dir: PathBuf::from(dir),
             grid,
+            includes_factor,
         })
     }
 }
@@ -81,14 +107,14 @@ impl ModelFetcher for OnDiskFetcher {
         &self.grid
     }
 
-    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<CowVector> {
+    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<(CowVector, f32)> {
         let teff = self.grid.teff.get(i)?;
         let m = self.grid.m.get(j)?;
         let logg = self.grid.logg.get(k)?;
         // println!("Finding i={}, j={}, k={}", i, j, k);
         // println!("teff={}, m={}, logg={}", teff, m, logg);
-        let spec = read_spectrum(&self.dir, teff, m, logg)?;
-        Ok(CowVector::Owned(spec))
+        let (spec, factor) = read_spectrum(&self.dir, teff, m, logg, self.includes_factor)?;
+        Ok((CowVector::Owned(spec), factor.unwrap_or(1.0)))
     }
 }
 
@@ -96,32 +122,54 @@ impl ModelFetcher for OnDiskFetcher {
 pub struct InMemFetcher {
     pub grid: Grid,
     pub loaded_spectra: na::DMatrix<u16>,
+    pub factors: Option<na::DVector<f32>>,
     pub n: usize,
 }
 
-fn load_spectra(dir: PathBuf, grid: &Grid) -> Result<na::DMatrix<u16>> {
+fn load_spectra(
+    dir: PathBuf,
+    includes_factor: bool,
+    grid: &Grid,
+) -> Result<(na::DMatrix<u16>, Option<na::DVector<f32>>)> {
     let combinations = grid.list_gridpoints();
 
     let bar = ProgressBar::new(combinations.len() as u64);
-    let vec_of_spectra = combinations
+    let vec_of_spectra_and_factors = combinations
         .into_par_iter()
         .map(|[teff, m, logg]| {
             bar.inc(1);
-            read_spectrum(&dir, teff, m, logg)
+            read_spectrum(&dir, teff, m, logg, includes_factor)
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(na::DMatrix::from_columns(&vec_of_spectra))
+    let (spectra, factors): (Vec<_>, Vec<_>) = vec_of_spectra_and_factors.into_iter().unzip();
+    if includes_factor {
+        Ok((
+            na::DMatrix::from_columns(&spectra),
+            factors
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+                .map(|v| na::DVector::from_iterator(v.len(), v)),
+        ))
+    } else {
+        Ok((na::DMatrix::from_columns(&spectra), None))
+    }
 }
 
 impl InMemFetcher {
-    pub fn new(dir: &str, vsini_range: (f64, f64), rv_range: (f64, f64)) -> Result<Self> {
+    pub fn new(
+        dir: &str,
+        includes_factor: bool,
+        vsini_range: (f64, f64),
+        rv_range: (f64, f64),
+    ) -> Result<Self> {
         let model_labels = get_model_labels_in_dir(&PathBuf::from(dir))?;
         let grid = Grid::new(model_labels, vsini_range, rv_range)?;
-        let loaded_spectra = load_spectra(PathBuf::from(dir), &grid)?;
+        let (loaded_spectra, factors) = load_spectra(PathBuf::from(dir), includes_factor, &grid)?;
         let n = loaded_spectra.shape().0;
         Ok(Self {
             grid,
             loaded_spectra,
+            factors,
             n,
         })
     }
@@ -132,11 +180,14 @@ impl ModelFetcher for InMemFetcher {
         &self.grid
     }
 
-    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<CowVector> {
+    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<(CowVector, f32)> {
         let idx = (self.grid.cumulative_grid_size[i] + k - self.grid.logg_limits[i].0)
             * self.grid.m.n()
             + j;
-        Ok(CowVector::Borrowed(self.loaded_spectra.column(idx)))
+        Ok((
+            CowVector::Borrowed(self.loaded_spectra.column(idx)),
+            self.factors.as_ref().map(|fac| fac[idx]).unwrap_or(1.0),
+        ))
     }
 }
 
@@ -144,12 +195,14 @@ impl ModelFetcher for InMemFetcher {
 pub struct CachedFetcher {
     pub dir: PathBuf,
     pub grid: Grid,
-    shards: Vec<Arc<Mutex<LruCache<(usize, usize, usize), na::DVector<u16>>>>>,
+    pub includes_factor: bool,
+    shards: Vec<Arc<Mutex<LruCache<(usize, usize, usize), (na::DVector<u16>, f32)>>>>,
 }
 
 impl CachedFetcher {
     pub fn new(
         dir: &str,
+        includes_factor: bool,
         vsini_range: (f64, f64),
         rv_range: (f64, f64),
         lrucap: usize,
@@ -166,6 +219,7 @@ impl CachedFetcher {
             .collect();
         Ok(Self {
             dir: PathBuf::from(dir),
+            includes_factor,
             grid,
             shards,
         })
@@ -184,20 +238,20 @@ impl ModelFetcher for CachedFetcher {
         &self.grid
     }
 
-    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<CowVector> {
+    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<(CowVector, f32)> {
         let shard_idx = (i + j + k) % self.shards.len();
         let mut shard = self.shards[shard_idx].lock().unwrap();
-        if let Some(spec) = shard.get(&(i, j, k)) {
-            Ok(CowVector::Owned(spec.clone()))
+        if let Some((spec, factor)) = shard.get(&(i, j, k)) {
+            Ok((CowVector::Owned(spec.clone()), *factor))
         } else {
             std::mem::drop(shard);
             let teff = self.grid.teff.get(i)?;
             let m = self.grid.m.get(j)?;
             let logg = self.grid.logg.get(k)?;
-            let spec = read_spectrum(&self.dir, teff, m, logg)?;
+            let (spec, factor) = read_spectrum(&self.dir, teff, m, logg, self.includes_factor)?;
             let mut shard = self.shards[shard_idx].lock().unwrap();
-            shard.put((i, j, k), spec.clone());
-            Ok(CowVector::Owned(spec))
+            shard.put((i, j, k), (spec.clone(), factor.unwrap_or(1.0)));
+            Ok((CowVector::Owned(spec), factor.unwrap_or(1.0)))
         }
     }
 }
@@ -205,18 +259,25 @@ impl ModelFetcher for CachedFetcher {
 #[derive(Clone)]
 pub struct FullyCachedFetcher {
     pub dir: PathBuf,
+    pub includes_factor: bool,
     pub grid: Grid,
-    pub cache: Vec<Arc<RwLock<Option<na::DVector<u16>>>>>,
+    pub cache: Vec<Arc<RwLock<Option<(na::DVector<u16>, f32)>>>>,
 }
 
 impl FullyCachedFetcher {
-    pub fn new(dir: &str, vsini_range: (f64, f64), rv_range: (f64, f64)) -> Result<Self> {
+    pub fn new(
+        dir: &str,
+        includes_factor: bool,
+        vsini_range: (f64, f64),
+        rv_range: (f64, f64),
+    ) -> Result<Self> {
         let model_labels = get_model_labels_in_dir(&PathBuf::from(dir)).unwrap();
         let n = model_labels.len();
         let grid = Grid::new(model_labels, vsini_range, rv_range)?;
         let cache = vec![Arc::new(RwLock::new(None)); n];
         Ok(Self {
             dir: PathBuf::from(dir),
+            includes_factor,
             grid,
             cache,
         })
@@ -228,22 +289,24 @@ impl ModelFetcher for FullyCachedFetcher {
         &self.grid
     }
 
-    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<CowVector> {
+    fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<(CowVector, f32)> {
         let idx = (self.grid.cumulative_grid_size[i] + k - self.grid.logg_limits[i].0)
             * self.grid.m.n()
             + j;
         let cache = self.cache[idx].read().unwrap();
-        if let Some(spec) = &*cache {
-            Ok(CowVector::Owned(spec.clone()))
-        } else {
-            std::mem::drop(cache);
-            let teff = self.grid.teff.get(i)?;
-            let m = self.grid.m.get(j)?;
-            let logg = self.grid.logg.get(k)?;
-            let spec = read_spectrum(&self.dir, teff, m, logg)?;
-            let mut writable_cache = self.cache[idx].write().unwrap();
-            *writable_cache = Some(spec.clone());
-            Ok(CowVector::Owned(spec))
+
+        match &*cache {
+            Some((spec, factor)) => Ok((CowVector::Owned(spec.clone()), *factor)),
+            None => {
+                std::mem::drop(cache);
+                let teff = self.grid.teff.get(i)?;
+                let m = self.grid.m.get(j)?;
+                let logg = self.grid.logg.get(k)?;
+                let (spec, factor) = read_spectrum(&self.dir, teff, m, logg, self.includes_factor)?;
+                let mut writable_cache = self.cache[idx].write().unwrap();
+                *writable_cache = Some((spec.clone(), factor.unwrap_or(1.0)));
+                Ok((CowVector::Owned(spec), factor.unwrap_or(1.0)))
+            }
         }
     }
 }

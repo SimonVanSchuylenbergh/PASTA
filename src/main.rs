@@ -49,7 +49,7 @@ pub fn main() -> Result<()> {
     let wl_grid = WlGrid::Logspace(3.6020599913, 2e-6, 76_145);
     let interpolator1 = GridInterpolator::new(
         // OnDiskFetcher::new(folder, (1.0, 600.0), (-150.0, 150.0))?,
-        CachedFetcher::new(folder, (1.0, 600.0), (-150.0, 150.0), 3000, 1)?,
+        CachedFetcher::new(folder, false, (1.0, 600.0), (-150.0, 150.0), 3000, 1)?,
         // FullyCachedFetcher::new(folder, (1.0, 600.0), (-150.0, 150.0))?,
         wl_grid,
     );
