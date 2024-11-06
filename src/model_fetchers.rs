@@ -9,6 +9,8 @@ use std::io::Read;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
+use std::collections::VecDeque;
+use std::cmp::Eq;
 
 pub fn read_npy_file(file_path: PathBuf) -> Result<Vec<u16>> {
     let mut file = std::fs::File::open(file_path.clone())
@@ -191,12 +193,47 @@ impl ModelFetcher for InMemFetcher {
     }
 }
 
+
+pub struct Cache<K: Eq, V: Clone> {
+    queue: VecDeque<(K, V)>,
+    cap: usize
+}
+
+impl<K: Eq, V: Clone> Cache<K, V> {
+    fn new(cap: usize) -> Self {
+        Self {
+            queue: VecDeque::new(),
+            cap
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    fn get(&self, k: &K) -> Option<V> {
+        for (key, value) in &self.queue {
+            if key == k {
+                return Some(value.clone());
+            }
+        }
+        None
+    }
+
+    fn put(&mut self, k: K, v: V) {
+        if self.queue.len() == self.cap {
+            self.queue.pop_front();
+        }
+        self.queue.push_back((k, v));
+    }
+}
+
 #[derive(Clone)]
 pub struct CachedFetcher {
     pub dir: PathBuf,
     pub grid: Grid,
     pub includes_factor: bool,
-    shards: Vec<Arc<Mutex<LruCache<(usize, usize, usize), (na::DVector<u16>, f32)>>>>,
+    shards: Vec<Arc<RwLock<Cache<(usize, usize, usize), (na::DVector<u16>, f32)>>>>,
 }
 
 impl CachedFetcher {
@@ -212,8 +249,8 @@ impl CachedFetcher {
         let grid = Grid::new(model_labels, vsini_range, rv_range)?;
         let shards = (0..n_shards)
             .map(|_| {
-                Arc::new(Mutex::new(LruCache::new(
-                    NonZeroUsize::new(lrucap).unwrap(),
+                Arc::new(RwLock::new(Cache::new(
+                    lrucap / n_shards,
                 )))
             })
             .collect();
@@ -228,7 +265,7 @@ impl CachedFetcher {
     pub fn cache_size(&self) -> usize {
         self.shards
             .iter()
-            .map(|shard| shard.lock().unwrap().len())
+            .map(|shard| shard.read().unwrap().len())
             .sum()
     }
 }
@@ -240,16 +277,16 @@ impl ModelFetcher for CachedFetcher {
 
     fn find_spectrum(&self, i: usize, j: usize, k: usize) -> Result<(CowVector, f32)> {
         let shard_idx = (i + j + k) % self.shards.len();
-        let mut shard = self.shards[shard_idx].lock().unwrap();
+        let shard = self.shards[shard_idx].read().unwrap();
         if let Some((spec, factor)) = shard.get(&(i, j, k)) {
-            Ok((CowVector::Owned(spec.clone()), *factor))
+            Ok((CowVector::Owned(spec), factor))
         } else {
             std::mem::drop(shard);
             let teff = self.grid.teff.get(i)?;
             let m = self.grid.m.get(j)?;
             let logg = self.grid.logg.get(k)?;
             let (spec, factor) = read_spectrum(&self.dir, teff, m, logg, self.includes_factor)?;
-            let mut shard = self.shards[shard_idx].lock().unwrap();
+            let mut shard = self.shards[shard_idx].write().unwrap();
             shard.put((i, j, k), (spec.clone(), factor.unwrap_or(1.0)));
             Ok((CowVector::Owned(spec), factor.unwrap_or(1.0)))
         }
