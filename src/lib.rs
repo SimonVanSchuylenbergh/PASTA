@@ -6,7 +6,6 @@ mod interpolate;
 mod model_fetchers;
 mod particleswarm;
 
-use crate::particleswarm::PSOBounds;
 use anyhow::Result;
 use convolve_rv::{
     shift_and_resample, FixedTargetDispersion, NoConvolutionDispersionTarget,
@@ -20,10 +19,8 @@ use fitting::{
     LinearModelFitter, ObservedSpectrum, OptimizationResult, PSOSettings as FittingPSOSettings,
 };
 use indicatif::ProgressBar;
-use interpolate::{FluxFloat, GridInterpolator, Interpolator};
-use model_fetchers::{
-    read_npy_file, CachedFetcher, InMemFetcher, OnDiskFetcher,
-};
+use interpolate::{GridBounds, FluxFloat, GridInterpolator, Interpolator};
+use model_fetchers::{read_npy_file, CachedFetcher, InMemFetcher, OnDiskFetcher};
 use nalgebra as na;
 use nalgebra::Storage;
 use npy::to_file;
@@ -692,6 +689,8 @@ macro_rules! implement_methods {
                 observed_flux: PyArrayLike<FluxFloat, Ix1>,
                 observed_var: PyArrayLike<FluxFloat, Ix1>,
                 settings: PSOSettings,
+                vsini_range: (f64, f64),
+                rv_range: (f64, f64),
                 trace_directory: Option<String>,
                 parallelize: Option<bool>,
             ) -> PyResult<PyOptimizationResult> {
@@ -705,6 +704,8 @@ macro_rules! implement_methods {
                     &observed_spectrum.into(),
                     &fitter.0,
                     &settings.into(),
+                    vsini_range,
+                    rv_range,
                     trace_directory,
                     parallelize.unwrap_or(true),
                 );
@@ -719,6 +720,9 @@ macro_rules! implement_methods {
                 observed_flux: PyArrayLike<FluxFloat, Ix1>,
                 observed_var: PyArrayLike<FluxFloat, Ix1>,
                 settings: PSOSettings,
+                vsini_range: (f64, f64),
+                rv_range1: (f64, f64),
+                rv_range2: (f64, f64),
                 trace_directory: Option<String>,
                 parallelize: Option<bool>,
             ) -> PyResult<PyBinaryOptimizationResult> {
@@ -733,6 +737,9 @@ macro_rules! implement_methods {
                     &observed_spectrum.into(),
                     &fitter.0,
                     &settings.into(),
+                    vsini_range,
+                    rv_range1,
+                    rv_range2,
                     trace_directory,
                     parallelize.unwrap_or(true),
                 );
@@ -746,6 +753,8 @@ macro_rules! implement_methods {
                 observed_fluxes: Vec<Vec<FluxFloat>>,
                 observed_vars: Vec<Vec<FluxFloat>>,
                 settings: PSOSettings,
+                vsini_range: (f64, f64),
+                rv_range: (f64, f64),
             ) -> PyResult<Vec<PyOptimizationResult>> {
                 let pso_settings: fitting::PSOSettings = settings.into();
                 Ok(observed_fluxes
@@ -759,6 +768,8 @@ macro_rules! implement_methods {
                             &observed_spectrum.into(),
                             &fitter.0,
                             &pso_settings,
+                            vsini_range,
+                            rv_range,
                             None,
                             false,
                         );
@@ -774,6 +785,8 @@ macro_rules! implement_methods {
                 observed_fluxs: Vec<Vec<FluxFloat>>,
                 observed_vars: Vec<Vec<FluxFloat>>,
                 settings: PSOSettings,
+                vsini_range: (f64, f64),
+                rv_range: (f64, f64),
             ) -> PyResult<Vec<PyOptimizationResult>> {
                 let pso_settings: fitting::PSOSettings = settings.into();
                 Ok(fitters
@@ -789,6 +802,8 @@ macro_rules! implement_methods {
                             &observed_spectrum.into(),
                             &fitter.0,
                             &pso_settings,
+                            vsini_range,
+                            rv_range,
                             None,
                             false,
                         );
@@ -900,18 +915,10 @@ macro_rules! implement_methods {
             }
 
             /// Clamp a single parameter to the bounds of the grid
-            pub fn clamp_1d(
-                &self,
-                teff: f64,
-                m: f64,
-                logg: f64,
-                vsini: f64,
-                rv: f64,
-                index: usize,
-            ) -> f64 {
+            pub fn clamp_1d(&self, teff: f64, m: f64, logg: f64, index: usize) -> f64 {
                 self.interpolator
-                    .bounds_single()
-                    .clamp_1d(na::Vector5::new(teff, m, logg, vsini, rv), index)
+                    .grid_bounds()
+                    .clamp_1d(na::Vector3::new(teff, m, logg), index)
                     .unwrap()
             }
 
@@ -1015,20 +1022,8 @@ pub struct OnDiskInterpolator {
 #[pymethods]
 impl OnDiskInterpolator {
     #[new]
-    pub fn new(
-        dir: &str,
-        includes_factor: bool,
-        wavelength: WlGrid,
-        vsini_range: Option<(f64, f64)>,
-        rv_range: Option<(f64, f64)>,
-    ) -> Self {
-        let fetcher = OnDiskFetcher::new(
-            dir,
-            includes_factor,
-            vsini_range.unwrap_or((1.0, 600.0)),
-            rv_range.unwrap_or((-150.0, 150.0)),
-        )
-        .unwrap();
+    pub fn new(dir: &str, includes_factor: bool, wavelength: WlGrid) -> Self {
+        let fetcher = OnDiskFetcher::new(dir, includes_factor).unwrap();
         Self {
             interpolator: GridInterpolator::new(fetcher, wavelength.0),
         }
@@ -1042,8 +1037,6 @@ pub struct InMemInterpolator {
     dir: String,
     includes_factor: bool,
     wavelength: WlGrid,
-    vsini_range: Option<(f64, f64)>,
-    rv_range: Option<(f64, f64)>,
 }
 
 /// Interpolator where all spectra have been loaded into memory.
@@ -1055,30 +1048,16 @@ pub struct LoadedInMemInterpolator {
 #[pymethods]
 impl InMemInterpolator {
     #[new]
-    pub fn new(
-        dir: &str,
-        includes_factor: bool,
-        wavelength: WlGrid,
-        vsini_range: Option<(f64, f64)>,
-        rv_range: Option<(f64, f64)>,
-    ) -> Self {
+    pub fn new(dir: &str, includes_factor: bool, wavelength: WlGrid) -> Self {
         Self {
             dir: dir.to_string(),
             includes_factor,
             wavelength,
-            vsini_range,
-            rv_range,
         }
     }
 
     fn load(&self) -> LoadedInMemInterpolator {
-        let fetcher = InMemFetcher::new(
-            &self.dir,
-            self.includes_factor,
-            self.vsini_range.unwrap_or((1.0, 600.0)),
-            self.rv_range.unwrap_or((-150.0, 150.0)),
-        )
-        .unwrap();
+        let fetcher = InMemFetcher::new(&self.dir, self.includes_factor).unwrap();
         LoadedInMemInterpolator {
             interpolator: GridInterpolator::new(fetcher, self.wavelength.0),
         }
@@ -1098,16 +1077,12 @@ impl CachedInterpolator {
         dir: &str,
         includes_factor: bool,
         wavelength: WlGrid,
-        vsini_range: Option<(f64, f64)>,
-        rv_range: Option<(f64, f64)>,
         lrucap: Option<usize>,
         n_shards: Option<usize>,
     ) -> Self {
         let fetcher = CachedFetcher::new(
             dir,
             includes_factor,
-            vsini_range.unwrap_or((1.0, 600.0)),
-            rv_range.unwrap_or((-150.0, 150.0)),
             lrucap.unwrap_or(4000),
             n_shards.unwrap_or(4),
         )
@@ -1121,11 +1096,9 @@ impl CachedInterpolator {
     }
 }
 
-
 implement_methods!(OnDiskInterpolator, interpolators::OnDiskInterpolator);
 implement_methods!(LoadedInMemInterpolator, interpolators::InMemInterpolator);
 implement_methods!(CachedInterpolator, interpolators::CachedInterpolator);
-
 
 #[pyfunction]
 pub fn get_vsini_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<FluxFloat> {

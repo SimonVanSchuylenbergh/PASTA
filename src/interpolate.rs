@@ -4,7 +4,7 @@ use crate::particleswarm::PSOBounds;
 use anyhow::{anyhow, bail, Context, Result};
 use argmin_math::ArgminRandom;
 use itertools::Itertools;
-use nalgebra as na;
+use nalgebra::{self as na};
 use rand::Rng;
 use std::iter::once;
 
@@ -50,6 +50,179 @@ impl<'a> CowVector<'a> {
             CowVector::Borrowed(view) => view.fixed_rows::<N>(start),
             CowVector::Owned(vec) => vec.fixed_rows::<N>(start),
         }
+    }
+}
+
+pub trait GridBounds: Clone {
+    fn limits(&self) -> (na::SVector<f64, 3>, na::SVector<f64, 3>);
+    fn is_within_bounds(&self, param: na::SVector<f64, 3>) -> bool;
+    fn clamp_1d(&self, param: na::SVector<f64, 3>, index: usize) -> Result<f64>;
+}
+
+#[derive(Clone)]
+pub struct GridBoundsSingle<B: GridBounds> {
+    grid: B,
+    vsini_range: (f64, f64),
+    rv_range: (f64, f64),
+}
+
+impl<B: GridBounds> GridBoundsSingle<B> {
+    fn new(grid: B, vsini_range: (f64, f64), rv_range: (f64, f64)) -> Self {
+        Self {
+            grid,
+            vsini_range,
+            rv_range,
+        }
+    }
+}
+
+impl<B: GridBounds> PSOBounds<5> for GridBoundsSingle<B> {
+    fn limits(&self) -> (nalgebra::SVector<f64, 5>, nalgebra::SVector<f64, 5>) {
+        let (min, max) = self.grid.limits();
+        (
+            nalgebra::SVector::from_iterator(
+                min.iter()
+                    .copied()
+                    .chain(once(self.vsini_range.0))
+                    .chain(once(self.rv_range.0)),
+            ),
+            nalgebra::SVector::from_iterator(
+                max.iter()
+                    .copied()
+                    .chain(once(self.vsini_range.1))
+                    .chain(once(self.rv_range.1)),
+            ),
+        )
+    }
+
+    fn clamp_1d(&self, param: nalgebra::SVector<f64, 5>, index: usize) -> Result<f64> {
+        match index {
+            3 => Ok(param[3].clamp(self.vsini_range.0, self.vsini_range.1)),
+            4 => Ok(param[4].clamp(self.rv_range.0, self.rv_range.1)),
+            i => self.grid.clamp_1d(param.fixed_rows::<3>(0).into_owned(), i),
+        }
+    }
+
+    fn generate_random_within_bounds(
+        &self,
+        rng: &mut impl Rng,
+        num_particles: usize,
+    ) -> Vec<nalgebra::SVector<f64, 5>> {
+        let mut particles = Vec::with_capacity(num_particles);
+        let (min, max) = self.limits();
+        while particles.len() < num_particles {
+            let param = na::SVector::rand_from_range(&min, &max, rng);
+            if self
+                .grid
+                .is_within_bounds(param.fixed_rows::<3>(0).into_owned())
+            {
+                particles.push(param);
+            }
+        }
+        particles
+    }
+}
+
+#[derive(Clone)]
+pub struct GridBoundsBinary<B: GridBounds> {
+    grid: B,
+    light_ratio: (f64, f64),
+    vsini_range: (f64, f64),
+    rv_range1: (f64, f64),
+    rv_range2: (f64, f64),
+}
+
+impl<B: GridBounds> GridBoundsBinary<B> {
+    fn new(
+        grid: B,
+        light_ratio: (f64, f64),
+        vsini_range: (f64, f64),
+        rv_range1: (f64, f64),
+        rv_range2: (f64, f64),
+    ) -> Self {
+        Self {
+            grid,
+            light_ratio,
+            vsini_range,
+            rv_range1,
+            rv_range2,
+        }
+    }
+
+    fn get_first_grid(&self) -> GridBoundsSingle<B> {
+        GridBoundsSingle::new(self.grid.clone(), self.vsini_range, self.rv_range1)
+    }
+
+    fn get_second_grid(&self) -> GridBoundsSingle<B> {
+        GridBoundsSingle::new(self.grid.clone(), self.vsini_range, self.rv_range2)
+    }
+}
+
+impl<B: GridBounds> PSOBounds<11> for GridBoundsBinary<B> {
+    fn limits(&self) -> (na::SVector<f64, 11>, na::SVector<f64, 11>) {
+        let (min, max) = self.grid.limits();
+        (
+            na::SVector::from_iterator(
+                min.iter()
+                    .copied()
+                    .chain(once(self.vsini_range.0))
+                    .chain(once(self.rv_range1.0))
+                    .chain(min.iter().copied())
+                    .chain(once(self.vsini_range.0))
+                    .chain(once(self.rv_range2.0))
+                    .chain(once(self.light_ratio.0)),
+            ),
+            na::SVector::from_iterator(
+                max.iter()
+                    .copied()
+                    .chain(once(self.vsini_range.1))
+                    .chain(once(self.rv_range1.1))
+                    .chain(max.iter().copied())
+                    .chain(once(self.vsini_range.1))
+                    .chain(once(self.rv_range2.1))
+                    .chain(once(self.light_ratio.1)),
+            ),
+        )
+    }
+
+    fn clamp_1d(&self, param: na::SVector<f64, 11>, index: usize) -> Result<f64> {
+        let grid1 = self.get_first_grid();
+        let grid2 = self.get_second_grid();
+        if index < 5 {
+            grid1.clamp_1d(param.fixed_rows::<5>(0).into_owned(), index)
+        } else if index < 10 {
+            grid2.clamp_1d(param.fixed_rows::<5>(5).into_owned(), index - 5)
+        } else {
+            Ok(param[10].max(self.light_ratio.0).min(self.light_ratio.1))
+        }
+    }
+
+    fn generate_random_within_bounds(
+        &self,
+        rng: &mut impl Rng,
+        num_particles: usize,
+    ) -> Vec<na::SVector<f64, 11>> {
+        let grid1 = self.get_first_grid();
+        let grid2 = self.get_second_grid();
+        let first = grid1.generate_random_within_bounds(rng, num_particles);
+        let second = grid2.generate_random_within_bounds(rng, num_particles);
+        let light_ratios = (0..num_particles)
+            .map(|_| rng.gen_range(self.light_ratio.0..self.light_ratio.1))
+            .collect::<Vec<f64>>();
+        first
+            .into_iter()
+            .zip(second)
+            .zip(light_ratios)
+            .map(|((first, second), light_ratio)| {
+                na::SVector::from_iterator(
+                    first
+                        .iter()
+                        .copied()
+                        .chain(second.iter().copied())
+                        .chain(once(light_ratio)),
+                )
+            })
+            .collect()
     }
 }
 
@@ -151,7 +324,8 @@ impl Range {
     pub fn get(&self, i: usize) -> Result<f64> {
         self.values
             .get(i)
-            .ok_or_else(|| anyhow!("Index out of bounds ({})", i)).copied()
+            .ok_or_else(|| anyhow!("Index out of bounds ({})", i))
+            .copied()
     }
 
     pub fn n(&self) -> usize {
@@ -171,16 +345,10 @@ pub struct Grid {
     pub logg_limits: Vec<(usize, usize)>, // For every Teff value, the min and max logg index
     // For every Teff value, the number of (teff, logg) pairs with lower Teff
     pub cumulative_grid_size: Vec<usize>,
-    pub vsini: (f64, f64),
-    pub rv: (f64, f64),
 }
 
 impl Grid {
-    pub fn new(
-        model_labels: Vec<(f64, f64, f64)>,
-        vsini: (f64, f64),
-        rv: (f64, f64),
-    ) -> Result<Self> {
+    pub fn new(model_labels: Vec<(f64, f64, f64)>) -> Result<Self> {
         let mut teffs = Vec::new();
         let mut ms = Vec::new();
         let mut loggs = Vec::new();
@@ -243,28 +411,7 @@ impl Grid {
             logg: Range { values: loggs },
             logg_limits,
             cumulative_grid_size,
-            vsini,
-            rv,
         })
-    }
-
-    pub fn minmax(&self) -> (na::SVector<f64, 5>, na::SVector<f64, 5>) {
-        (
-            na::Vector5::new(
-                *self.teff.values.first().unwrap(),
-                *self.m.values.first().unwrap(),
-                *self.logg.values.first().unwrap(),
-                self.vsini.0,
-                self.rv.0,
-            ),
-            na::Vector5::new(
-                *self.teff.values.last().unwrap(),
-                *self.m.values.last().unwrap(),
-                *self.logg.values.last().unwrap(),
-                self.vsini.1,
-                self.rv.1,
-            ),
-        )
     }
 
     pub fn list_gridpoints(&self) -> Vec<[f64; 3]> {
@@ -305,22 +452,6 @@ impl Grid {
 
     pub fn is_m_between_bounds(&self, m: f64) -> bool {
         m >= self.m.values[0] && m <= *self.m.values.last().unwrap()
-    }
-
-    pub fn is_vsini_between_bounds(&self, vsini: f64) -> bool {
-        vsini >= self.vsini.0 && vsini <= self.vsini.1
-    }
-
-    pub fn is_rv_between_bounds(&self, rv: f64) -> bool {
-        rv >= self.rv.0 && rv <= self.rv.1
-    }
-
-    pub fn is_within_bounds(&self, param: na::SVector<f64, 5>) -> bool {
-        // When the parameters are not in the rectangular grid:
-        self.is_rv_between_bounds(param[4])
-            && self.is_vsini_between_bounds(param[3])
-            && self.is_m_between_bounds(param[1])
-            && self.is_teff_logg_between_bounds(param[0], param[2])
     }
 
     pub fn get_logg_index_limits_at(&self, teff: f64) -> Result<(usize, usize)> {
@@ -477,27 +608,23 @@ impl Grid {
     }
 }
 
-impl PSOBounds<5> for Grid {
-    fn limits(&self) -> (na::SVector<f64, 5>, na::SVector<f64, 5>) {
+impl GridBounds for Grid {
+    fn limits(&self) -> (na::SVector<f64, 3>, na::SVector<f64, 3>) {
         (
-            na::Vector5::new(
+            na::Vector3::new(
                 *self.teff.values.first().unwrap(),
                 *self.m.values.first().unwrap(),
                 *self.logg.values.first().unwrap(),
-                self.vsini.0,
-                self.rv.0,
             ),
-            na::Vector5::new(
+            na::Vector3::new(
                 *self.teff.values.last().unwrap(),
                 *self.m.values.last().unwrap(),
                 *self.logg.values.last().unwrap(),
-                self.vsini.1,
-                self.rv.1,
             ),
         )
     }
 
-    fn clamp_1d(&self, param: na::SVector<f64, 5>, index: usize) -> Result<f64> {
+    fn clamp_1d(&self, param: na::SVector<f64, 3>, index: usize) -> Result<f64> {
         let bound = match index {
             0 => {
                 // Avoid doing more expensive checks if the parameter is already within bounds
@@ -517,91 +644,14 @@ impl PSOBounds<5> for Grid {
                     .context(anyhow!("Cannot clamp logg at Teff={}", param[0]))?;
                 (self.logg.get(left_index)?, self.logg.get(right_index)?)
             }
-            3 => self.vsini,
-            4 => self.rv,
             _ => panic!("Index out of bounds"),
         };
-        Ok(param[index].max(bound.0).min(bound.1))
+        Ok(param[index].clamp(bound.0, bound.1))
     }
 
-    fn generate_random_within_bounds(
-        &self,
-        rng: &mut impl Rng,
-        num_particles: usize,
-    ) -> Vec<na::SVector<f64, 5>> {
-        let mut particles = Vec::with_capacity(num_particles);
-        let (min, max) = self.minmax();
-        while particles.len() < num_particles {
-            let param = na::SVector::rand_from_range(&min, &max, rng);
-            if self.is_within_bounds(param) {
-                particles.push(param);
-            }
-        }
-        particles
-    }
-}
-
-#[derive(Clone)]
-pub struct BinaryGrid {
-    pub grid: Grid,
-    pub light_ratio: (f64, f64),
-}
-
-impl PSOBounds<11> for BinaryGrid {
-    fn limits(&self) -> (na::SVector<f64, 11>, na::SVector<f64, 11>) {
-        let (min, max) = self.grid.limits();
-        (
-            na::SVector::from_iterator(
-                min.iter()
-                    .copied()
-                    .chain(min.iter().copied())
-                    .chain(once(self.light_ratio.0)),
-            ),
-            na::SVector::from_iterator(
-                max.iter()
-                    .copied()
-                    .chain(max.iter().copied())
-                    .chain(once(self.light_ratio.1)),
-            ),
-        )
-    }
-
-    fn clamp_1d(&self, param: na::SVector<f64, 11>, index: usize) -> Result<f64> {
-        if index < 5 {
-            self.grid
-                .clamp_1d(param.fixed_rows::<5>(0).into_owned(), index)
-        } else if index < 10 {
-            self.grid
-                .clamp_1d(param.fixed_rows::<5>(5).into_owned(), index - 5)
-        } else {
-            Ok(param[10].max(self.light_ratio.0).min(self.light_ratio.1))
-        }
-    }
-
-    fn generate_random_within_bounds(
-        &self,
-        rng: &mut impl Rng,
-        num_particles: usize,
-    ) -> Vec<na::SVector<f64, 11>> {
-        let first = self.grid.generate_random_within_bounds(rng, num_particles);
-        let second = self.grid.generate_random_within_bounds(rng, num_particles);
-        let light_ratios = (0..num_particles)
-            .map(|_| rng.gen_range(self.light_ratio.0..self.light_ratio.1))
-            .collect::<Vec<f64>>();
-        first
-            .into_iter()
-            .zip(second)
-            .zip(light_ratios)
-            .map(|((first, second), light_ratio)| {
-                na::SVector::from_iterator(
-                    first
-                        .iter()
-                        .copied()
-                        .chain(second.iter().copied())
-                        .chain(once(light_ratio)),
-                )
-            })
-            .collect()
+    fn is_within_bounds(&self, param: na::SVector<f64, 3>) -> bool {
+        // When the parameters are not in the rectangular grid:
+        self.is_m_between_bounds(param[1]) & self.is_teff_logg_between_bounds(param[0], param[2])
     }
 }
 
@@ -649,12 +699,31 @@ impl WlGrid {
 }
 
 pub trait Interpolator: Send + Sync {
-    type BS: PSOBounds<5>; // Bounds for single star
-    type BB: PSOBounds<11>; // Bounds for binary star
+    type GB: GridBounds;
 
     fn synth_wl(&self) -> WlGrid;
-    fn bounds_single(&self) -> Self::BS;
-    fn bounds_binary(&self) -> Self::BB;
+    fn grid_bounds(&self) -> Self::GB;
+    fn bounds_single(
+        &self,
+        vsini_range: (f64, f64),
+        rv_range: (f64, f64),
+    ) -> GridBoundsSingle<Self::GB> {
+        GridBoundsSingle::new(self.grid_bounds(), vsini_range, rv_range)
+    }
+    fn bounds_binary(
+        &self,
+        vsini_range: (f64, f64),
+        rv_range1: (f64, f64),
+        rv_range2: (f64, f64),
+    ) -> GridBoundsBinary<Self::GB> {
+        GridBoundsBinary::new(
+            self.grid_bounds(),
+            (0.0, 1.0),
+            vsini_range,
+            rv_range1,
+            rv_range2,
+        )
+    }
     fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<na::DVector<FluxFloat>>;
     fn produce_model(
         &self,
@@ -777,20 +846,13 @@ impl<F: ModelFetcher> GridInterpolator<F> {
 const BATCH_SIZE: usize = 128;
 
 impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
-    type BS = Grid;
-    type BB = BinaryGrid;
+    type GB = Grid;
 
+    fn grid_bounds(&self) -> Self::GB {
+        self.fetcher.grid().clone()
+    }
     fn synth_wl(&self) -> WlGrid {
         self.synth_wl
-    }
-    fn bounds_single(&self) -> Grid {
-        self.grid().clone()
-    }
-    fn bounds_binary(&self) -> BinaryGrid {
-        BinaryGrid {
-            grid: self.grid().clone(),
-            light_ratio: (0.0, 1.0),
-        }
     }
     fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<na::DVector<FluxFloat>> {
         let local_grid = self.grid().get_local_grid(teff, m, logg)?;

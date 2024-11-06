@@ -4,11 +4,11 @@ use indicatif::ProgressBar;
 use nalgebra as na;
 use npy::NpyData;
 use rayon::prelude::*;
+use std::cmp::Eq;
+use std::collections::VecDeque;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::collections::VecDeque;
-use std::cmp::Eq;
 
 pub fn read_npy_file(file_path: PathBuf) -> Result<Vec<u16>> {
     let mut file = std::fs::File::open(file_path.clone())
@@ -40,14 +40,11 @@ pub fn read_spectrum(
         let bytes2 = result[1].to_le_bytes();
         let factor = f32::from_le_bytes([bytes1[0], bytes1[1], bytes2[0], bytes2[1]]);
         Ok((
-            na::DVector::from_iterator(result.len()-2, result.into_iter().skip(2)),
+            na::DVector::from_iterator(result.len() - 2, result.into_iter().skip(2)),
             Some(factor),
         ))
     } else {
-        Ok((
-            na::DVector::from_iterator(result.len(), result),
-            None,
-        ))
+        Ok((na::DVector::from_iterator(result.len(), result), None))
     }
 }
 
@@ -86,14 +83,9 @@ pub struct OnDiskFetcher {
 }
 
 impl OnDiskFetcher {
-    pub fn new(
-        dir: &str,
-        includes_factor: bool,
-        vsini_range: (f64, f64),
-        rv_range: (f64, f64),
-    ) -> Result<Self> {
+    pub fn new(dir: &str, includes_factor: bool) -> Result<Self> {
         let model_labels = get_model_labels_in_dir(&PathBuf::from(dir))?;
-        let grid = Grid::new(model_labels, vsini_range, rv_range)?;
+        let grid = Grid::new(model_labels)?;
         Ok(Self {
             dir: PathBuf::from(dir),
             grid,
@@ -155,14 +147,9 @@ fn load_spectra(
 }
 
 impl InMemFetcher {
-    pub fn new(
-        dir: &str,
-        includes_factor: bool,
-        vsini_range: (f64, f64),
-        rv_range: (f64, f64),
-    ) -> Result<Self> {
+    pub fn new(dir: &str, includes_factor: bool) -> Result<Self> {
         let model_labels = get_model_labels_in_dir(&PathBuf::from(dir))?;
-        let grid = Grid::new(model_labels, vsini_range, rv_range)?;
+        let grid = Grid::new(model_labels)?;
         let (loaded_spectra, factors) = load_spectra(PathBuf::from(dir), includes_factor, &grid)?;
         let n = loaded_spectra.shape().0;
         Ok(Self {
@@ -189,17 +176,16 @@ impl ModelFetcher for InMemFetcher {
     }
 }
 
-
 pub struct Cache<K: Eq, V: Clone> {
     queue: VecDeque<(K, V)>,
-    cap: usize
+    cap: usize,
 }
 
 impl<K: Eq, V: Clone> Cache<K, V> {
     fn new(cap: usize) -> Self {
         Self {
             queue: VecDeque::new(),
-            cap
+            cap,
         }
     }
 
@@ -233,22 +219,11 @@ pub struct CachedFetcher {
 }
 
 impl CachedFetcher {
-    pub fn new(
-        dir: &str,
-        includes_factor: bool,
-        vsini_range: (f64, f64),
-        rv_range: (f64, f64),
-        lrucap: usize,
-        n_shards: usize,
-    ) -> Result<Self> {
+    pub fn new(dir: &str, includes_factor: bool, lrucap: usize, n_shards: usize) -> Result<Self> {
         let model_labels = get_model_labels_in_dir(&PathBuf::from(dir))?;
-        let grid = Grid::new(model_labels, vsini_range, rv_range)?;
+        let grid = Grid::new(model_labels)?;
         let shards = (0..n_shards)
-            .map(|_| {
-                Arc::new(RwLock::new(Cache::new(
-                    lrucap / n_shards,
-                )))
-            })
+            .map(|_| Arc::new(RwLock::new(Cache::new(lrucap / n_shards))))
             .collect();
         Ok(Self {
             dir: PathBuf::from(dir),

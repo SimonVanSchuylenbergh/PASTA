@@ -1,5 +1,5 @@
 use crate::convolve_rv::WavelengthDispersion;
-use crate::interpolate::{FluxFloat, Interpolator};
+use crate::interpolate::{FluxFloat, GridBoundsBinary, GridBoundsSingle, Interpolator};
 use crate::particleswarm::{self, PSOBounds};
 use anyhow::{anyhow, Context, Result};
 use argmin::core::observers::{Observe, ObserverMode};
@@ -509,10 +509,12 @@ fn get_pso_fitter<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitt
     observed_spectrum: &'a ObservedSpectrum,
     continuum_fitter: &'a F,
     settings: &PSOSettings,
+    vsini_range: (f64, f64),
+    rv_range: (f64, f64),
     parallelize: bool,
 ) -> Executor<
     FitCostFunction<'a, I, T, F>,
-    particleswarm::ParticleSwarm<5, I::BS, f64>,
+    particleswarm::ParticleSwarm<5, GridBoundsSingle<I::GB>, f64>,
     PopulationState<particleswarm::Particle<na::SVector<f64, 5>, f64>, f64>,
 > {
     let cost_function = FitCostFunction {
@@ -522,7 +524,7 @@ fn get_pso_fitter<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitt
         continuum_fitter,
         parallelize,
     };
-    let bounds = interpolator.bounds_single().clone();
+    let bounds = interpolator.bounds_single(vsini_range, rv_range).clone();
     let solver = particleswarm::ParticleSwarm::new(bounds, settings.num_particles)
         .with_inertia_factor(settings.inertia_factor)
         .unwrap()
@@ -548,10 +550,13 @@ fn get_binary_pso_fitter<
     observed_spectrum: &'a ObservedSpectrum,
     continuum_fitter: &'a F,
     settings: &PSOSettings,
+    vsini_range: (f64, f64),
+    rv_range1: (f64, f64),
+    rv_range2: (f64, f64),
     parallelize: bool,
 ) -> Executor<
     BinaryFitCostFunction<'a, I1, I2, T, F>,
-    particleswarm::ParticleSwarm<11, I1::BB, f64>,
+    particleswarm::ParticleSwarm<11, GridBoundsBinary<I1::GB>, f64>,
     PopulationState<particleswarm::Particle<na::SVector<f64, 11>, f64>, f64>,
 > {
     let cost_function = BinaryFitCostFunction {
@@ -562,7 +567,9 @@ fn get_binary_pso_fitter<
         continuum_fitter,
         parallelize,
     };
-    let bounds = interpolator.bounds_binary().clone();
+    let bounds = interpolator
+        .bounds_binary(vsini_range, rv_range1, rv_range2)
+        .clone();
     let solver = particleswarm::ParticleSwarm::new(bounds, settings.num_particles)
         .with_inertia_factor(settings.inertia_factor)
         .unwrap()
@@ -694,6 +701,8 @@ pub fn fit_pso(
     observed_spectrum: &ObservedSpectrum,
     continuum_fitter: &impl ContinuumFitter,
     settings: &PSOSettings,
+    vsini_range: (f64, f64),
+    rv_range: (f64, f64),
     trace_directory: Option<String>,
     parallelize: bool,
 ) -> Result<OptimizationResult> {
@@ -703,6 +712,8 @@ pub fn fit_pso(
         observed_spectrum,
         continuum_fitter,
         settings,
+        vsini_range,
+        rv_range,
         parallelize,
     );
     let result = if let Some(dir) = trace_directory {
@@ -753,6 +764,9 @@ pub fn fit_pso_binary_norm(
     observed_spectrum: &ObservedSpectrum,
     continuum_fitter: &impl ContinuumFitter,
     settings: &PSOSettings,
+    vsini_range: (f64, f64),
+    rv_range1: (f64, f64),
+    rv_range2: (f64, f64),
     trace_directory: Option<String>,
     parallelize: bool,
 ) -> Result<BinaryOptimizationResult> {
@@ -763,6 +777,9 @@ pub fn fit_pso_binary_norm(
         observed_spectrum,
         continuum_fitter,
         settings,
+        vsini_range,
+        rv_range1,
+        rv_range2,
         parallelize,
     );
     let result = if let Some(dir) = trace_directory {
@@ -889,7 +906,8 @@ pub fn uncertainty_chi2<I: Interpolator>(
     let target_chi = best_chi2 * (1.0 + (2.0 / n).sqrt());
 
     Ok(core::array::from_fn(|i| {
-        let bounds = interpolator.bounds_single().clone();
+        // Maybe don't hardcode here
+        let bounds = interpolator.bounds_single((0.0, 1e4), (-1e3, 1e3)).clone();
 
         let get_bound = |right: bool| {
             let costfunction = ModelFitCost {

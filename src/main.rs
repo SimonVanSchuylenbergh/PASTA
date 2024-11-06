@@ -15,7 +15,7 @@ use convolve_rv::{
 };
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
 use fitting::{fit_pso, uncertainty_chi2, ChunkFitter, ContinuumFitter, PSOSettings};
-use interpolate::{Interpolator, Range, WlGrid};
+use interpolate::{GridBounds, Interpolator, Range, WlGrid};
 use iter_num_tools::arange;
 use itertools::Itertools;
 use model_fetchers::{CachedFetcher, InMemFetcher, OnDiskFetcher};
@@ -48,15 +48,15 @@ pub fn main() -> Result<()> {
     let wl_grid = WlGrid::Logspace(3.6020599913, 2e-6, 76_145);
     let interpolator1 = GridInterpolator::new(
         // OnDiskFetcher::new(folder, (1.0, 600.0), (-150.0, 150.0))?,
-        CachedFetcher::new(folder, false, (1.0, 600.0), (-150.0, 150.0), 3000, 1)?,
+        CachedFetcher::new(folder, false, 3000, 1)?,
         wl_grid,
     );
 
     println!(
         "{}",
         interpolator1
-            .bounds_single()
-            .clamp_1d(na::Vector5::new(35_000.0, 0.0, 2.99, 5.0, 0.0), 0)?
+            .grid_bounds()
+            .clamp_1d(na::Vector3::new(35_000.0, 0.0, 2.99), 0)?
     );
 
     let wl = read_npy_file("wl_hermes.npy".into())?;
