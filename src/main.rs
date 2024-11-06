@@ -18,7 +18,7 @@ use fitting::{fit_pso, uncertainty_chi2, ChunkFitter, ContinuumFitter, PSOSettin
 use interpolate::{Interpolator, Range, WlGrid};
 use iter_num_tools::arange;
 use itertools::Itertools;
-use model_fetchers::{CachedFetcher, FullyCachedFetcher, InMemFetcher, OnDiskFetcher};
+use model_fetchers::{CachedFetcher, InMemFetcher, OnDiskFetcher};
 use nalgebra as na;
 use npy::NpyData;
 use particleswarm::PSOBounds;
@@ -49,7 +49,6 @@ pub fn main() -> Result<()> {
     let interpolator1 = GridInterpolator::new(
         // OnDiskFetcher::new(folder, (1.0, 600.0), (-150.0, 150.0))?,
         CachedFetcher::new(folder, false, (1.0, 600.0), (-150.0, 150.0), 3000, 1)?,
-        // FullyCachedFetcher::new(folder, (1.0, 600.0), (-150.0, 150.0))?,
         wl_grid,
     );
 
