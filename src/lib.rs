@@ -1,3 +1,4 @@
+#![allow(non_snake_case, clippy::too_many_arguments, non_upper_case_globals)]
 mod convolve_rv;
 mod cubic;
 mod fitting;
@@ -224,7 +225,7 @@ impl PyWavelengthDispersion {
                     .map(|x| (x as FluxFloat) / 65535.0 * factor);
                 let convolved = self.0.convolve(spectrum_float).unwrap();
                 let resampled =
-                    shift_and_resample(&convolved, input_wavelength.0, &self.0.wavelength(), 0.0)
+                    shift_and_resample(&convolved, input_wavelength.0, self.0.wavelength(), 0.0)
                         .unwrap();
 
                 let max = resampled.max();
@@ -245,11 +246,11 @@ impl PyWavelengthDispersion {
                 let spectrum_float = arr.map(|x| (x as FluxFloat) / 65535.0);
                 let convolved = self.0.convolve(spectrum_float).unwrap();
                 let resampled =
-                    shift_and_resample(&convolved, input_wavelength.0, &self.0.wavelength(), 0.0)
+                    shift_and_resample(&convolved, input_wavelength.0, self.0.wavelength(), 0.0)
                         .unwrap();
                 let resampled_u16 = resampled
                     .into_iter()
-                    .map(|x| (x.min(1.0).max(0.0) * 65535.0) as u16)
+                    .map(|x| (x.clamp(0.0, 1.0) * 65535.0) as u16)
                     .collect::<Vec<_>>();
                 to_file(out_file, resampled_u16).unwrap();
             };

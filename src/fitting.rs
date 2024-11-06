@@ -133,7 +133,7 @@ fn map_range<F: Float>(x: F, from_low: F, from_high: F, to_low: F, to_high: F, c
 
 /// Chunk blending function
 fn poly_blend(x: FluxFloat) -> FluxFloat {
-    let x_c = x.max(0.0).min(1.0);
+    let x_c = x.clamp(0.0, 1.0);
     let s = FluxFloat::sin(x_c * std::f32::consts::PI / 2.0);
     s * s
 }
@@ -265,7 +265,7 @@ impl ChunkFitter {
         synthetic_spectrum: &na::DVector<FluxFloat>,
     ) -> (Vec<na::DVector<FluxFloat>>, na::DVector<FluxFloat>) {
         let y = &observed_spectrum.flux.component_div(synthetic_spectrum);
-        let pfits = self._fit_chunks(&y);
+        let pfits = self._fit_chunks(y);
         let continuum = self.build_continuum_from_chunks(pfits.clone());
         (pfits, continuum)
     }
@@ -299,8 +299,7 @@ impl ContinuumFitter for ChunkFitter {
             .data
             .as_vec()
             .chunks(self.p_order + 1)
-            .into_iter()
-            .map(|x| na::DVector::from_row_slice(x))
+            .map(na::DVector::from_row_slice)
             .collect();
         Ok(self.build_continuum_from_chunks(pfits))
     }
@@ -870,8 +869,8 @@ pub fn uncertainty_chi2<I: Interpolator>(
     label: na::SVector<f64, 5>,
     search_radius: na::SVector<f64, 5>,
 ) -> Result<[(Result<f64>, Result<f64>); 5]> {
-    let mut search_radius = search_radius.clone();
-    search_radius[0] = label[0] * search_radius[0];
+    let mut search_radius = search_radius;
+    search_radius[0] *= label[0];
     search_radius[3] = (label[3] * search_radius[3]).max(100.0);
     let best_synth_spec = interpolator.produce_model(
         target_dispersion,

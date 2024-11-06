@@ -115,7 +115,7 @@ impl Range {
                         i,
                         limits
                     ))
-                } else if i >= right + 1 {
+                } else if i > right {
                     Err(anyhow!(
                         "Index {} out of right bound, limits={:?}",
                         i,
@@ -151,8 +151,7 @@ impl Range {
     pub fn get(&self, i: usize) -> Result<f64> {
         self.values
             .get(i)
-            .ok_or_else(|| anyhow!("Index out of bounds ({})", i))
-            .map(|x| *x)
+            .ok_or_else(|| anyhow!("Index out of bounds ({})", i)).copied()
     }
 
     pub fn n(&self) -> usize {
@@ -188,19 +187,19 @@ impl Grid {
         for (teff, m, logg) in model_labels.iter() {
             if !teffs.contains(teff) {
                 let pos = teffs
-                    .binary_search_by(|v| v.partial_cmp(&teff).unwrap())
+                    .binary_search_by(|v| v.partial_cmp(teff).unwrap())
                     .unwrap_or_else(|x| x);
                 teffs.insert(pos, *teff);
             }
             if !ms.contains(m) {
                 let pos = ms
-                    .binary_search_by(|v| v.partial_cmp(&m).unwrap())
+                    .binary_search_by(|v| v.partial_cmp(m).unwrap())
                     .unwrap_or_else(|x| x);
                 ms.insert(pos, *m);
             }
             if !loggs.contains(logg) {
                 let pos = loggs
-                    .binary_search_by(|v| v.partial_cmp(&logg).unwrap())
+                    .binary_search_by(|v| v.partial_cmp(logg).unwrap())
                     .unwrap_or_else(|x| x);
                 loggs.insert(pos, *logg);
             }
@@ -223,7 +222,7 @@ impl Grid {
         }
         // Sanity check
         for (left, right) in logg_limits.iter() {
-            if !(left <= right) {
+            if left > right {
                 bail!("Invalid logg limits");
             }
         }
@@ -591,8 +590,8 @@ impl PSOBounds<11> for BinaryGrid {
             .collect::<Vec<f64>>();
         first
             .into_iter()
-            .zip(second.into_iter())
-            .zip(light_ratios.into_iter())
+            .zip(second)
+            .zip(light_ratios)
             .map(|((first, second), light_ratio)| {
                 na::SVector::from_iterator(
                     first

@@ -1,5 +1,4 @@
-// #![allow(unused_imports)]
-// #![allow(dead_code)]
+#![allow(unused_imports, dead_code, non_upper_case_globals, unused)]
 
 mod convolve_rv;
 mod cubic;
@@ -65,7 +64,7 @@ pub fn main() -> Result<()> {
     let flux = read_npy_file("flux_hermes.npy".into())?.map(|x| x as f32);
     let var = read_npy_file("var_hermes.npy".into())?.map(|x| x as f32);
     let spec = ObservedSpectrum::from_vecs(flux.data.as_vec().clone(), var.data.as_vec().clone());
-    let fitter = ChunkFitter::new(wl.clone().into(), 10, 5, 0.2);
+    let fitter = ChunkFitter::new(wl.clone(), 10, 5, 0.2);
     let settings = PSOSettings {
         num_particles: 44,
         max_iters: 100,
@@ -74,7 +73,7 @@ pub fn main() -> Result<()> {
         social_factor: 0.5,
         delta: 1e-7,
     };
-    let dispersion = NoConvolutionDispersionTarget(wl.into());
+    let dispersion = NoConvolutionDispersionTarget(wl);
     let start = Instant::now();
     let (min_teff, max_teff) = (10_000.0, 30_000.0);
     (0..4400).into_par_iter().for_each(|i| {

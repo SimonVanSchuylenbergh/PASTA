@@ -1,14 +1,12 @@
 use crate::interpolate::{CowVector, Grid, ModelFetcher};
 use anyhow::{bail, Context, Result};
 use indicatif::ProgressBar;
-use lru::LruCache;
 use nalgebra as na;
 use npy::NpyData;
 use rayon::prelude::*;
 use std::io::Read;
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::collections::VecDeque;
 use std::cmp::Eq;
 
@@ -47,7 +45,7 @@ pub fn read_spectrum(
         ))
     } else {
         Ok((
-            na::DVector::from_iterator(result.len(), result.into_iter()),
+            na::DVector::from_iterator(result.len(), result),
             None,
         ))
     }
@@ -55,7 +53,7 @@ pub fn read_spectrum(
 
 fn labels_from_filename(filename: &str) -> Result<(f64, f64, f64)> {
     // e.g. lp0020_08000_0430.npy
-    let parts: Vec<&str> = filename.split(".").nth(0).unwrap().split('_').collect();
+    let parts: Vec<&str> = filename.split(".").next().unwrap().split('_').collect();
     if parts.len() != 3 || parts[0].len() != 6 || parts[1].len() != 5 || parts[2].len() != 4 {
         bail!("Invalid filename: {}", filename);
     }
@@ -125,7 +123,6 @@ pub struct InMemFetcher {
     pub grid: Grid,
     pub loaded_spectra: na::DMatrix<u16>,
     pub factors: Option<na::DVector<f32>>,
-    pub n: usize,
 }
 
 fn load_spectra(
@@ -172,7 +169,6 @@ impl InMemFetcher {
             grid,
             loaded_spectra,
             factors,
-            n,
         })
     }
 }
