@@ -66,7 +66,8 @@ fn labels_from_filename(filename: &str) -> Result<(f64, f64, f64)> {
 }
 
 fn get_model_labels_in_dir(dir: &PathBuf) -> Result<Vec<(f64, f64, f64)>> {
-    std::fs::read_dir(dir)?
+    std::fs::read_dir(dir)
+        .with_context(|| format!("Not found {:?}", dir))?
         .map(|entry| {
             let path = entry?.path();
             let filename = path.file_name().unwrap().to_str().unwrap();

@@ -88,23 +88,11 @@ where
     F: ArgminFloat,
 {
     pub fn with_inertia_factor(mut self, factor: F) -> Result<Self, Error> {
-        if factor < float!(0.0) {
-            return Err(argmin_error!(
-                InvalidParameter,
-                "`ParticleSwarm`: inertia factor must be >=0."
-            ));
-        }
         self.weight_inertia = factor;
         Ok(self)
     }
 
     pub fn with_cognitive_factor(mut self, factor: F) -> Result<Self, Error> {
-        if factor < float!(0.0) {
-            return Err(argmin_error!(
-                InvalidParameter,
-                "`ParticleSwarm`: cognitive factor must be >=0."
-            ));
-        }
         self.weight_cognitive = factor;
         Ok(self)
     }
@@ -265,8 +253,8 @@ where
                 if condition {
                     // forced update
                     // println!("Forced update in d={}, i={}, p={}", d, state.iter, p);
-                    particles[p].velocity[d] =
-                        random_uniform(&mut self.rng_generator, -self.delta[d], self.delta[d]);
+                    // particles[p].velocity[d] =
+                    //     random_uniform(&mut self.rng_generator, -self.delta[d], self.delta[d]);
                 } else {
                     // Regular PSO update
                     let momentum = particles[p].velocity[d] * self.weight_inertia;
@@ -322,31 +310,31 @@ where
         ))
     }
 
-    fn terminate(
-        &mut self,
-        state: &PopulationState<Particle<V<N>, f64>, f64>,
-    ) -> argmin::core::TerminationStatus {
-        let particles = state.get_population().unwrap();
-        let global_best = match state.best_individual.as_ref() {
-            Some(p) => p.position,
-            None => return argmin::core::TerminationStatus::NotTerminated,
-        };
-        let condition = particles.iter().all(|p| {
-            for d in 0..N {
-                if p.position[d] - global_best[d] > self.delta[d] {
-                    return false;
-                }
-            }
-            true
-        });
-        if condition {
-            argmin::core::TerminationStatus::Terminated(
-                argmin::core::TerminationReason::SolverConverged,
-            )
-        } else {
-            argmin::core::TerminationStatus::NotTerminated
-        }
-    }
+    // fn terminate(
+    //     &mut self,
+    //     state: &PopulationState<Particle<V<N>, f64>, f64>,
+    // ) -> argmin::core::TerminationStatus {
+    //     let particles = state.get_population().unwrap();
+    //     let global_best = match state.best_individual.as_ref() {
+    //         Some(p) => p.position,
+    //         None => return argmin::core::TerminationStatus::NotTerminated,
+    //     };
+    //     let condition = particles.iter().all(|p| {
+    //         for d in 0..N {
+    //             if p.position[d] - global_best[d] > self.delta[d] {
+    //                 return false;
+    //             }
+    //         }
+    //         true
+    //     });
+    //     if condition {
+    //         argmin::core::TerminationStatus::Terminated(
+    //             argmin::core::TerminationReason::SolverConverged,
+    //         )
+    //     } else {
+    //         argmin::core::TerminationStatus::NotTerminated
+    //     }
+    // }
 }
 
 /// A single particle
