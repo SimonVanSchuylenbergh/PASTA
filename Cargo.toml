@@ -12,7 +12,6 @@ crate-type = ["cdylib"]
 npy = "0.4.0"
 nalgebra = "0.32.4"
 rayon = "1.9.0"
-lru = "0.12.3"
 rand="0.8.5"
 argmin = { version = "0.10.0", features = ["rayon"]}
 argmin-math = { version = "0.4.0", features = ["nalgebra_v0_32"] }
@@ -34,6 +33,7 @@ features = ["abi3-py37", "multiple-pymethods", "anyhow"]
 [profile.release]
 codegen-units = 1
 lto = "fat"
+debug = true
 
 [profile.samply]
 inherits = "release"

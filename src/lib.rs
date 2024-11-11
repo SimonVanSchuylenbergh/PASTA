@@ -14,12 +14,11 @@ use convolve_rv::{
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
 use enum_dispatch::enum_dispatch;
 use fitting::{
-    fit_pso, fit_pso_binary_norm, uncertainty_chi2, BinaryOptimizationResult, ChunkFitter,
-    ConstantContinuum as RsConstantContinuum, ContinuumFitter, FixedContinuum as RsFixedContinuum,
-    LinearModelFitter, ObservedSpectrum, OptimizationResult, PSOSettings as FittingPSOSettings,
+    ChunkFitter, ConstantContinuum as RsConstantContinuum, ContinuumFitter,
+    FixedContinuum as RsFixedContinuum, LinearModelFitter, ObservedSpectrum, PSOFitter,
 };
 use indicatif::ProgressBar;
-use interpolate::{GridBounds, FluxFloat, GridInterpolator, Interpolator};
+use interpolate::{FluxFloat, GridBounds, GridInterpolator, Interpolator};
 use model_fetchers::{read_npy_file, CachedFetcher, InMemFetcher, OnDiskFetcher};
 use nalgebra as na;
 use nalgebra::Storage;
@@ -33,7 +32,7 @@ use std::path::{Path, PathBuf};
 /// Parameters to the PSO algorithm
 #[derive(Clone, Debug)]
 #[pyclass(module = "normalization", frozen)]
-pub struct PSOSettings(FittingPSOSettings);
+pub struct PSOSettings(fitting::PSOSettings);
 
 #[pymethods]
 impl PSOSettings {
@@ -51,7 +50,7 @@ impl PSOSettings {
         social_factor: Option<f64>,
         delta: Option<f64>,
     ) -> Self {
-        PSOSettings(FittingPSOSettings {
+        PSOSettings(fitting::PSOSettings {
             num_particles,
             max_iters,
             inertia_factor: inertia_factor.unwrap_or(0.7213475204),
@@ -63,19 +62,46 @@ impl PSOSettings {
 }
 
 /// Python to rust bindings.
-impl From<PSOSettings> for FittingPSOSettings {
+impl From<PSOSettings> for fitting::PSOSettings {
     fn from(settings: PSOSettings) -> Self {
         settings.0
+    }
+}
+
+#[derive(Clone, Debug)]
+#[pyclass(module = "normalization", frozen)]
+pub struct Label {
+    #[pyo3(get)]
+    teff: f64,
+    #[pyo3(get)]
+    m: f64,
+    #[pyo3(get)]
+    logg: f64,
+    #[pyo3(get)]
+    vsini: f64,
+    #[pyo3(get)]
+    rv: f64,
+}
+
+impl From<fitting::Label> for Label {
+    fn from(value: fitting::Label) -> Self {
+        Label {
+            teff: value.teff,
+            m: value.m,
+            logg: value.logg,
+            vsini: value.vsini,
+            rv: value.rv,
+        }
     }
 }
 
 /// Output of the PSO fitting algorithm.
 #[derive(Clone, Debug)]
 #[pyclass(module = "normalization", frozen)]
-pub struct PyOptimizationResult {
-    /// (Teff, [M/H], logg, vsini, RV)
+pub struct OptimizationResult {
+    /// Teff, [M/H], logg, vsini, RV
     #[pyo3(get)]
-    pub labels: (f64, f64, f64, f64, f64),
+    pub label: Label,
     /// Fitted parameters for the continuum fitting function
     /// (polynomial coefficients)
     #[pyo3(get)]
@@ -92,10 +118,10 @@ pub struct PyOptimizationResult {
 }
 
 /// Rust to Python bindings.
-impl From<OptimizationResult> for PyOptimizationResult {
+impl From<fitting::OptimizationResult> for OptimizationResult {
     fn from(result: fitting::OptimizationResult) -> Self {
-        PyOptimizationResult {
-            labels: result.labels.into(),
+        OptimizationResult {
+            label: result.label.into(),
             continuum_params: result.continuum_params.data.into(),
             chi2: result.ls,
             iterations: result.iters,
@@ -107,23 +133,23 @@ impl From<OptimizationResult> for PyOptimizationResult {
 /// Output of the PSO binary fitting algorithm.
 #[derive(Clone, Debug)]
 #[pyclass(module = "normalization", frozen)]
-pub struct PyBinaryOptimizationResult {
+pub struct BinaryOptimizationResult {
     /// (Teff, [M/H], logg, vsini, RV)
     #[pyo3(get)]
-    pub labels1: (f64, f64, f64, f64, f64),
+    pub label1: Label,
     #[pyo3(get)]
-    pub labels2: (f64, f64, f64, f64, f64),
+    pub label2: Label,
     #[pyo3(get)]
     pub light_ratio: f64,
     /// Fitted parameters for the continuum fitting function
     /// (polynomial coefficients)
     #[pyo3(get)]
     pub continuum_params: Vec<FluxFloat>,
-    #[pyo3(get)]
     /// Chi2 value
-    pub chi2: f64,
     #[pyo3(get)]
+    pub chi2: f64,
     /// Number of iterations used
+    #[pyo3(get)]
     pub iterations: u64,
     /// Time taken
     #[pyo3(get)]
@@ -131,11 +157,11 @@ pub struct PyBinaryOptimizationResult {
 }
 
 /// Rust to Python bindings.
-impl From<BinaryOptimizationResult> for PyBinaryOptimizationResult {
+impl From<fitting::BinaryOptimizationResult> for BinaryOptimizationResult {
     fn from(result: fitting::BinaryOptimizationResult) -> Self {
-        PyBinaryOptimizationResult {
-            labels1: result.labels1.into(),
-            labels2: result.labels2.into(),
+        BinaryOptimizationResult {
+            label1: result.label1.into(),
+            label2: result.label2.into(),
             light_ratio: result.light_ratio,
             continuum_params: result.continuum_params.data.into(),
             chi2: result.ls,
@@ -405,18 +431,18 @@ fn FixedContinuum(
 
 #[pyfunction]
 fn ConstantContinuum() -> PyContinuumFitter {
-    PyContinuumFitter(RsConstantContinuum().into())
+    PyContinuumFitter(fitting::ConstantContinuum().into())
 }
 
 /// Implement methods for all the interpolator classes.
 /// We can't use traits with pyo3, so we have to use macros.
 macro_rules! implement_methods {
-    ($name: ident, $interpolator_type: ty) => {
+    ($name: ident, $fetcher_type: ty, $fitter_type: ident) => {
         #[pymethods]
         impl $name {
             /// Produce a model spectrum by interpolating, convolving, shifting by rv and resampling to wl array.
             pub fn produce_model<'a>(
-                &mut self,
+                &self,
                 py: Python<'a>,
                 dispersion: PyWavelengthDispersion,
                 teff: f64,
@@ -426,7 +452,7 @@ macro_rules! implement_methods {
                 rv: f64,
             ) -> Bound<'a, PyArray<FluxFloat, Ix1>> {
                 let interpolated = self
-                    .interpolator
+                    .0
                     .produce_model(&dispersion.0, teff, m, logg, vsini, rv)
                     .unwrap();
                 // let interpolated = [0.0; LEN_C];
@@ -434,7 +460,7 @@ macro_rules! implement_methods {
             }
 
             pub fn produce_binary_model_norm<'a>(
-                &mut self,
+                &self,
                 py: Python<'a>,
                 continuum_interpolator: &$name,
                 dispersion: PyWavelengthDispersion,
@@ -443,9 +469,9 @@ macro_rules! implement_methods {
                 light_ratio: f64,
             ) -> Bound<'a, PyArray<FluxFloat, Ix1>> {
                 let interpolated = self
-                    .interpolator
+                    .0
                     .produce_binary_model_norm(
-                        &continuum_interpolator.interpolator,
+                        &continuum_interpolator.0,
                         &dispersion.0,
                         &na::Vector5::new(labels1.0, labels1.1, labels1.2, labels1.3, labels1.4),
                         &na::Vector5::new(labels2.0, labels2.1, labels2.2, labels2.3, labels2.4),
@@ -458,7 +484,7 @@ macro_rules! implement_methods {
 
             /// Build the wavelength dispersion kernels (debugging purposes).
             pub fn get_kernels<'a>(
-                &mut self,
+                &self,
                 py: Python<'a>,
                 wl: Vec<f64>,
                 disp: Vec<FluxFloat>,
@@ -466,7 +492,7 @@ macro_rules! implement_methods {
                 let target_dispersion = VariableTargetDispersion::new(
                     wl.into(),
                     &disp.into(),
-                    self.interpolator.synth_wl().clone(),
+                    self.0.synth_wl().clone(),
                 )
                 .unwrap();
                 let matrix = target_dispersion.kernels;
@@ -480,7 +506,7 @@ macro_rules! implement_methods {
             /// Produce multiple model spectra using multithreading.
             /// labels: Vec of (Teff, [M/H], logg, vsini, RV) tuples.
             pub fn produce_model_bulk<'a>(
-                &mut self,
+                &self,
                 py: Python<'a>,
                 dispersion: PyWavelengthDispersion,
                 labels: Vec<[f64; 5]>,
@@ -495,7 +521,7 @@ macro_rules! implement_methods {
                     .into_par_iter()
                     .map(|[teff, m, logg, vsini, rv]| {
                         progress_bar.inc(1);
-                        self.interpolator
+                        self.0
                             .produce_model(&dispersion.0, teff, m, logg, vsini, rv)
                             .unwrap()
                             .iter()
@@ -518,7 +544,7 @@ macro_rules! implement_methods {
                 rv: f64,
             ) -> PyResult<Vec<FluxFloat>> {
                 let out = self
-                    .interpolator
+                    .0
                     .produce_model_on_grid(&dispersion.0, teff, mh, logg, vsini, rv)
                     .unwrap();
                 Ok(out.data.into())
@@ -526,14 +552,26 @@ macro_rules! implement_methods {
 
             /// Interpolate in grid.
             /// Doesn't do convoluton, shifting and resampling.
-            pub fn interpolate(
-                &mut self,
-                teff: f64,
-                m: f64,
-                logg: f64,
-            ) -> PyResult<Vec<FluxFloat>> {
-                let interpolated = self.interpolator.interpolate(teff, m, logg).unwrap();
+            pub fn interpolate(&self, teff: f64, m: f64, logg: f64) -> PyResult<Vec<FluxFloat>> {
+                let interpolated = self.0.interpolate(teff, m, logg).unwrap();
                 Ok(interpolated.iter().copied().collect())
+            }
+
+            pub fn get_fitter(
+                &self,
+                dispersion: PyWavelengthDispersion,
+                continuum_fitter: PyContinuumFitter,
+                settings: PSOSettings,
+                vsini_range: (f64, f64),
+                rv_range: (f64, f64),
+            ) -> $fitter_type {
+                $fitter_type(PSOFitter::new(
+                    dispersion.0,
+                    continuum_fitter.0,
+                    settings.into(),
+                    vsini_range,
+                    rv_range,
+                ))
             }
 
             /// Fit a continuum to an observed spectrum and model,
@@ -549,7 +587,7 @@ macro_rules! implement_methods {
             ) -> PyResult<Vec<FluxFloat>> {
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
                 let synth = self
-                    .interpolator
+                    .0
                     .produce_model(&dispersion.0, label.0, label.1, label.2, label.2, label.4)
                     .unwrap();
                 Ok(fitter
@@ -574,7 +612,7 @@ macro_rules! implement_methods {
             ) -> PyResult<Vec<FluxFloat>> {
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
                 let synth = self
-                    .interpolator
+                    .0
                     .produce_model(
                         &dispersion.0,
                         label[0],
@@ -607,14 +645,9 @@ macro_rules! implement_methods {
                 Ok(labels
                     .into_par_iter()
                     .map(|[teff, m, logg, vsini, rv]| {
-                        let synth_model_result = self.interpolator.produce_model(
-                            &dispersion.0,
-                            teff,
-                            m,
-                            logg,
-                            vsini,
-                            rv,
-                        );
+                        let synth_model_result =
+                            self.0
+                                .produce_model(&dispersion.0, teff, m, logg, vsini, rv);
                         let synth_model = match allow_nan {
                             Some(true) => match synth_model_result {
                                 Ok(x) => x,
@@ -657,14 +690,9 @@ macro_rules! implement_methods {
                         progress_bar.inc(1);
                         let obs = ObservedSpectrum::from_vecs(flux, var);
                         let target_dispersion = NoConvolutionDispersionTarget(wl.into());
-                        let synth_model_result = self.interpolator.produce_model(
-                            &target_dispersion,
-                            teff,
-                            m,
-                            logg,
-                            vsini,
-                            rv,
-                        );
+                        let synth_model_result =
+                            self.0
+                                .produce_model(&target_dispersion, teff, m, logg, vsini, rv);
                         let synth_model = match allow_nan {
                             Some(true) => match synth_model_result {
                                 Ok(x) => x,
@@ -680,243 +708,9 @@ macro_rules! implement_methods {
                     .collect())
             }
 
-            /// Fit the model and pseudo continuum using PSO.
-            /// Using chunk based continuum fitting.
-            pub fn fit_pso(
-                &self,
-                fitter: PyContinuumFitter,
-                dispersion: PyWavelengthDispersion,
-                observed_flux: PyArrayLike<FluxFloat, Ix1>,
-                observed_var: PyArrayLike<FluxFloat, Ix1>,
-                settings: PSOSettings,
-                vsini_range: (f64, f64),
-                rv_range: (f64, f64),
-                trace_directory: Option<String>,
-                parallelize: Option<bool>,
-            ) -> PyResult<PyOptimizationResult> {
-                let observed_spectrum = ObservedSpectrum {
-                    flux: observed_flux.as_matrix().column(0).into_owned(),
-                    var: observed_var.as_matrix().column(0).into_owned(),
-                };
-                let result = fit_pso(
-                    &self.interpolator,
-                    &dispersion.0,
-                    &observed_spectrum.into(),
-                    &fitter.0,
-                    &settings.into(),
-                    vsini_range,
-                    rv_range,
-                    trace_directory,
-                    parallelize.unwrap_or(true),
-                );
-                Ok(result?.into())
-            }
-
-            pub fn fit_pso_binary_norm(
-                &self,
-                continuum_interpolator: &$name,
-                fitter: PyContinuumFitter,
-                dispersion: PyWavelengthDispersion,
-                observed_flux: PyArrayLike<FluxFloat, Ix1>,
-                observed_var: PyArrayLike<FluxFloat, Ix1>,
-                settings: PSOSettings,
-                vsini_range: (f64, f64),
-                rv_range1: (f64, f64),
-                rv_range2: (f64, f64),
-                trace_directory: Option<String>,
-                parallelize: Option<bool>,
-            ) -> PyResult<PyBinaryOptimizationResult> {
-                let observed_spectrum = ObservedSpectrum {
-                    flux: observed_flux.as_matrix().column(0).into_owned(),
-                    var: observed_var.as_matrix().column(0).into_owned(),
-                };
-                let result = fit_pso_binary_norm(
-                    &self.interpolator,
-                    &continuum_interpolator.interpolator,
-                    &dispersion.0,
-                    &observed_spectrum.into(),
-                    &fitter.0,
-                    &settings.into(),
-                    vsini_range,
-                    rv_range1,
-                    rv_range2,
-                    trace_directory,
-                    parallelize.unwrap_or(true),
-                );
-                Ok(result?.into())
-            }
-
-            pub fn fit_pso_bulk_fixed_wl(
-                &self,
-                fitter: PyContinuumFitter,
-                dispersion: PyWavelengthDispersion,
-                observed_fluxes: Vec<Vec<FluxFloat>>,
-                observed_vars: Vec<Vec<FluxFloat>>,
-                settings: PSOSettings,
-                vsini_range: (f64, f64),
-                rv_range: (f64, f64),
-            ) -> PyResult<Vec<PyOptimizationResult>> {
-                let pso_settings: fitting::PSOSettings = settings.into();
-                Ok(observed_fluxes
-                    .into_par_iter()
-                    .zip(observed_vars)
-                    .map(|(flux, var)| {
-                        let observed_spectrum = ObservedSpectrum::from_vecs(flux, var);
-                        let result = fit_pso(
-                            &self.interpolator,
-                            &dispersion.0,
-                            &observed_spectrum.into(),
-                            &fitter.0,
-                            &pso_settings,
-                            vsini_range,
-                            rv_range,
-                            None,
-                            false,
-                        );
-                        result.unwrap().into()
-                    })
-                    .collect::<Vec<_>>())
-            }
-
-            pub fn fit_pso_bulk(
-                &self,
-                fitters: Vec<PyContinuumFitter>,
-                dispersions: Vec<PyWavelengthDispersion>,
-                observed_fluxs: Vec<Vec<FluxFloat>>,
-                observed_vars: Vec<Vec<FluxFloat>>,
-                settings: PSOSettings,
-                vsini_range: (f64, f64),
-                rv_range: (f64, f64),
-            ) -> PyResult<Vec<PyOptimizationResult>> {
-                let pso_settings: fitting::PSOSettings = settings.into();
-                Ok(fitters
-                    .into_par_iter()
-                    .zip(dispersions)
-                    .zip(observed_fluxs)
-                    .zip(observed_vars)
-                    .map(|(((fitter, disp), flux), var)| {
-                        let observed_spectrum = ObservedSpectrum::from_vecs(flux, var);
-                        let result = fit_pso(
-                            &self.interpolator,
-                            &disp.0,
-                            &observed_spectrum.into(),
-                            &fitter.0,
-                            &pso_settings,
-                            vsini_range,
-                            rv_range,
-                            None,
-                            false,
-                        );
-                        result.unwrap().into()
-                    })
-                    .collect::<Vec<_>>())
-            }
-
-            /// Calculate uncertainties with the chi2 landscape method
-            /// parameters: best fit
-            /// search_radius: radius in which the intersection point is searched for every parameter
-            pub fn uncertainty_chi2(
-                &self,
-                fitter: PyContinuumFitter,
-                dispersion: PyWavelengthDispersion,
-                observed_flux: Vec<FluxFloat>,
-                observed_var: Vec<FluxFloat>,
-                spec_res: f64,
-                parameters: [f64; 5],
-                search_radius: Option<[f64; 5]>,
-            ) -> [(Option<f64>, Option<f64>); 5] {
-                let search_radius = search_radius.unwrap_or([2000.0, 0.3, 0.3, 40.0, 40.0]);
-                let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
-                uncertainty_chi2(
-                    &self.interpolator,
-                    &dispersion.0,
-                    &observed_spectrum,
-                    &fitter.0,
-                    spec_res,
-                    parameters.into(),
-                    search_radius.into(),
-                )
-                .unwrap()
-                .map(|(l, r)| (l.ok(), r.ok()))
-            }
-
-            /// Uncertainties with the chi2 landscape method,
-            /// for many spectra with multithreading
-            pub fn uncertainty_chi2_bulk(
-                &self,
-                fitters: Vec<PyContinuumFitter>,
-                dispersions: Vec<PyWavelengthDispersion>,
-                observed_fluxes: Vec<Vec<FluxFloat>>,
-                observed_vars: Vec<Vec<FluxFloat>>,
-                spec_res: f64,
-                parameters: Vec<[f64; 5]>,
-                search_radius: Option<[f64; 5]>,
-            ) -> Vec<[(Option<f64>, Option<f64>); 5]> {
-                let search_radius = search_radius.unwrap_or([2000.0, 0.3, 0.3, 40.0, 40.0]);
-                let bar = ProgressBar::new(fitters.len() as u64);
-                fitters
-                    .into_par_iter()
-                    .zip(dispersions)
-                    .zip(observed_fluxes)
-                    .zip(observed_vars)
-                    .zip(parameters)
-                    .map(|((((fitter, disp), flux), var), params)| {
-                        bar.inc(1);
-                        let obs = ObservedSpectrum::from_vecs(flux, var);
-                        uncertainty_chi2(
-                            &self.interpolator,
-                            &disp.0,
-                            &obs,
-                            &fitter.0,
-                            spec_res,
-                            params.into(),
-                            search_radius.into(),
-                        )
-                        .unwrap()
-                        .map(|(l, r)| (l.ok(), r.ok()))
-                    })
-                    .collect()
-            }
-
-            /// Uncertainties with the chi2 landscape method,
-            /// for many spectra with multithreading
-            /// where every spectrum is on the same wavelength grid.
-            /// Only one `dispersion` object must be given.
-            pub fn uncertainty_chi2_bulk_fixed_wl(
-                &self,
-                fitter: PyContinuumFitter,
-                dispersion: PyWavelengthDispersion,
-                observed_fluxes: Vec<Vec<FluxFloat>>,
-                observed_vars: Vec<Vec<FluxFloat>>,
-                spec_res: f64,
-                parameters: Vec<[f64; 5]>,
-                search_radius: Option<[f64; 5]>,
-            ) -> Vec<[(Option<f64>, Option<f64>); 5]> {
-                let search_radius = search_radius.unwrap_or([2000.0, 0.3, 0.3, 40.0, 40.0]);
-                observed_fluxes
-                    .into_par_iter()
-                    .zip(observed_vars)
-                    .zip(parameters)
-                    .map(|((flux, var), params)| {
-                        let obs = ObservedSpectrum::from_vecs(flux, var);
-                        uncertainty_chi2(
-                            &self.interpolator,
-                            &dispersion.0,
-                            &obs,
-                            &fitter.0,
-                            spec_res,
-                            params.into(),
-                            search_radius.into(),
-                        )
-                        .unwrap()
-                        .map(|(l, r)| (l.ok(), r.ok()))
-                    })
-                    .collect()
-            }
-
             /// Clamp a single parameter to the bounds of the grid
             pub fn clamp_1d(&self, teff: f64, m: f64, logg: f64, index: usize) -> f64 {
-                self.interpolator
+                self.0
                     .grid_bounds()
                     .clamp_1d(na::Vector3::new(teff, m, logg), index)
                     .unwrap()
@@ -928,11 +722,7 @@ macro_rules! implement_methods {
                 m: f64,
                 logg: f64,
             ) -> ([[f64; 4]; 4], [[f64; 4]; 4], [f64; 4]) {
-                let local_grid = self
-                    .interpolator
-                    .grid()
-                    .get_local_grid(teff, m, logg)
-                    .unwrap();
+                let local_grid = self.0.grid().get_local_grid(teff, m, logg).unwrap();
                 let (x, y, z) = calculate_interpolation_coefficients_flat(&local_grid).unwrap();
                 (x.into(), y.into(), z.into())
             }
@@ -943,11 +733,7 @@ macro_rules! implement_methods {
                 m: f64,
                 logg: f64,
             ) -> Vec<FluxFloat> {
-                let local_grid = self
-                    .interpolator
-                    .grid()
-                    .get_local_grid(teff, m, logg)
-                    .unwrap();
+                let local_grid = self.0.grid().get_local_grid(teff, m, logg).unwrap();
                 calculate_interpolation_coefficients(&local_grid)
                     .unwrap()
                     .data
@@ -960,11 +746,7 @@ macro_rules! implement_methods {
                 m: f64,
                 logg: f64,
             ) -> Vec<(usize, usize, usize)> {
-                let local_grid = self
-                    .interpolator
-                    .grid()
-                    .get_local_grid(teff, m, logg)
-                    .unwrap();
+                let local_grid = self.0.grid().get_local_grid(teff, m, logg).unwrap();
                 local_grid
                     .teff_logg_indices
                     .iter()
@@ -980,53 +762,182 @@ macro_rules! implement_methods {
             }
 
             pub fn teffs(&self) -> Vec<f64> {
-                self.interpolator.grid().teff.values.clone()
+                self.0.grid().teff.values.clone()
             }
 
             pub fn ms(&self) -> Vec<f64> {
-                self.interpolator.grid().m.values.clone()
+                self.0.grid().m.values.clone()
             }
 
             pub fn loggs(&self) -> Vec<f64> {
-                self.interpolator.grid().logg.values.clone()
+                self.0.grid().logg.values.clone()
             }
 
             pub fn logg_limits(&self) -> Vec<(usize, usize)> {
-                self.interpolator.grid().logg_limits.clone()
+                self.0.grid().logg_limits.clone()
             }
 
             pub fn cumulative_grid_size(&self) -> Vec<usize> {
-                self.interpolator.grid().cumulative_grid_size.clone()
+                self.0.grid().cumulative_grid_size.clone()
             }
 
             pub fn list_gridpoints(&self) -> Vec<[f64; 3]> {
-                self.interpolator.grid().list_gridpoints()
+                self.0.grid().list_gridpoints()
             }
 
             pub fn is_teff_logg_between_bounds(&self, teff: f64, logg: f64) -> bool {
-                self.interpolator
-                    .grid()
-                    .is_teff_logg_between_bounds(teff, logg)
+                self.0.grid().is_teff_logg_between_bounds(teff, logg)
+            }
+        }
+
+        #[pyclass]
+        pub struct $fitter_type(PSOFitter<WavelengthDispersionWrapper, ContinuumFitterWrapper>);
+
+        #[pymethods]
+        impl $fitter_type {
+            /// Fit the model and pseudo continuum using PSO.
+            /// Using chunk based continuum fitting.
+            pub fn fit(
+                &self,
+                interpolator: &$name,
+                observed_flux: PyArrayLike<FluxFloat, Ix1>,
+                observed_var: PyArrayLike<FluxFloat, Ix1>,
+                trace_directory: Option<String>,
+                parallelize: Option<bool>,
+            ) -> PyResult<OptimizationResult> {
+                let observed_spectrum = ObservedSpectrum {
+                    flux: observed_flux.as_matrix().column(0).into_owned(),
+                    var: observed_var.as_matrix().column(0).into_owned(),
+                };
+                let result = self.0.fit(
+                    &interpolator.0,
+                    &observed_spectrum.into(),
+                    trace_directory,
+                    parallelize.unwrap_or(true),
+                );
+                Ok(result?.into())
+            }
+
+            pub fn fit_bulk(
+                &self,
+                interpolator: &$name,
+                observed_fluxes: Vec<Vec<FluxFloat>>,
+                observed_vars: Vec<Vec<FluxFloat>>,
+            ) -> PyResult<Vec<OptimizationResult>> {
+                Ok(observed_fluxes
+                    .into_par_iter()
+                    .zip(observed_vars)
+                    .map(|(flux, var)| {
+                        let observed_spectrum = ObservedSpectrum::from_vecs(flux, var);
+                        let result =
+                            self.0
+                                .fit(&interpolator.0, &observed_spectrum.into(), None, false);
+                        result.unwrap().into()
+                    })
+                    .collect::<Vec<_>>())
+            }
+
+            /// Calculate uncertainties with the chi2 landscape method
+            /// parameters: best fit
+            /// search_radius: radius in which the intersection point is searched for every parameter
+            pub fn compute_uncertainty(
+                &self,
+                interpolator: &$name,
+                observed_flux: Vec<FluxFloat>,
+                observed_var: Vec<FluxFloat>,
+                spec_res: f64,
+                parameters: [f64; 5],
+                search_radius: Option<[f64; 5]>,
+            ) -> [(Option<f64>, Option<f64>); 5] {
+                let search_radius = search_radius.unwrap_or([2000.0, 0.3, 0.3, 40.0, 40.0]);
+                let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
+                self.0
+                    .compute_uncertainty(
+                        &interpolator.0,
+                        &observed_spectrum,
+                        spec_res,
+                        parameters.into(),
+                        search_radius.into(),
+                    )
+                    .unwrap()
+                    .map(|(l, r)| (l.ok(), r.ok()))
+            }
+
+            /// Uncertainties with the chi2 landscape method,
+            /// for many spectra with multithreading
+            pub fn compute_uncertainty_bulk(
+                &self,
+                interpolator: &$name,
+                observed_fluxes: Vec<Vec<FluxFloat>>,
+                observed_vars: Vec<Vec<FluxFloat>>,
+                spec_res: f64,
+                parameters: Vec<[f64; 5]>,
+                search_radius: Option<[f64; 5]>,
+            ) -> Vec<[(Option<f64>, Option<f64>); 5]> {
+                let search_radius = search_radius.unwrap_or([2000.0, 0.3, 0.3, 40.0, 40.0]);
+                let bar = ProgressBar::new(observed_fluxes.len() as u64);
+                observed_fluxes
+                    .into_par_iter()
+                    .zip(observed_vars)
+                    .zip(parameters)
+                    .map(|((flux, var), params)| {
+                        bar.inc(1);
+                        let obs = ObservedSpectrum::from_vecs(flux, var);
+                        self.0
+                            .compute_uncertainty(
+                                &interpolator.0,
+                                &obs,
+                                spec_res,
+                                params.into(),
+                                search_radius.into(),
+                            )
+                            .unwrap()
+                            .map(|(l, r)| (l.ok(), r.ok()))
+                    })
+                    .collect()
+            }
+
+            pub fn fit_binary_normalized(
+                &self,
+                interpolator: &$name,
+                continuum_interpolator: &$name,
+                observed_flux: PyArrayLike<FluxFloat, Ix1>,
+                observed_var: PyArrayLike<FluxFloat, Ix1>,
+                trace_directory: Option<String>,
+                parallelize: Option<bool>,
+            ) -> PyResult<BinaryOptimizationResult> {
+                let observed_spectrum = ObservedSpectrum {
+                    flux: observed_flux.as_matrix().column(0).into_owned(),
+                    var: observed_var.as_matrix().column(0).into_owned(),
+                };
+                let result = self.0.fit_binary_normalized(
+                    &interpolator.0,
+                    &continuum_interpolator.0,
+                    &observed_spectrum.into(),
+                    trace_directory,
+                    parallelize.unwrap_or(true),
+                );
+                Ok(result?.into())
             }
         }
     };
 }
 
+#[derive(Clone, Debug)]
+#[pyclass(module = "normalization", frozen)]
+pub struct PyInterpolator();
+
 /// Interpolator that loads every spectrum from disk every time.
 #[pyclass]
 #[derive(Clone)]
-pub struct OnDiskInterpolator {
-    interpolator: GridInterpolator<OnDiskFetcher>,
-}
+pub struct OnDiskInterpolator(GridInterpolator<OnDiskFetcher>);
 
 #[pymethods]
 impl OnDiskInterpolator {
     #[new]
     pub fn new(dir: &str, includes_factor: bool, wavelength: WlGrid) -> Self {
         let fetcher = OnDiskFetcher::new(dir, includes_factor).unwrap();
-        Self {
-            interpolator: GridInterpolator::new(fetcher, wavelength.0),
-        }
+        Self(GridInterpolator::new(fetcher, wavelength.0))
     }
 }
 
@@ -1041,9 +952,7 @@ pub struct InMemInterpolator {
 
 /// Interpolator where all spectra have been loaded into memory.
 #[pyclass]
-pub struct LoadedInMemInterpolator {
-    interpolator: GridInterpolator<InMemFetcher>,
-}
+pub struct LoadedInMemInterpolator(GridInterpolator<InMemFetcher>);
 
 #[pymethods]
 impl InMemInterpolator {
@@ -1058,17 +967,13 @@ impl InMemInterpolator {
 
     fn load(&self) -> LoadedInMemInterpolator {
         let fetcher = InMemFetcher::new(&self.dir, self.includes_factor).unwrap();
-        LoadedInMemInterpolator {
-            interpolator: GridInterpolator::new(fetcher, self.wavelength.0),
-        }
+        LoadedInMemInterpolator(GridInterpolator::new(fetcher, self.wavelength.0))
     }
 }
 /// Interpolator that caches the last _lrucap_ spectra
 #[pyclass]
 #[derive(Clone)]
-pub struct CachedInterpolator {
-    interpolator: GridInterpolator<CachedFetcher>,
-}
+pub struct CachedInterpolator(GridInterpolator<CachedFetcher>);
 
 #[pymethods]
 impl CachedInterpolator {
@@ -1087,18 +992,16 @@ impl CachedInterpolator {
             n_shards.unwrap_or(4),
         )
         .unwrap();
-        Self {
-            interpolator: GridInterpolator::new(fetcher, wavelength.0),
-        }
+        Self(GridInterpolator::new(fetcher, wavelength.0))
     }
     pub fn cache_size(&self) -> usize {
-        self.interpolator.fetcher.cache_size()
+        self.0.fetcher.cache_size()
     }
 }
 
-implement_methods!(OnDiskInterpolator, interpolators::OnDiskInterpolator);
-implement_methods!(LoadedInMemInterpolator, interpolators::InMemInterpolator);
-implement_methods!(CachedInterpolator, interpolators::CachedInterpolator);
+implement_methods!(OnDiskInterpolator, OnDiskFetcher, OnDiskSingleFitter);
+implement_methods!(LoadedInMemInterpolator, InMemFetcher, InMemSingleFitter);
+implement_methods!(CachedInterpolator, CachedFetcher, CachedSingleFitter);
 
 #[pyfunction]
 pub fn get_vsini_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<FluxFloat> {

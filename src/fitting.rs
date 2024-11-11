@@ -432,8 +432,31 @@ impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> CostFunct
 }
 
 #[derive(Debug)]
+pub struct Label {
+    pub teff: f64,
+    pub m: f64,
+    pub logg: f64,
+    pub vsini: f64,
+    pub rv: f64,
+}
+
+impl<S: na::Storage<f64, na::Const<5>, na::Const<1>>> From<na::Vector<f64, na::Const<5>, S>>
+    for Label
+{
+    fn from(value: na::Vector<f64, na::Const<5>, S>) -> Self {
+        Self {
+            teff: value[0],
+            m: value[1],
+            logg: value[2],
+            vsini: value[3],
+            rv: value[4],
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct OptimizationResult {
-    pub labels: [f64; 5],
+    pub label: Label,
     pub continuum_params: na::DVector<FluxFloat>,
     pub ls: f64,
     pub iters: u64,
@@ -484,8 +507,8 @@ impl<'a, I1: Interpolator, I2: Interpolator, T: WavelengthDispersion, F: Continu
 }
 
 pub struct BinaryOptimizationResult {
-    pub labels1: [f64; 5],
-    pub labels2: [f64; 5],
+    pub label1: Label,
+    pub label2: Label,
     pub light_ratio: f64,
     pub continuum_params: na::DVector<FluxFloat>,
     pub ls: f64,
@@ -551,8 +574,7 @@ fn get_binary_pso_fitter<
     continuum_fitter: &'a F,
     settings: &PSOSettings,
     vsini_range: (f64, f64),
-    rv_range1: (f64, f64),
-    rv_range2: (f64, f64),
+    rv_range: (f64, f64),
     parallelize: bool,
 ) -> Executor<
     BinaryFitCostFunction<'a, I1, I2, T, F>,
@@ -568,7 +590,7 @@ fn get_binary_pso_fitter<
         parallelize,
     };
     let bounds = interpolator
-        .bounds_binary(vsini_range, rv_range1, rv_range2)
+        .bounds_binary(vsini_range, rv_range, rv_range)
         .clone();
     let solver = particleswarm::ParticleSwarm::new(bounds, settings.num_particles)
         .with_inertia_factor(settings.inertia_factor)
@@ -695,145 +717,6 @@ impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 11>, f64>,
     }
 }
 
-pub fn fit_pso(
-    interpolator: &impl Interpolator,
-    target_dispersion: &impl WavelengthDispersion,
-    observed_spectrum: &ObservedSpectrum,
-    continuum_fitter: &impl ContinuumFitter,
-    settings: &PSOSettings,
-    vsini_range: (f64, f64),
-    rv_range: (f64, f64),
-    trace_directory: Option<String>,
-    parallelize: bool,
-) -> Result<OptimizationResult> {
-    let fitter = get_pso_fitter(
-        interpolator,
-        target_dispersion,
-        observed_spectrum,
-        continuum_fitter,
-        settings,
-        vsini_range,
-        rv_range,
-        parallelize,
-    );
-    let result = if let Some(dir) = trace_directory {
-        let observer = PSObserver::new(&dir, "iteration");
-        fitter.add_observer(observer, ObserverMode::Always).run()?
-    } else {
-        fitter.run()?
-    };
-
-    let best_param = result
-        .state
-        .best_individual
-        .ok_or(anyhow!("No best parameter found"))?
-        .position;
-
-    let best_teff = best_param[0];
-    let best_m = best_param[1];
-    let best_logg = best_param[2];
-    let best_vsini = best_param[3];
-    let best_rv = best_param[4];
-
-    let synth_spec = interpolator.produce_model(
-        target_dispersion,
-        best_teff,
-        best_m,
-        best_logg,
-        best_vsini,
-        best_rv,
-    )?;
-    let (continuum_params, _) = continuum_fitter.fit_continuum(observed_spectrum, &synth_spec)?;
-    let time = match result.state.time {
-        Some(t) => t.as_secs_f64(),
-        None => 0.0,
-    };
-    Ok(OptimizationResult {
-        labels: [best_teff, best_m, best_logg, best_vsini, best_rv],
-        continuum_params,
-        ls: result.state.best_cost,
-        time,
-        iters: result.state.iter,
-    })
-}
-
-pub fn fit_pso_binary_norm(
-    interpolator: &impl Interpolator,
-    continuum_interpolator: &impl Interpolator,
-    target_dispersion: &impl WavelengthDispersion,
-    observed_spectrum: &ObservedSpectrum,
-    continuum_fitter: &impl ContinuumFitter,
-    settings: &PSOSettings,
-    vsini_range: (f64, f64),
-    rv_range1: (f64, f64),
-    rv_range2: (f64, f64),
-    trace_directory: Option<String>,
-    parallelize: bool,
-) -> Result<BinaryOptimizationResult> {
-    let fitter = get_binary_pso_fitter(
-        interpolator,
-        continuum_interpolator,
-        target_dispersion,
-        observed_spectrum,
-        continuum_fitter,
-        settings,
-        vsini_range,
-        rv_range1,
-        rv_range2,
-        parallelize,
-    );
-    let result = if let Some(dir) = trace_directory {
-        let observer = PSObserver::new(&dir, "iteration");
-        fitter.add_observer(observer, ObserverMode::Always).run()?
-    } else {
-        fitter.run()?
-    };
-
-    let best_param = result
-        .state
-        .best_individual
-        .ok_or(anyhow!("No best parameter found"))?
-        .position;
-
-    let star1_parameters = best_param.fixed_rows::<5>(0).into_owned();
-    let star2_parameters = best_param.fixed_rows::<5>(5).into_owned();
-    let light_ratio = best_param[10];
-
-    let synth_spec = interpolator.produce_binary_model_norm(
-        continuum_interpolator,
-        target_dispersion,
-        &star1_parameters,
-        &star2_parameters,
-        light_ratio as f32,
-    )?;
-    let (continuum_params, _) = continuum_fitter.fit_continuum(observed_spectrum, &synth_spec)?;
-    let time = match result.state.time {
-        Some(t) => t.as_secs_f64(),
-        None => 0.0,
-    };
-    Ok(BinaryOptimizationResult {
-        labels1: [
-            best_param[0],
-            best_param[1],
-            best_param[2],
-            best_param[3],
-            best_param[4],
-        ],
-        labels2: [
-            best_param[5],
-            best_param[6],
-            best_param[7],
-            best_param[8],
-            best_param[9],
-        ],
-        light_ratio: best_param[10],
-        continuum_params,
-        ls: result.state.best_cost,
-        time,
-        iters: result.state.iter,
-    })
-}
-
 struct ModelFitCost<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
     interpolator: &'a I,
     target_dispersion: &'a T,
@@ -875,80 +758,228 @@ impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> CostFunct
     }
 }
 
-/// Compute uncertainty in every label
-/// by finding the intersection points of the chi2 function with a target value.
-pub fn uncertainty_chi2<I: Interpolator>(
-    interpolator: &I,
-    target_dispersion: &impl WavelengthDispersion,
-    observed_spectrum: &ObservedSpectrum,
-    continuum_fitter: &impl ContinuumFitter,
-    spec_res: f64,
-    label: na::SVector<f64, 5>,
-    search_radius: na::SVector<f64, 5>,
-) -> Result<[(Result<f64>, Result<f64>); 5]> {
-    let mut search_radius = search_radius;
-    search_radius[0] *= label[0];
-    search_radius[3] = (label[3] * search_radius[3]).max(100.0);
-    let best_synth_spec = interpolator.produce_model(
-        target_dispersion,
-        label[0],
-        label[1],
-        label[2],
-        label[3],
-        label[4],
-    )?;
-    let (_, best_chi2) = continuum_fitter.fit_continuum(observed_spectrum, &best_synth_spec)?;
-    let observed_wavelength = target_dispersion.wavelength();
-    let n_p = observed_wavelength.len();
-    let first_wl = observed_wavelength[0];
-    let last_wl = observed_wavelength[n_p - 1];
-    let n = 4.0 * spec_res * (last_wl - first_wl) / (first_wl + last_wl);
-    let target_chi = best_chi2 * (1.0 + (2.0 / n).sqrt());
+pub struct PSOFitter<T: WavelengthDispersion, F: ContinuumFitter> {
+    target_dispersion: T,
+    continuum_fitter: F,
+    settings: PSOSettings,
+    vsini_range: (f64, f64),
+    rv_range: (f64, f64),
+}
 
-    Ok(core::array::from_fn(|i| {
-        // Maybe don't hardcode here
-        let bounds = interpolator.bounds_single((0.0, 1e4), (-1e3, 1e3)).clone();
+impl<T: WavelengthDispersion, F: ContinuumFitter> PSOFitter<T, F> {
+    pub fn new(
+        target_dispersion: T,
+        continuum_fitter: F,
+        settings: PSOSettings,
+        vsini_range: (f64, f64),
+        rv_range: (f64, f64),
+    ) -> Self {
+        Self {
+            target_dispersion,
+            continuum_fitter,
+            settings,
+            vsini_range,
+            rv_range,
+        }
+    }
 
-        let get_bound = |right: bool| {
-            let costfunction = ModelFitCost {
-                interpolator,
-                target_dispersion,
-                observed_spectrum,
-                continuum_fitter,
-                label: &label,
-                label_index: i,
-                target_value: target_chi,
-                search_radius: search_radius[i],
-            };
-            let mut bound_label = label;
-            if right {
-                bound_label[i] += search_radius[i];
-            } else {
-                bound_label[i] -= search_radius[i];
-            }
-            let bound = bounds.clamp_1d(bound_label, i)?;
-            let bound_rescaled = (bound - label[i]) / search_radius[i];
-            let solver = if right {
-                BrentRoot::new(0.0, bound_rescaled.min(1.0), 1e-3)
-            } else {
-                BrentRoot::new(bound_rescaled, 0.0, 1e-3)
-            };
-            let executor = Executor::new(costfunction, solver);
-            let result = executor.run().context(format!(
-                "Error while running uncertainty_chi2 on {:?}, bound={}",
-                label, bound
-            ))?;
-            let sol = result
-                .state
-                .get_best_param()
-                .context("result.state.get_best_param()")?;
-            if right {
-                Ok(sol * search_radius[i])
-            } else {
-                Ok(-sol * search_radius[i]) // Minus because we are looking for the negative of the solution
-            }
+    pub fn fit(
+        &self,
+        interpolator: &impl Interpolator,
+        observed_spectrum: &ObservedSpectrum,
+        trace_directory: Option<String>,
+        parallelize: bool,
+    ) -> Result<OptimizationResult> {
+        let fitter = get_pso_fitter(
+            interpolator,
+            &self.target_dispersion,
+            observed_spectrum,
+            &self.continuum_fitter,
+            &self.settings,
+            self.vsini_range,
+            self.rv_range,
+            parallelize,
+        );
+        let result = if let Some(dir) = trace_directory {
+            let observer = PSObserver::new(&dir, "iteration");
+            fitter.add_observer(observer, ObserverMode::Always).run()?
+        } else {
+            fitter.run()?
         };
 
-        (get_bound(false), get_bound(true))
-    }))
+        let best_param = result
+            .state
+            .best_individual
+            .ok_or(anyhow!("No best parameter found"))?
+            .position;
+
+        let teff = best_param[0];
+        let m = best_param[1];
+        let logg = best_param[2];
+        let vsini = best_param[3];
+        let rv = best_param[4];
+
+        let synth_spec =
+            interpolator.produce_model(&self.target_dispersion, teff, m, logg, vsini, rv)?;
+        let (continuum_params, _) = self
+            .continuum_fitter
+            .fit_continuum(observed_spectrum, &synth_spec)?;
+        let time = match result.state.time {
+            Some(t) => t.as_secs_f64(),
+            None => 0.0,
+        };
+        Ok(OptimizationResult {
+            label: Label {
+                teff,
+                m,
+                logg,
+                vsini,
+                rv,
+            },
+            continuum_params,
+            ls: result.state.best_cost,
+            time,
+            iters: result.state.iter,
+        })
+    }
+
+    /// Compute uncertainty in every label
+    /// by finding the intersection points of the chi2 function with a target value.
+    pub fn compute_uncertainty(
+        &self,
+        interpolator: &impl Interpolator,
+        observed_spectrum: &ObservedSpectrum,
+        spec_res: f64,
+        label: na::SVector<f64, 5>,
+        search_radius: na::SVector<f64, 5>,
+    ) -> Result<[(Result<f64>, Result<f64>); 5]> {
+        let mut search_radius = search_radius;
+        search_radius[0] *= label[0];
+        search_radius[3] = (label[3] * search_radius[3]).max(100.0);
+        let best_synth_spec = interpolator.produce_model(
+            &self.target_dispersion,
+            label[0],
+            label[1],
+            label[2],
+            label[3],
+            label[4],
+        )?;
+        let (_, best_chi2) = self
+            .continuum_fitter
+            .fit_continuum(observed_spectrum, &best_synth_spec)?;
+        let observed_wavelength = self.target_dispersion.wavelength();
+        let n_p = observed_wavelength.len();
+        let first_wl = observed_wavelength[0];
+        let last_wl = observed_wavelength[n_p - 1];
+        let n = 4.0 * spec_res * (last_wl - first_wl) / (first_wl + last_wl);
+        let target_chi = best_chi2 * (1.0 + (2.0 / n).sqrt());
+
+        Ok(core::array::from_fn(|i| {
+            // Maybe don't hardcode here
+            let bounds = interpolator.bounds_single((0.0, 1e4), (-1e3, 1e3)).clone();
+
+            let get_bound = |right: bool| {
+                let costfunction = ModelFitCost {
+                    interpolator,
+                    target_dispersion: &self.target_dispersion,
+                    observed_spectrum,
+                    continuum_fitter: &self.continuum_fitter,
+                    label: &label,
+                    label_index: i,
+                    target_value: target_chi,
+                    search_radius: search_radius[i],
+                };
+                let mut bound_label = label;
+                if right {
+                    bound_label[i] += search_radius[i];
+                } else {
+                    bound_label[i] -= search_radius[i];
+                }
+                let bound = bounds.clamp_1d(bound_label, i)?;
+                let bound_rescaled = (bound - label[i]) / search_radius[i];
+                let solver = if right {
+                    BrentRoot::new(0.0, bound_rescaled.min(1.0), 1e-3)
+                } else {
+                    BrentRoot::new(bound_rescaled, 0.0, 1e-3)
+                };
+                let executor = Executor::new(costfunction, solver);
+                let result = executor.run().context(format!(
+                    "Error while running uncertainty_chi2 on {:?}, bound={}",
+                    label, bound
+                ))?;
+                let sol = result
+                    .state
+                    .get_best_param()
+                    .context("result.state.get_best_param()")?;
+                if right {
+                    Ok(sol * search_radius[i])
+                } else {
+                    Ok(-sol * search_radius[i]) // Minus because we are looking for the negative of the solution
+                }
+            };
+
+            (get_bound(false), get_bound(true))
+        }))
+    }
+
+    pub fn fit_binary_normalized(
+        &self,
+        interpolator: &impl Interpolator,
+        continuum_interpolator: &impl Interpolator,
+        observed_spectrum: &ObservedSpectrum,
+        trace_directory: Option<String>,
+        parallelize: bool,
+    ) -> Result<BinaryOptimizationResult> {
+        let fitter = get_binary_pso_fitter(
+            interpolator,
+            continuum_interpolator,
+            &self.target_dispersion,
+            observed_spectrum,
+            &self.continuum_fitter,
+            &self.settings,
+            self.vsini_range,
+            self.rv_range,
+            parallelize,
+        );
+        let result = if let Some(dir) = trace_directory {
+            let observer = PSObserver::new(&dir, "iteration");
+            fitter.add_observer(observer, ObserverMode::Always).run()?
+        } else {
+            fitter.run()?
+        };
+
+        let best_param = result
+            .state
+            .best_individual
+            .ok_or(anyhow!("No best parameter found"))?
+            .position;
+
+        let star1_parameters = best_param.fixed_rows::<5>(0).into_owned();
+        let star2_parameters = best_param.fixed_rows::<5>(5).into_owned();
+        let light_ratio = best_param[10];
+
+        let synth_spec = interpolator.produce_binary_model_norm(
+            continuum_interpolator,
+            &self.target_dispersion,
+            &star1_parameters,
+            &star2_parameters,
+            light_ratio as f32,
+        )?;
+        let (continuum_params, _) = self
+            .continuum_fitter
+            .fit_continuum(observed_spectrum, &synth_spec)?;
+        let time = match result.state.time {
+            Some(t) => t.as_secs_f64(),
+            None => 0.0,
+        };
+        Ok(BinaryOptimizationResult {
+            label1: best_param.fixed_rows::<5>(0).into(),
+            label2: best_param.fixed_rows::<5>(5).into(),
+            light_ratio: best_param[10],
+            continuum_params,
+            ls: result.state.best_cost,
+            time,
+            iters: result.state.iter,
+        })
+    }
 }

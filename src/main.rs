@@ -14,7 +14,7 @@ use convolve_rv::{
     WavelengthDispersion,
 };
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
-use fitting::{fit_pso, uncertainty_chi2, ChunkFitter, ContinuumFitter, PSOSettings};
+use fitting::{ChunkFitter, ContinuumFitter, PSOSettings};
 use interpolate::{GridBounds, Interpolator, Range, WlGrid};
 use iter_num_tools::arange;
 use itertools::Itertools;
