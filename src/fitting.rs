@@ -280,8 +280,15 @@ impl<S: na::Storage<f64, na::Const<5>, na::Const<1>>> From<na::Vector<f64, na::C
 }
 
 #[derive(Debug)]
+pub struct RvLessLabel {
+    pub teff: f64,
+    pub m: f64,
+    pub logg: f64,
+    pub vsini: f64,
+}
+#[derive(Debug)]
 pub struct OptimizationResult {
-    pub label: Label,
+    pub label: Label<f64>,
     pub continuum_params: na::DVector<FluxFloat>,
     pub ls: f64,
     pub iters: u64,
@@ -326,8 +333,107 @@ impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::c
 }
 
 pub struct BinaryOptimizationResult {
-    pub label1: Label,
-    pub label2: Label,
+    pub label1: Label<f64>,
+    pub label2: Label<f64>,
+    pub light_ratio: f64,
+    pub continuum_params: na::DVector<FluxFloat>,
+    pub ls: f64,
+    pub iters: u64,
+    pub time: f64,
+}
+
+struct RVCostFunction<'a, F: ContinuumFitter> {
+    continuum_fitter: &'a F,
+    observed_spectrum: &'a ObservedSpectrum,
+    synth_spec1: na::DVector<FluxFloat>,
+    synth_spec2: na::DVector<FluxFloat>,
+    continuum1: na::DVector<FluxFloat>,
+    continuum2: na::DVector<FluxFloat>,
+}
+
+impl<'a, F: ContinuumFitter> argmin::core::CostFunction for RVCostFunction<'a, F> {
+    type Param = na::SVector<f64, 2>;
+    type Output = f64;
+
+    fn cost(&self, param: &Self::Param) -> std::result::Result<Self::Output, argmin::core::Error> {
+        panic!("Not implemented")
+    }
+}
+
+struct BinaryTimeseriesCostFunction<
+    'a,
+    I: Interpolator,
+    T: WavelengthDispersion,
+    F: ContinuumFitter,
+> {
+    interpolator: &'a I,
+    continuum_interpolator: &'a I,
+    target_dispersion: &'a T,
+    observed_spectra: &'a Vec<ObservedSpectrum>,
+    continuum_fitter: &'a F,
+    parallelize: bool,
+}
+
+impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
+    for BinaryTimeseriesCostFunction<'a, I, T, F>
+{
+    type Param = na::SVector<f64, 9>;
+    type Output = f64;
+
+    fn cost(&self, params: &Self::Param) -> Result<Self::Output> {
+        let star1_parameters = params.fixed_rows::<4>(0).into_owned();
+        let star2_parameters = params.fixed_rows::<4>(5).into_owned();
+        let light_ratio = params[8];
+
+        let synth_spec1 = self.interpolator.interpolate_and_convolve(
+            self.target_dispersion,
+            star1_parameters[0],
+            star1_parameters[1],
+            star1_parameters[2],
+            star1_parameters[3],
+        )?;
+        let continuum1 = self.continuum_interpolator.interpolate_and_convolve(
+            self.target_dispersion,
+            star1_parameters[0],
+            star1_parameters[1],
+            star1_parameters[2],
+            star1_parameters[3],
+        )?;
+        let synth_spec2 = self.interpolator.interpolate_and_convolve(
+            self.target_dispersion,
+            star2_parameters[0],
+            star2_parameters[1],
+            star2_parameters[2],
+            star2_parameters[3],
+        )?;
+        let continuum2 = self.continuum_interpolator.interpolate_and_convolve(
+            self.target_dispersion,
+            star2_parameters[0],
+            star2_parameters[1],
+            star2_parameters[2],
+            star2_parameters[3],
+        )?;
+
+        // let innerCostFunction = RVCostFunction {
+        //     continuum_fitter: self.continuum_fitter,
+        //     observed_spectrum: &self.observed_spectra,
+        //     synth_spec1,
+        //     synth_spec2,
+        //     continuum1,
+        //     continuum2,
+        // };
+
+        panic!("Not")
+    }
+
+    fn parallelize(&self) -> bool {
+        self.parallelize
+    }
+}
+
+pub struct BinaryTimeseriesOptimizationResult {
+    pub label1: RvLessLabel,
+    pub label2: RvLessLabel,
     pub light_ratio: f64,
     pub continuum_params: na::DVector<FluxFloat>,
     pub ls: f64,
