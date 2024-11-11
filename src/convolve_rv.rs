@@ -42,7 +42,7 @@ fn make_gaussian(arr: &mut [FluxFloat], sigma: FluxFloat) {
 pub fn oa_convolve(
     input_array: &na::DVector<FluxFloat>,
     kernel: &na::DVector<FluxFloat>,
-) -> na::DVector<FluxFloat> {
+) -> Result<na::DVector<FluxFloat>> {
     let n = FFTSIZE;
     let mut planner: RealFftPlanner<FluxFloat> = RealFftPlanner::new();
     let fft = planner.plan_fft_forward(n);
@@ -56,8 +56,7 @@ pub fn oa_convolve(
 
     let mut kernel_padded = pad_with_zeros(kernel.as_view(), n);
     let mut h = na::DVector::zeros(n / 2 + 1);
-    fft.process(kernel_padded.as_mut_slice(), h.as_mut_slice())
-        .unwrap();
+    fft.process(kernel_padded.as_mut_slice(), h.as_mut_slice())?;
 
     let mut y = na::DVector::zeros(nx + m - 1);
     for position in (0..nx).step_by(step_size) {
@@ -68,16 +67,14 @@ pub fn oa_convolve(
         };
         let mut x = pad_with_zeros(slice, n);
         let mut transformed = na::DVector::zeros(n / 2 + 1);
-        fft.process(x.as_mut_slice(), transformed.as_mut_slice())
-            .unwrap();
+        fft.process(x.as_mut_slice(), transformed.as_mut_slice())?;
         transformed.component_mul_assign(&h);
         let mut re_transformed = na::DVector::zeros(n);
-        ifft.process(transformed.as_mut_slice(), re_transformed.as_mut_slice())
-            .unwrap();
+        ifft.process(transformed.as_mut_slice(), re_transformed.as_mut_slice())?;
         y.rows_mut(position, n)
             .add_assign(&re_transformed / n as FluxFloat);
     }
-    y
+    Ok(y)
 }
 
 #[derive(Clone, Debug)]
@@ -128,7 +125,7 @@ impl WavelengthDispersion for FixedTargetDispersion {
                 self.synth_wl.n()
             ));
         }
-        let convolved = oa_convolve(&flux_arr, &self.kernel);
+        let convolved = oa_convolve(&flux_arr, &self.kernel)?;
         Ok(convolved.rows(self.n, flux_arr.len()).into_owned())
     }
 }
@@ -331,7 +328,7 @@ pub fn convolve_rotation(
             vsini
         ));
     }
-    let convolved = oa_convolve(input_array, &kernel);
+    let convolved = oa_convolve(input_array, &kernel)?;
     Ok(convolved
         .rows(kernel.len() / 2, input_array.len())
         .into_owned())
