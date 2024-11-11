@@ -144,6 +144,13 @@ impl From<fitting::Label<(Result<f64>, Result<f64>)>> for LabelUncertainties {
     }
 }
 
+#[pymethods]
+impl LabelUncertainties {
+    fn to_json(&self) -> PyResult<String> {
+        Ok(serde_json::to_string(self).unwrap())
+    }
+}
+
 /// Output of the PSO fitting algorithm.
 #[derive(Clone, Debug, Serialize)]
 #[pyclass(module = "normalization", frozen)]
