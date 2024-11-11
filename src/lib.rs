@@ -1,4 +1,5 @@
 #![allow(non_snake_case, clippy::too_many_arguments, non_upper_case_globals)]
+mod continuum_fitting;
 mod convolve_rv;
 mod cubic;
 mod fitting;
@@ -7,16 +8,17 @@ mod model_fetchers;
 mod particleswarm;
 
 use anyhow::Result;
+use continuum_fitting::{
+    ChunkFitter, ConstantContinuum as RsConstantContinuum, ContinuumFitter,
+    FixedContinuum as RsFixedContinuum, LinearModelFitter,
+};
 use convolve_rv::{
     shift_and_resample, FixedTargetDispersion, NoConvolutionDispersionTarget,
     VariableTargetDispersion, WavelengthDispersion,
 };
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
 use enum_dispatch::enum_dispatch;
-use fitting::{
-    ChunkFitter, ConstantContinuum as RsConstantContinuum, ContinuumFitter,
-    FixedContinuum as RsFixedContinuum, LinearModelFitter, ObservedSpectrum, PSOFitter,
-};
+use fitting::{ObservedSpectrum, PSOFitter};
 use indicatif::ProgressBar;
 use interpolate::{FluxFloat, GridBounds, GridInterpolator, Interpolator};
 use model_fetchers::{read_npy_file, CachedFetcher, InMemFetcher, OnDiskFetcher};
@@ -431,7 +433,7 @@ fn FixedContinuum(
 
 #[pyfunction]
 fn ConstantContinuum() -> PyContinuumFitter {
-    PyContinuumFitter(fitting::ConstantContinuum().into())
+    PyContinuumFitter(continuum_fitting::ConstantContinuum().into())
 }
 
 /// Implement methods for all the interpolator classes.

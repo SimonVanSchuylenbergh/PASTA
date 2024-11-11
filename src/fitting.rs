@@ -1,16 +1,19 @@
+use crate::continuum_fitting::ContinuumFitter;
 use crate::convolve_rv::WavelengthDispersion;
-use crate::interpolate::{FluxFloat, GridBoundsBinary, GridBoundsSingle, Interpolator};
+use crate::interpolate::{FluxFloat, GridBounds, Interpolator};
 use crate::particleswarm::{self, PSOBounds};
 use anyhow::{anyhow, Context, Result};
 use argmin::core::observers::{Observe, ObserverMode};
-use argmin::core::{CostFunction, Error, Executor, PopulationState, State, KV};
+use argmin::core::{Executor, PopulationState, State, KV};
 use argmin::solver::brent::BrentRoot;
-use enum_dispatch::enum_dispatch;
+use argmin_math::ArgminRandom;
 use nalgebra as na;
 use num_traits::Float;
+use rand::Rng;
 use serde::Serialize;
 use std::fs::File;
 use std::io::BufWriter;
+use std::iter::once;
 use std::path::PathBuf;
 
 /// Observed specrum with flux and variance
@@ -29,375 +32,175 @@ impl ObservedSpectrum {
     }
 }
 
-/// The function that is used to fit against the pseudo continuum must implement this trait
-#[enum_dispatch]
-pub trait ContinuumFitter: Send + Sync {
-    /// Fit the continuum and return the parameters of the continuum and the chi2 value
-    fn fit_continuum(
-        &self,
-        observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<FluxFloat>,
-    ) -> Result<(na::DVector<FluxFloat>, f64)>;
-
-    /// Build the continuum from the parameters
-    fn build_continuum(&self, params: &na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>>;
-
-    /// Fit the continuum and return  its flux values
-    fn fit_continuum_and_return_continuum(
-        &self,
-        observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<FluxFloat>,
-    ) -> Result<na::DVector<FluxFloat>> {
-        let (fit, _) = self.fit_continuum(observed_spectrum, synthetic_spectrum)?;
-        self.build_continuum(&fit)
-    }
-
-    /// Fit the continuum and return the synthetic spectrum (model+pseudocontinuum)
-    fn fit_continuum_and_return_fit(
-        &self,
-        observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<FluxFloat>,
-    ) -> Result<na::DVector<FluxFloat>> {
-        let continuum =
-            self.fit_continuum_and_return_continuum(observed_spectrum, synthetic_spectrum)?;
-        Ok(continuum.component_mul(synthetic_spectrum))
-    }
+#[derive(Clone)]
+pub struct GridBoundsSingle<B: GridBounds> {
+    grid: B,
+    vsini_range: (f64, f64),
+    rv_range: (f64, f64),
 }
 
-/// Continuum fitting function that is a linear model
-#[derive(Clone, Debug)]
-pub struct LinearModelFitter {
-    design_matrix: na::DMatrix<FluxFloat>,
-    svd: na::linalg::SVD<FluxFloat, na::Dyn, na::Dyn>,
-}
-
-impl LinearModelFitter {
-    /// Make linear model fitter from design matrix
-    pub fn new(design_matrix: na::DMatrix<FluxFloat>) -> Self {
-        let svd = na::linalg::SVD::new(design_matrix.clone(), true, true);
-        Self { design_matrix, svd }
-    }
-
-    /// Solve the linear model
-    fn solve(
-        &self,
-        b: &na::DVector<FluxFloat>,
-        epsilon: FluxFloat,
-    ) -> Result<na::DVector<FluxFloat>, &'static str> {
-        self.svd.solve(b, epsilon)
-    }
-}
-
-impl ContinuumFitter for LinearModelFitter {
-    fn fit_continuum(
-        &self,
-        observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<FluxFloat>,
-    ) -> Result<(na::DVector<FluxFloat>, f64)> {
-        let epsilon = 1e-14;
-        let b = observed_spectrum.flux.component_div(synthetic_spectrum);
-        let solution = self.solve(&b, epsilon).map_err(|err| anyhow!(err))?;
-
-        // calculate residuals
-        let model = &self.design_matrix * &solution;
-        let residuals = model - b;
-
-        let residuals_cut = residuals.rows(50, synthetic_spectrum.len() - 100);
-        let var = &observed_spectrum.var;
-        let var_cut = var.rows(50, var.len() - 100);
-        let chi2 = residuals_cut.component_div(&var_cut).dot(&residuals_cut) as f64
-            / residuals.len() as f64;
-        Ok((solution, chi2))
-    }
-
-    fn build_continuum(&self, params: &na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>> {
-        if params.len() != self.design_matrix.ncols() {
-            return Err(anyhow!(
-                "Incorrect number of parameters {:?}, expected {:?}",
-                params.len(),
-                self.design_matrix.ncols()
-            ));
-        }
-        Ok(&self.design_matrix * params)
-    }
-}
-
-fn map_range<F: Float>(x: F, from_low: F, from_high: F, to_low: F, to_high: F, clamp: bool) -> F {
-    let value = (x - from_low) / (from_high - from_low) * (to_high - to_low) + to_low;
-    if clamp {
-        value.max(to_low).min(to_high)
-    } else {
-        value
-    }
-}
-
-/// Chunk blending function
-fn poly_blend(x: FluxFloat) -> FluxFloat {
-    let x_c = x.clamp(0.0, 1.0);
-    let s = FluxFloat::sin(x_c * std::f32::consts::PI / 2.0);
-    s * s
-}
-
-/// Chunk based polynomial fitter
-#[derive(Clone, Debug)]
-pub struct ChunkFitter {
-    n_chunks: usize,
-    p_order: usize,
-    wl: na::DVector<f64>,
-    chunks_startstop: na::DMatrix<usize>,
-    design_matrices: Vec<na::DMatrix<FluxFloat>>,
-    svds: Vec<na::linalg::SVD<FluxFloat, na::Dyn, na::Dyn>>,
-}
-
-impl ChunkFitter {
-    /// Create a new chunk fitter with number of chunks, order of polynomial and overlapping fraction
-    pub fn new(wl: na::DVector<f64>, n_chunks: usize, p_order: usize, overlap: f64) -> Self {
-        let n = wl.len();
-        let mut chunks_startstop = na::DMatrix::<usize>::zeros(n_chunks, 2);
-        // Build start-stop indices
-        for i in 0..n_chunks {
-            let start = map_range(
-                i as f64 - overlap,
-                0.0,
-                n_chunks as f64,
-                wl[0],
-                wl[n - 1],
-                true,
-            );
-            let stop = map_range(
-                i as f64 + 1.0 + overlap,
-                0.0,
-                n_chunks as f64,
-                wl[0],
-                wl[n - 1],
-                true,
-            );
-            chunks_startstop[(i, 0)] = wl.iter().position(|&x| x > start).unwrap();
-            chunks_startstop[(i, 1)] = wl.iter().rposition(|&x| x < stop).unwrap() + 1;
-        }
-        chunks_startstop[(0, 0)] = 0;
-        chunks_startstop[(n_chunks - 1, 1)] = n;
-
-        let mut dms = Vec::new();
-        let mut svds = Vec::new();
-        for c in 0..n_chunks {
-            let start = chunks_startstop[(c, 0)];
-            let stop = chunks_startstop[(c, 1)];
-            let wl_remap = wl
-                .rows(start, stop - start)
-                .map(|x| map_range(x, wl[start], wl[stop - 1], -1.0, 1.0, false));
-
-            let mut a = na::DMatrix::<FluxFloat>::zeros(stop - start, p_order + 1);
-            for i in 0..(p_order + 1) {
-                a.set_column(i, &wl_remap.map(|x| x.powi(i as i32) as FluxFloat));
-            }
-            dms.push(a.clone());
-            svds.push(na::linalg::SVD::new(a, true, true));
-        }
-
+impl<B: GridBounds> GridBoundsSingle<B> {
+    fn new(grid: B, vsini_range: (f64, f64), rv_range: (f64, f64)) -> Self {
         Self {
-            n_chunks,
-            p_order,
-            wl,
-            chunks_startstop,
-            design_matrices: dms,
-            svds,
+            grid,
+            vsini_range,
+            rv_range,
+        }
+    }
+}
+
+impl<B: GridBounds> PSOBounds<5> for GridBoundsSingle<B> {
+    fn limits(&self) -> (nalgebra::SVector<f64, 5>, nalgebra::SVector<f64, 5>) {
+        let (min, max) = self.grid.limits();
+        (
+            nalgebra::SVector::from_iterator(
+                min.iter()
+                    .copied()
+                    .chain(once(self.vsini_range.0))
+                    .chain(once(self.rv_range.0)),
+            ),
+            nalgebra::SVector::from_iterator(
+                max.iter()
+                    .copied()
+                    .chain(once(self.vsini_range.1))
+                    .chain(once(self.rv_range.1)),
+            ),
+        )
+    }
+
+    fn clamp_1d(&self, param: nalgebra::SVector<f64, 5>, index: usize) -> Result<f64> {
+        match index {
+            3 => Ok(param[3].clamp(self.vsini_range.0, self.vsini_range.1)),
+            4 => Ok(param[4].clamp(self.rv_range.0, self.rv_range.1)),
+            i => self.grid.clamp_1d(param.fixed_rows::<3>(0).into_owned(), i),
         }
     }
 
-    pub fn _fit_chunks(&self, y: &na::DVector<FluxFloat>) -> Vec<na::DVector<FluxFloat>> {
-        (0..self.n_chunks)
-            .map(|c| {
-                let start = self.chunks_startstop[(c, 0)];
-                let stop = self.chunks_startstop[(c, 1)];
-                let y_cut = y.rows(start, stop - start);
+    fn generate_random_within_bounds(
+        &self,
+        rng: &mut impl Rng,
+        num_particles: usize,
+    ) -> Vec<nalgebra::SVector<f64, 5>> {
+        let mut particles = Vec::with_capacity(num_particles);
+        let (min, max) = self.limits();
+        while particles.len() < num_particles {
+            let param = na::SVector::rand_from_range(&min, &max, rng);
+            if self
+                .grid
+                .is_within_bounds(param.fixed_rows::<3>(0).into_owned())
+            {
+                particles.push(param);
+            }
+        }
+        particles
+    }
+}
 
-                self.svds[c].solve(&y_cut, 1e-14).unwrap()
+#[derive(Clone)]
+pub struct GridBoundsBinary<B: GridBounds> {
+    grid: B,
+    light_ratio: (f64, f64),
+    vsini_range: (f64, f64),
+    rv_range1: (f64, f64),
+    rv_range2: (f64, f64),
+}
+
+impl<B: GridBounds> GridBoundsBinary<B> {
+    fn new(
+        grid: B,
+        light_ratio: (f64, f64),
+        vsini_range: (f64, f64),
+        rv_range1: (f64, f64),
+        rv_range2: (f64, f64),
+    ) -> Self {
+        Self {
+            grid,
+            light_ratio,
+            vsini_range,
+            rv_range1,
+            rv_range2,
+        }
+    }
+
+    fn get_first_grid(&self) -> GridBoundsSingle<B> {
+        GridBoundsSingle::new(self.grid.clone(), self.vsini_range, self.rv_range1)
+    }
+
+    fn get_second_grid(&self) -> GridBoundsSingle<B> {
+        GridBoundsSingle::new(self.grid.clone(), self.vsini_range, self.rv_range2)
+    }
+}
+
+impl<B: GridBounds> PSOBounds<11> for GridBoundsBinary<B> {
+    fn limits(&self) -> (na::SVector<f64, 11>, na::SVector<f64, 11>) {
+        let (min, max) = self.grid.limits();
+        (
+            na::SVector::from_iterator(
+                min.iter()
+                    .copied()
+                    .chain(once(self.vsini_range.0))
+                    .chain(once(self.rv_range1.0))
+                    .chain(min.iter().copied())
+                    .chain(once(self.vsini_range.0))
+                    .chain(once(self.rv_range2.0))
+                    .chain(once(self.light_ratio.0)),
+            ),
+            na::SVector::from_iterator(
+                max.iter()
+                    .copied()
+                    .chain(once(self.vsini_range.1))
+                    .chain(once(self.rv_range1.1))
+                    .chain(max.iter().copied())
+                    .chain(once(self.vsini_range.1))
+                    .chain(once(self.rv_range2.1))
+                    .chain(once(self.light_ratio.1)),
+            ),
+        )
+    }
+
+    fn clamp_1d(&self, param: na::SVector<f64, 11>, index: usize) -> Result<f64> {
+        let grid1 = self.get_first_grid();
+        let grid2 = self.get_second_grid();
+        if index < 5 {
+            grid1.clamp_1d(param.fixed_rows::<5>(0).into_owned(), index)
+        } else if index < 10 {
+            grid2.clamp_1d(param.fixed_rows::<5>(5).into_owned(), index - 5)
+        } else {
+            Ok(param[10].max(self.light_ratio.0).min(self.light_ratio.1))
+        }
+    }
+
+    fn generate_random_within_bounds(
+        &self,
+        rng: &mut impl Rng,
+        num_particles: usize,
+    ) -> Vec<na::SVector<f64, 11>> {
+        let grid1 = self.get_first_grid();
+        let grid2 = self.get_second_grid();
+        let first = grid1.generate_random_within_bounds(rng, num_particles);
+        let second = grid2.generate_random_within_bounds(rng, num_particles);
+        let light_ratios = (0..num_particles)
+            .map(|_| rng.gen_range(self.light_ratio.0..self.light_ratio.1))
+            .collect::<Vec<f64>>();
+        first
+            .into_iter()
+            .zip(second)
+            .zip(light_ratios)
+            .map(|((first, second), light_ratio)| {
+                na::SVector::from_iterator(
+                    first
+                        .iter()
+                        .copied()
+                        .chain(second.iter().copied())
+                        .chain(once(light_ratio)),
+                )
             })
             .collect()
-    }
-
-    pub fn build_continuum_from_chunks(
-        &self,
-        pfits: Vec<na::DVector<FluxFloat>>,
-    ) -> na::DVector<FluxFloat> {
-        let polynomials: Vec<na::DVector<FluxFloat>> = self
-            .design_matrices
-            .iter()
-            .zip(pfits.iter())
-            .map(|(dm, p)| dm * p)
-            .collect();
-
-        let mut continuum = na::DVector::<FluxFloat>::zeros(self.wl.len());
-
-        // First chunk
-        let start = self.chunks_startstop[(0, 0)];
-        let stop = self.chunks_startstop[(0, 1)];
-        continuum
-            .rows_mut(start, stop - start)
-            .copy_from(&polynomials[0]);
-
-        // Rest of the chunks
-        for (c, p) in polynomials.into_iter().enumerate().skip(1) {
-            let start = self.chunks_startstop[(c, 0)];
-            let stop = self.chunks_startstop[(c, 1)];
-            let stop_prev = self.chunks_startstop[(c - 1, 1)];
-            let fac = self.wl.rows(start, stop - start).map(|x| {
-                poly_blend(map_range(
-                    x as FluxFloat,
-                    self.wl[stop_prev - 1] as FluxFloat,
-                    self.wl[start] as FluxFloat,
-                    0.0,
-                    1.0,
-                    false,
-                ))
-            });
-
-            let new = continuum.rows(start, stop - start).component_mul(&fac)
-                + p.component_mul(&fac.map(|x| 1.0 - x));
-            continuum.rows_mut(start, stop - start).copy_from(&new);
-        }
-        continuum
-    }
-    pub fn fit_and_return_continuum(
-        &self,
-        observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<FluxFloat>,
-    ) -> (Vec<na::DVector<FluxFloat>>, na::DVector<FluxFloat>) {
-        let y = &observed_spectrum.flux.component_div(synthetic_spectrum);
-        let pfits = self._fit_chunks(y);
-        let continuum = self.build_continuum_from_chunks(pfits.clone());
-        (pfits, continuum)
-    }
-}
-
-impl ContinuumFitter for ChunkFitter {
-    fn fit_continuum(
-        &self,
-        observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<FluxFloat>,
-    ) -> Result<(na::DVector<FluxFloat>, f64)> {
-        let flux = &observed_spectrum.flux;
-        let var = &observed_spectrum.var;
-        let (pfits, cont) = self.fit_and_return_continuum(observed_spectrum, synthetic_spectrum);
-        let fit = synthetic_spectrum.component_mul(&cont);
-        let params = na::DVector::from_iterator(
-            pfits.len() * (self.p_order + 1),
-            pfits.iter().flat_map(|x| x.iter()).cloned(),
-        );
-        let residuals = flux - fit;
-        // Throw away the first and last 20 pixels in chi2 calculation
-        let var_cut = var.rows(50, var.len() - 100);
-        let residuals_cut = residuals.rows(50, flux.len() - 100);
-        let chi2 = residuals_cut.component_div(&var_cut).dot(&residuals_cut) as f64
-            / residuals_cut.len() as f64;
-        Ok((params, chi2))
-    }
-
-    fn build_continuum(&self, params: &na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>> {
-        let pfits: Vec<na::DVector<FluxFloat>> = params
-            .data
-            .as_vec()
-            .chunks(self.p_order + 1)
-            .map(na::DVector::from_row_slice)
-            .collect();
-        Ok(self.build_continuum_from_chunks(pfits))
-    }
-
-    fn fit_continuum_and_return_continuum(
-        &self,
-        observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<FluxFloat>,
-    ) -> Result<na::DVector<FluxFloat>> {
-        let (_, fit) = self.fit_and_return_continuum(observed_spectrum, synthetic_spectrum);
-        Ok(fit)
-    }
-}
-
-/// Used to test fitting with a fixed continuum
-#[derive(Clone, Debug)]
-pub struct FixedContinuum {
-    continuum: na::DVector<FluxFloat>,
-    ignore_first_and_last: usize,
-}
-
-impl FixedContinuum {
-    pub fn new(continuum: na::DVector<FluxFloat>, ignore_first_and_last: usize) -> Self {
-        Self {
-            continuum,
-            ignore_first_and_last,
-        }
-    }
-}
-
-impl ContinuumFitter for FixedContinuum {
-    fn fit_continuum(
-        &self,
-        observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<FluxFloat>,
-    ) -> Result<(na::DVector<FluxFloat>, f64)> {
-        if observed_spectrum.flux.len() != synthetic_spectrum.len() {
-            return Err(anyhow!(
-                "Length of observed and synthetic spectrum are different {:?}, {:?}",
-                observed_spectrum.flux.len(),
-                synthetic_spectrum.len()
-            ));
-        }
-        if observed_spectrum.flux.len() != self.continuum.len() {
-            return Err(anyhow!(
-                "Length of observed and continuum spectrum are different {:?}, {:?}",
-                observed_spectrum.flux.len(),
-                self.continuum.len()
-            ));
-        }
-        let residuals = &observed_spectrum.flux - synthetic_spectrum.component_mul(&self.continuum);
-        let residuals_cut = residuals.rows(
-            self.ignore_first_and_last,
-            observed_spectrum.flux.len() - self.ignore_first_and_last * 2,
-        );
-        let var_cut = observed_spectrum.var.rows(
-            self.ignore_first_and_last,
-            observed_spectrum.flux.len() - self.ignore_first_and_last * 2,
-        );
-        let chi2 = residuals_cut.component_div(&var_cut).dot(&residuals_cut) as f64
-            / residuals_cut.len() as f64;
-        // Return a dummy vec of zero as this is a fixed continuum
-        Ok((na::DVector::zeros(1), chi2))
-    }
-
-    fn build_continuum(&self, _params: &na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>> {
-        Ok(self.continuum.clone())
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct ConstantContinuum();
-
-impl ContinuumFitter for ConstantContinuum {
-    fn fit_continuum(
-        &self,
-        observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<FluxFloat>,
-    ) -> Result<(na::DVector<FluxFloat>, f64)> {
-        let n = synthetic_spectrum.len();
-        let target = observed_spectrum.flux.component_div(synthetic_spectrum);
-        let mean = target.iter().sum::<FluxFloat>() / n as FluxFloat;
-        let continuum = na::DVector::from_element(n, mean);
-        let residuals = &observed_spectrum.flux - synthetic_spectrum.component_mul(&continuum);
-        let chi2 = residuals
-            .component_div(&observed_spectrum.var)
-            .dot(&residuals) as f64
-            / n as f64;
-        Ok((vec![mean].into(), chi2))
-    }
-
-    fn build_continuum(&self, params: &na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>> {
-        Ok(na::DVector::from_element(1, params[0]))
     }
 }
 
 /// Cost function used in the PSO fitting
-struct FitCostFunction<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
+struct CostFunction<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
     interpolator: &'a I,
     target_dispersion: &'a T,
     observed_spectrum: &'a ObservedSpectrum,
@@ -405,8 +208,8 @@ struct FitCostFunction<'a, I: Interpolator, T: WavelengthDispersion, F: Continuu
     parallelize: bool,
 }
 
-impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> CostFunction
-    for FitCostFunction<'a, I, T, F>
+impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
+    for CostFunction<'a, I, T, F>
 {
     type Param = na::SVector<f64, 5>;
     type Output = f64;
@@ -440,6 +243,7 @@ pub struct Label {
     pub rv: f64,
 }
 
+
 impl<S: na::Storage<f64, na::Const<5>, na::Const<1>>> From<na::Vector<f64, na::Const<5>, S>>
     for Label
 {
@@ -462,23 +266,17 @@ pub struct OptimizationResult {
     pub iters: u64,
     pub time: f64,
 }
-struct BinaryFitCostFunction<
-    'a,
-    I1: Interpolator,
-    I2: Interpolator,
-    T: WavelengthDispersion,
-    F: ContinuumFitter,
-> {
-    interpolator: &'a I1,
-    continuum_interpolator: &'a I2,
+struct BinaryCostFunction<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
+    interpolator: &'a I,
+    continuum_interpolator: &'a I,
     target_dispersion: &'a T,
     observed_spectrum: &'a ObservedSpectrum,
     continuum_fitter: &'a F,
     parallelize: bool,
 }
 
-impl<'a, I1: Interpolator, I2: Interpolator, T: WavelengthDispersion, F: ContinuumFitter>
-    CostFunction for BinaryFitCostFunction<'a, I1, I2, T, F>
+impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
+    for BinaryCostFunction<'a, I, T, F>
 {
     type Param = na::SVector<f64, 11>;
     type Output = f64;
@@ -526,29 +324,11 @@ pub struct PSOSettings {
     pub delta: f64,
 }
 
-fn get_pso_fitter<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter>(
-    interpolator: &'a I,
-    target_dispersion: &'a T,
-    observed_spectrum: &'a ObservedSpectrum,
-    continuum_fitter: &'a F,
-    settings: &PSOSettings,
-    vsini_range: (f64, f64),
-    rv_range: (f64, f64),
-    parallelize: bool,
-) -> Executor<
-    FitCostFunction<'a, I, T, F>,
-    particleswarm::ParticleSwarm<5, GridBoundsSingle<I::GB>, f64>,
-    PopulationState<particleswarm::Particle<na::SVector<f64, 5>, f64>, f64>,
-> {
-    let cost_function = FitCostFunction {
-        interpolator,
-        target_dispersion,
-        observed_spectrum,
-        continuum_fitter,
-        parallelize,
-    };
-    let bounds = interpolator.bounds_single(vsini_range, rv_range).clone();
-    let solver = particleswarm::ParticleSwarm::new(bounds, settings.num_particles)
+fn setup_pso<const N: usize, B: PSOBounds<N>>(
+    bounds: B,
+    settings: PSOSettings,
+) -> particleswarm::ParticleSwarm<N, B, f64> {
+    particleswarm::ParticleSwarm::new(bounds, settings.num_particles)
         .with_inertia_factor(settings.inertia_factor)
         .unwrap()
         .with_cognitive_factor(settings.cognitive_factor)
@@ -556,52 +336,7 @@ fn get_pso_fitter<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitt
         .with_social_factor(settings.social_factor)
         .unwrap()
         .with_delta(settings.delta)
-        .unwrap();
-    Executor::new(cost_function, solver).configure(|state| state.max_iters(settings.max_iters))
-}
-
-fn get_binary_pso_fitter<
-    'a,
-    I1: Interpolator,
-    I2: Interpolator,
-    T: WavelengthDispersion,
-    F: ContinuumFitter,
->(
-    interpolator: &'a I1,
-    continuum_interpolator: &'a I2,
-    target_dispersion: &'a T,
-    observed_spectrum: &'a ObservedSpectrum,
-    continuum_fitter: &'a F,
-    settings: &PSOSettings,
-    vsini_range: (f64, f64),
-    rv_range: (f64, f64),
-    parallelize: bool,
-) -> Executor<
-    BinaryFitCostFunction<'a, I1, I2, T, F>,
-    particleswarm::ParticleSwarm<11, GridBoundsBinary<I1::GB>, f64>,
-    PopulationState<particleswarm::Particle<na::SVector<f64, 11>, f64>, f64>,
-> {
-    let cost_function = BinaryFitCostFunction {
-        interpolator,
-        continuum_interpolator,
-        target_dispersion,
-        observed_spectrum,
-        continuum_fitter,
-        parallelize,
-    };
-    let bounds = interpolator
-        .bounds_binary(vsini_range, rv_range, rv_range)
-        .clone();
-    let solver = particleswarm::ParticleSwarm::new(bounds, settings.num_particles)
-        .with_inertia_factor(settings.inertia_factor)
         .unwrap()
-        .with_cognitive_factor(settings.cognitive_factor)
-        .unwrap()
-        .with_social_factor(settings.social_factor)
-        .unwrap()
-        .with_delta(settings.delta)
-        .unwrap();
-    Executor::new(cost_function, solver).configure(|state| state.max_iters(settings.max_iters))
 }
 
 struct PSObserver {
@@ -649,7 +384,9 @@ impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 5>, f64>, 
         _kv: &KV,
     ) -> Result<()> {
         let iter = state.get_iter();
-        let particles = state.get_population().ok_or(Error::msg("No particles"))?;
+        let particles = state
+            .get_population()
+            .ok_or(argmin::core::Error::msg("No particles"))?;
         let values: Vec<ParticleInfo> = particles
             .iter()
             .map(|p| (p.position, p.cost).into())
@@ -705,7 +442,9 @@ impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 11>, f64>,
         _kv: &KV,
     ) -> Result<()> {
         let iter = state.get_iter();
-        let particles = state.get_population().ok_or(Error::msg("No particles"))?;
+        let particles = state
+            .get_population()
+            .ok_or(argmin::core::Error::msg("No particles"))?;
         let values: Vec<BinaryParticleInfo> = particles
             .iter()
             .map(|p| (p.position, p.cost).into())
@@ -728,7 +467,7 @@ struct ModelFitCost<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFi
     search_radius: f64,
 }
 
-impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> CostFunction
+impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
     for ModelFitCost<'a, I, T, F>
 {
     type Param = f64;
@@ -790,16 +529,19 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> PSOFitter<T, F> {
         trace_directory: Option<String>,
         parallelize: bool,
     ) -> Result<OptimizationResult> {
-        let fitter = get_pso_fitter(
+        let cost_function = CostFunction {
             interpolator,
-            &self.target_dispersion,
+            target_dispersion: &self.target_dispersion,
             observed_spectrum,
-            &self.continuum_fitter,
-            &self.settings,
-            self.vsini_range,
-            self.rv_range,
+            continuum_fitter: &self.continuum_fitter,
             parallelize,
-        );
+        };
+        let bounds =
+            GridBoundsSingle::new(interpolator.grid_bounds(), self.vsini_range, self.rv_range);
+        let solver = setup_pso(bounds, self.settings.clone());
+        let fitter = Executor::new(cost_function, solver)
+            .configure(|state| state.max_iters(self.settings.max_iters));
+
         let result = if let Some(dir) = trace_directory {
             let observer = PSObserver::new(&dir, "iteration");
             fitter.add_observer(observer, ObserverMode::Always).run()?
@@ -876,7 +618,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> PSOFitter<T, F> {
 
         Ok(core::array::from_fn(|i| {
             // Maybe don't hardcode here
-            let bounds = interpolator.bounds_single((0.0, 1e4), (-1e3, 1e3)).clone();
+            let bounds = GridBoundsSingle::new(interpolator.grid_bounds(), (0.0, 1e4), (-1e3, 1e3));
 
             let get_bound = |right: bool| {
                 let costfunction = ModelFitCost {
@@ -922,25 +664,33 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> PSOFitter<T, F> {
         }))
     }
 
-    pub fn fit_binary_normalized(
+    pub fn fit_binary_normalized<I: Interpolator>(
         &self,
-        interpolator: &impl Interpolator,
-        continuum_interpolator: &impl Interpolator,
+        interpolator: &I,
+        continuum_interpolator: &I,
         observed_spectrum: &ObservedSpectrum,
         trace_directory: Option<String>,
         parallelize: bool,
     ) -> Result<BinaryOptimizationResult> {
-        let fitter = get_binary_pso_fitter(
+        let cost_function = BinaryCostFunction {
             interpolator,
             continuum_interpolator,
-            &self.target_dispersion,
+            target_dispersion: &self.target_dispersion,
             observed_spectrum,
-            &self.continuum_fitter,
-            &self.settings,
-            self.vsini_range,
-            self.rv_range,
+            continuum_fitter: &self.continuum_fitter,
             parallelize,
+        };
+        let bounds = GridBoundsBinary::new(
+            interpolator.grid_bounds(),
+            (0.0, 1.0),
+            (0.0, 1e4),
+            (-1e3, 1e3),
+            (-1e3, 1e3),
         );
+        let solver = setup_pso(bounds, self.settings.clone());
+        let fitter = Executor::new(cost_function, solver)
+            .configure(|state| state.max_iters(self.settings.max_iters));
+
         let result = if let Some(dir) = trace_directory {
             let observer = PSObserver::new(&dir, "iteration");
             fitter.add_observer(observer, ObserverMode::Always).run()?

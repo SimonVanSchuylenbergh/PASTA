@@ -308,15 +308,16 @@ pub fn convolve_rotation(
     input_array: &na::DVector<FluxFloat>,
     vsini: f64,
 ) -> Result<na::DVector<FluxFloat>> {
+    if vsini < 0.0 {
+        return Err(anyhow!("vsini must be positive"));
+    }
     let dvelo = match synth_wl {
         WlGrid::Linspace(first, step, total) => {
             // Use the middle wavelength as an approximation
             let avg_wl = (first + first + step * (*total as f64)) / 2.0;
             step / avg_wl
         }
-        WlGrid::Logspace(_, step, _) => {
-            std::f64::consts::LN_10 * step
-        }
+        WlGrid::Logspace(_, step, _) => std::f64::consts::LN_10 * step,
     };
     let kernel = build_rotation_kernel(vsini, dvelo);
     if kernel.len() <= 2 {
@@ -342,6 +343,14 @@ pub fn shift_and_resample(
     observed_wl: &na::DVector<f64>,
     rv: f64,
 ) -> Result<na::DVector<FluxFloat>> {
+    if synth_wl.n() != input_array.len() {
+        return Err(anyhow!(
+                "Length of input_array and wavelength grid don't match. input_array: {:?}, synth_wl: {:?}",
+                input_array.len(),
+                synth_wl.n()
+            ));
+    }
+
     let shift_factor = 1.0 - rv / 299792.0;
     let mut output = na::DVector::zeros(observed_wl.len());
 
@@ -374,29 +383,4 @@ pub fn shift_and_resample(
         output[i] = (1.0 - weight) * input_array[j] + weight * input_array[j + 1];
     }
     Ok(output)
-}
-
-pub fn rot_broad_rv(
-    input_array: na::DVector<FluxFloat>,
-    synth_wl: WlGrid,
-    target_dispersion: &impl WavelengthDispersion,
-    vsini: f64,
-    rv: f64,
-) -> Result<na::DVector<FluxFloat>> {
-    if vsini < 0.0 {
-        return Err(anyhow!("vsini must be positive"));
-    }
-    if synth_wl.n() != input_array.len() {
-        return Err(anyhow!(
-            "Length of input_array and wavelength grid don't match. input_array: {:?}, synth_wl: {:?}",
-            input_array.len(),
-            synth_wl.n()
-        ));
-    }
-    let convolved_for_rotation = convolve_rotation(&synth_wl, &input_array, vsini)?;
-    // Convolve for resolution
-    let output = target_dispersion.convolve(convolved_for_rotation)?;
-    let observed_wl = target_dispersion.wavelength();
-    // RV shift and resample to observed wavelength grid
-    shift_and_resample(&output, synth_wl, observed_wl, rv)
 }

@@ -2,6 +2,7 @@
 
 mod convolve_rv;
 mod cubic;
+mod continuum_fitting;
 mod fitting;
 mod interpolate;
 mod model_fetchers;
@@ -10,12 +11,13 @@ use crate::fitting::ObservedSpectrum;
 use crate::interpolate::{Grid, GridInterpolator};
 use anyhow::Result;
 use convolve_rv::{
-    oa_convolve, rot_broad_rv, NoConvolutionDispersionTarget, VariableTargetDispersion,
+    oa_convolve, NoConvolutionDispersionTarget, VariableTargetDispersion,
     WavelengthDispersion,
 };
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
-use fitting::{ChunkFitter, ContinuumFitter, PSOSettings};
+use fitting::{PSOSettings};
 use interpolate::{GridBounds, Interpolator, Range, WlGrid};
+use continuum_fitting::ChunkFitter;
 use iter_num_tools::arange;
 use itertools::Itertools;
 use model_fetchers::{CachedFetcher, InMemFetcher, OnDiskFetcher};

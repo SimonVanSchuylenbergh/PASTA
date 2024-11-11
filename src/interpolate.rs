@@ -1,12 +1,8 @@
-use crate::convolve_rv::{rot_broad_rv, WavelengthDispersion};
+use crate::convolve_rv::{convolve_rotation, shift_and_resample, WavelengthDispersion};
 use crate::cubic::{calculate_interpolation_coefficients, LocalGrid};
-use crate::particleswarm::PSOBounds;
 use anyhow::{anyhow, bail, Context, Result};
-use argmin_math::ArgminRandom;
 use itertools::Itertools;
 use nalgebra::{self as na};
-use rand::Rng;
-use std::iter::once;
 
 pub type FluxFloat = f32; // Float type used for spectra
 
@@ -57,173 +53,6 @@ pub trait GridBounds: Clone {
     fn limits(&self) -> (na::SVector<f64, 3>, na::SVector<f64, 3>);
     fn is_within_bounds(&self, param: na::SVector<f64, 3>) -> bool;
     fn clamp_1d(&self, param: na::SVector<f64, 3>, index: usize) -> Result<f64>;
-}
-
-#[derive(Clone)]
-pub struct GridBoundsSingle<B: GridBounds> {
-    grid: B,
-    vsini_range: (f64, f64),
-    rv_range: (f64, f64),
-}
-
-impl<B: GridBounds> GridBoundsSingle<B> {
-    fn new(grid: B, vsini_range: (f64, f64), rv_range: (f64, f64)) -> Self {
-        Self {
-            grid,
-            vsini_range,
-            rv_range,
-        }
-    }
-}
-
-impl<B: GridBounds> PSOBounds<5> for GridBoundsSingle<B> {
-    fn limits(&self) -> (nalgebra::SVector<f64, 5>, nalgebra::SVector<f64, 5>) {
-        let (min, max) = self.grid.limits();
-        (
-            nalgebra::SVector::from_iterator(
-                min.iter()
-                    .copied()
-                    .chain(once(self.vsini_range.0))
-                    .chain(once(self.rv_range.0)),
-            ),
-            nalgebra::SVector::from_iterator(
-                max.iter()
-                    .copied()
-                    .chain(once(self.vsini_range.1))
-                    .chain(once(self.rv_range.1)),
-            ),
-        )
-    }
-
-    fn clamp_1d(&self, param: nalgebra::SVector<f64, 5>, index: usize) -> Result<f64> {
-        match index {
-            3 => Ok(param[3].clamp(self.vsini_range.0, self.vsini_range.1)),
-            4 => Ok(param[4].clamp(self.rv_range.0, self.rv_range.1)),
-            i => self.grid.clamp_1d(param.fixed_rows::<3>(0).into_owned(), i),
-        }
-    }
-
-    fn generate_random_within_bounds(
-        &self,
-        rng: &mut impl Rng,
-        num_particles: usize,
-    ) -> Vec<nalgebra::SVector<f64, 5>> {
-        let mut particles = Vec::with_capacity(num_particles);
-        let (min, max) = self.limits();
-        while particles.len() < num_particles {
-            let param = na::SVector::rand_from_range(&min, &max, rng);
-            if self
-                .grid
-                .is_within_bounds(param.fixed_rows::<3>(0).into_owned())
-            {
-                particles.push(param);
-            }
-        }
-        particles
-    }
-}
-
-#[derive(Clone)]
-pub struct GridBoundsBinary<B: GridBounds> {
-    grid: B,
-    light_ratio: (f64, f64),
-    vsini_range: (f64, f64),
-    rv_range1: (f64, f64),
-    rv_range2: (f64, f64),
-}
-
-impl<B: GridBounds> GridBoundsBinary<B> {
-    fn new(
-        grid: B,
-        light_ratio: (f64, f64),
-        vsini_range: (f64, f64),
-        rv_range1: (f64, f64),
-        rv_range2: (f64, f64),
-    ) -> Self {
-        Self {
-            grid,
-            light_ratio,
-            vsini_range,
-            rv_range1,
-            rv_range2,
-        }
-    }
-
-    fn get_first_grid(&self) -> GridBoundsSingle<B> {
-        GridBoundsSingle::new(self.grid.clone(), self.vsini_range, self.rv_range1)
-    }
-
-    fn get_second_grid(&self) -> GridBoundsSingle<B> {
-        GridBoundsSingle::new(self.grid.clone(), self.vsini_range, self.rv_range2)
-    }
-}
-
-impl<B: GridBounds> PSOBounds<11> for GridBoundsBinary<B> {
-    fn limits(&self) -> (na::SVector<f64, 11>, na::SVector<f64, 11>) {
-        let (min, max) = self.grid.limits();
-        (
-            na::SVector::from_iterator(
-                min.iter()
-                    .copied()
-                    .chain(once(self.vsini_range.0))
-                    .chain(once(self.rv_range1.0))
-                    .chain(min.iter().copied())
-                    .chain(once(self.vsini_range.0))
-                    .chain(once(self.rv_range2.0))
-                    .chain(once(self.light_ratio.0)),
-            ),
-            na::SVector::from_iterator(
-                max.iter()
-                    .copied()
-                    .chain(once(self.vsini_range.1))
-                    .chain(once(self.rv_range1.1))
-                    .chain(max.iter().copied())
-                    .chain(once(self.vsini_range.1))
-                    .chain(once(self.rv_range2.1))
-                    .chain(once(self.light_ratio.1)),
-            ),
-        )
-    }
-
-    fn clamp_1d(&self, param: na::SVector<f64, 11>, index: usize) -> Result<f64> {
-        let grid1 = self.get_first_grid();
-        let grid2 = self.get_second_grid();
-        if index < 5 {
-            grid1.clamp_1d(param.fixed_rows::<5>(0).into_owned(), index)
-        } else if index < 10 {
-            grid2.clamp_1d(param.fixed_rows::<5>(5).into_owned(), index - 5)
-        } else {
-            Ok(param[10].max(self.light_ratio.0).min(self.light_ratio.1))
-        }
-    }
-
-    fn generate_random_within_bounds(
-        &self,
-        rng: &mut impl Rng,
-        num_particles: usize,
-    ) -> Vec<na::SVector<f64, 11>> {
-        let grid1 = self.get_first_grid();
-        let grid2 = self.get_second_grid();
-        let first = grid1.generate_random_within_bounds(rng, num_particles);
-        let second = grid2.generate_random_within_bounds(rng, num_particles);
-        let light_ratios = (0..num_particles)
-            .map(|_| rng.gen_range(self.light_ratio.0..self.light_ratio.1))
-            .collect::<Vec<f64>>();
-        first
-            .into_iter()
-            .zip(second)
-            .zip(light_ratios)
-            .map(|((first, second), light_ratio)| {
-                na::SVector::from_iterator(
-                    first
-                        .iter()
-                        .copied()
-                        .chain(second.iter().copied())
-                        .chain(once(light_ratio)),
-                )
-            })
-            .collect()
-    }
 }
 
 #[derive(Clone)]
@@ -703,28 +532,15 @@ pub trait Interpolator: Send + Sync {
 
     fn synth_wl(&self) -> WlGrid;
     fn grid_bounds(&self) -> Self::GB;
-    fn bounds_single(
-        &self,
-        vsini_range: (f64, f64),
-        rv_range: (f64, f64),
-    ) -> GridBoundsSingle<Self::GB> {
-        GridBoundsSingle::new(self.grid_bounds(), vsini_range, rv_range)
-    }
-    fn bounds_binary(
-        &self,
-        vsini_range: (f64, f64),
-        rv_range1: (f64, f64),
-        rv_range2: (f64, f64),
-    ) -> GridBoundsBinary<Self::GB> {
-        GridBoundsBinary::new(
-            self.grid_bounds(),
-            (0.0, 1.0),
-            vsini_range,
-            rv_range1,
-            rv_range2,
-        )
-    }
     fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<na::DVector<FluxFloat>>;
+    fn interpolate_and_convolve(
+        &self,
+        target_dispersion: &impl WavelengthDispersion,
+        teff: f64,
+        m: f64,
+        logg: f64,
+        vsini: f64,
+    ) -> Result<na::DVector<FluxFloat>>;
     fn produce_model(
         &self,
         target_dispersion: &impl WavelengthDispersion,
@@ -908,6 +724,26 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         Ok(interpolated)
     }
 
+    fn interpolate_and_convolve(
+        &self,
+        target_dispersion: &impl WavelengthDispersion,
+        teff: f64,
+        m: f64,
+        logg: f64,
+        vsini: f64,
+    ) -> Result<na::DVector<FluxFloat>> {
+        let interpolated = self
+            .interpolate(teff, m, logg)
+            .with_context(|| format!("Error while interpolating at ({}, {}, {})", teff, m, logg))?;
+
+        let convolved_for_rotation = convolve_rotation(&self.synth_wl, &interpolated, vsini)
+            .with_context(|| format!("Error during rotational broadening, vsini={}", vsini))?;
+        let model = target_dispersion
+            .convolve(convolved_for_rotation)
+            .context("Error during instrument resolution convolution")?;
+        Ok(model)
+    }
+
     fn produce_model(
         &self,
         target_dispersion: &impl WavelengthDispersion,
@@ -920,14 +756,16 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         let interpolated = self
             .interpolate(teff, m, logg)
             .with_context(|| format!("Error while interpolating at ({}, {}, {})", teff, m, logg))?;
-        let broadened = rot_broad_rv(interpolated, self.synth_wl(), target_dispersion, vsini, rv)
-            .with_context(|| {
-            format!(
-                "Error during convolution/resampling step at ({}, {}, {})",
-                teff, m, logg
-            )
-        })?;
-        Ok(broadened)
+
+        let convolved_for_rotation = convolve_rotation(&self.synth_wl, &interpolated, vsini)
+            .with_context(|| format!("Error during rotational broadening, vsini={}", vsini))?;
+        let model = target_dispersion
+            .convolve(convolved_for_rotation)
+            .context("Error during instrument resolution convolution")?;
+        let output = shift_and_resample(&model, self.synth_wl, target_dispersion.wavelength(), rv)
+            .context("error during RV shifting / resampling")?;
+
+        Ok(output)
     }
 
     fn produce_model_on_grid(
@@ -962,14 +800,21 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
             .try_get_index(logg, logg_limits)
             .context("logg not in grid")?;
         let (spec, factor) = self.fetcher.find_spectrum(i, j, k)?;
-        let broadened = rot_broad_rv(
-            spec.into_owned()
+
+        let convolved_for_rotation = convolve_rotation(
+            &self.synth_wl,
+            &spec
+                .into_owned()
                 .map(|x| (x as FluxFloat) / 65535.0 * factor),
-            self.synth_wl(),
-            target_dispersion,
             vsini,
-            rv,
-        )?;
-        Ok(broadened)
+        )
+        .with_context(|| format!("Error during rotational broadening, vsini={}", vsini))?;
+        let model = target_dispersion
+            .convolve(convolved_for_rotation)
+            .context("Error during instrument resolution convolution")?;
+        let output = shift_and_resample(&model, self.synth_wl, target_dispersion.wavelength(), rv)
+            .context("error during RV shifting / resampling")?;
+
+        Ok(output)
     }
 }
