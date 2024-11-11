@@ -86,14 +86,60 @@ pub struct Label {
     rv: f64,
 }
 
-impl From<fitting::Label> for Label {
-    fn from(value: fitting::Label) -> Self {
-        Label {
+impl From<fitting::Label<f64>> for Label {
+    fn from(value: fitting::Label<f64>) -> Self {
+        Self {
             teff: value.teff,
             m: value.m,
             logg: value.logg,
             vsini: value.vsini,
             rv: value.rv,
+        }
+    }
+}
+
+impl Into<fitting::Label<f64>> for Label {
+    fn into(self) -> fitting::Label<f64> {
+        fitting::Label {
+            teff: self.teff,
+            m: self.m,
+            logg: self.logg,
+            vsini: self.vsini,
+            rv: self.rv,
+        }
+    }
+}
+
+#[pymethods]
+impl Label {
+    fn as_list(&self) -> [f64; 5] {
+        [self.teff, self.m, self.logg, self.vsini, self.rv]
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[pyclass(module = "normalization", frozen)]
+pub struct LabelUncertainties {
+    #[pyo3(get)]
+    teff: (Option<f64>, Option<f64>),
+    #[pyo3(get)]
+    m: (Option<f64>, Option<f64>),
+    #[pyo3(get)]
+    logg: (Option<f64>, Option<f64>),
+    #[pyo3(get)]
+    vsini: (Option<f64>, Option<f64>),
+    #[pyo3(get)]
+    rv: (Option<f64>, Option<f64>),
+}
+
+impl From<fitting::Label<(Result<f64>, Result<f64>)>> for LabelUncertainties {
+    fn from(value: fitting::Label<(Result<f64>, Result<f64>)>) -> Self {
+        Self {
+            teff: (value.teff.0.ok(), value.teff.1.ok()),
+            m: (value.m.0.ok(), value.m.1.ok()),
+            logg: (value.logg.0.ok(), value.logg.1.ok()),
+            vsini: (value.vsini.0.ok(), value.vsini.1.ok()),
+            rv: (value.rv.0.ok(), value.rv.1.ok()),
         }
     }
 }
@@ -862,9 +908,9 @@ macro_rules! implement_methods {
                 observed_flux: Vec<FluxFloat>,
                 observed_var: Vec<FluxFloat>,
                 spec_res: f64,
-                parameters: [f64; 5],
+                label: Label,
                 search_radius: Option<[f64; 5]>,
-            ) -> [(Option<f64>, Option<f64>); 5] {
+            ) -> LabelUncertainties {
                 let search_radius = search_radius.unwrap_or([2000.0, 0.3, 0.3, 40.0, 40.0]);
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
                 self.0
@@ -872,11 +918,11 @@ macro_rules! implement_methods {
                         &interpolator.0,
                         &observed_spectrum,
                         spec_res,
-                        parameters.into(),
-                        search_radius.into(),
+                        label.into(),
+                        fitting::Label::from_array(search_radius).into(),
                     )
                     .unwrap()
-                    .map(|(l, r)| (l.ok(), r.ok()))
+                    .into()
             }
 
             /// Uncertainties with the chi2 landscape method,
@@ -887,15 +933,15 @@ macro_rules! implement_methods {
                 observed_fluxes: Vec<Vec<FluxFloat>>,
                 observed_vars: Vec<Vec<FluxFloat>>,
                 spec_res: f64,
-                parameters: Vec<[f64; 5]>,
+                labels: Vec<Label>,
                 search_radius: Option<[f64; 5]>,
-            ) -> Vec<[(Option<f64>, Option<f64>); 5]> {
+            ) -> Vec<LabelUncertainties> {
                 let search_radius = search_radius.unwrap_or([2000.0, 0.3, 0.3, 40.0, 40.0]);
                 let bar = ProgressBar::new(observed_fluxes.len() as u64);
                 observed_fluxes
                     .into_par_iter()
                     .zip(observed_vars)
-                    .zip(parameters)
+                    .zip(labels)
                     .map(|((flux, var), params)| {
                         bar.inc(1);
                         let obs = ObservedSpectrum::from_vecs(flux, var);
@@ -905,10 +951,10 @@ macro_rules! implement_methods {
                                 &obs,
                                 spec_res,
                                 params.into(),
-                                search_radius.into(),
+                                fitting::Label::from_array(search_radius).into(),
                             )
                             .unwrap()
-                            .map(|(l, r)| (l.ok(), r.ok()))
+                            .into()
                     })
                     .collect()
             }

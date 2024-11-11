@@ -234,18 +234,39 @@ impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::c
     }
 }
 
-#[derive(Debug)]
-pub struct Label {
-    pub teff: f64,
-    pub m: f64,
-    pub logg: f64,
-    pub vsini: f64,
-    pub rv: f64,
+#[derive(Clone, Debug)]
+pub struct Label<T> {
+    pub teff: T,
+    pub m: T,
+    pub logg: T,
+    pub vsini: T,
+    pub rv: T,
 }
 
+impl<T> Label<T> {
+    pub fn as_array(self) -> [T; 5] {
+        [self.teff, self.m, self.logg, self.vsini, self.rv]
+    }
+
+    pub fn from_array(value: [T; 5]) -> Self {
+        let [teff, m, logg, vsini, rv] = value;
+        Self {
+            teff,
+            m,
+            logg,
+            vsini,
+            rv,
+        }
+    }
+}
+impl<T: na::Scalar> Label<T> {
+    fn as_vector(self) -> na::SVector<T, 5> {
+        na::SVector::from_row_slice(self.as_array().as_slice())
+    }
+}
 
 impl<S: na::Storage<f64, na::Const<5>, na::Const<1>>> From<na::Vector<f64, na::Const<5>, S>>
-    for Label
+    for Label<f64>
 {
     fn from(value: na::Vector<f64, na::Const<5>, S>) -> Self {
         Self {
@@ -592,10 +613,11 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> PSOFitter<T, F> {
         interpolator: &impl Interpolator,
         observed_spectrum: &ObservedSpectrum,
         spec_res: f64,
-        label: na::SVector<f64, 5>,
-        search_radius: na::SVector<f64, 5>,
-    ) -> Result<[(Result<f64>, Result<f64>); 5]> {
-        let mut search_radius = search_radius;
+        label: Label<f64>,
+        search_radius: Label<f64>,
+    ) -> Result<Label<(Result<f64>, Result<f64>)>> {
+        let mut search_radius = search_radius.as_vector();
+        let label = label.as_vector();
         search_radius[0] *= label[0];
         search_radius[3] = (label[3] * search_radius[3]).max(100.0);
         let best_synth_spec = interpolator.produce_model(
@@ -616,7 +638,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> PSOFitter<T, F> {
         let n = 4.0 * spec_res * (last_wl - first_wl) / (first_wl + last_wl);
         let target_chi = best_chi2 * (1.0 + (2.0 / n).sqrt());
 
-        Ok(core::array::from_fn(|i| {
+        let computer = |i| {
             // Maybe don't hardcode here
             let bounds = GridBoundsSingle::new(interpolator.grid_bounds(), (0.0, 1e4), (-1e3, 1e3));
 
@@ -661,7 +683,14 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> PSOFitter<T, F> {
             };
 
             (get_bound(false), get_bound(true))
-        }))
+        };
+        Ok(Label {
+            teff: computer(0),
+            m: computer(1),
+            logg: computer(2),
+            vsini: computer(3),
+            rv: computer(4),
+        })
     }
 
     pub fn fit_binary_normalized<I: Interpolator>(
