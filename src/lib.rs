@@ -29,6 +29,7 @@ use numpy::array::PyArray;
 use numpy::{Ix1, Ix2, PyArrayLike};
 use pyo3::{prelude::*, pyclass};
 use rayon::prelude::*;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 /// Parameters to the PSO algorithm
@@ -70,7 +71,7 @@ impl From<PSOSettings> for fitting::PSOSettings {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 #[pyclass(module = "normalization", frozen)]
 pub struct Label {
     #[pyo3(get)]
@@ -98,7 +99,7 @@ impl From<fitting::Label> for Label {
 }
 
 /// Output of the PSO fitting algorithm.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 #[pyclass(module = "normalization", frozen)]
 pub struct OptimizationResult {
     /// Teff, [M/H], logg, vsini, RV
@@ -132,8 +133,15 @@ impl From<fitting::OptimizationResult> for OptimizationResult {
     }
 }
 
+#[pymethods]
+impl OptimizationResult {
+    fn to_json(&self) -> PyResult<String> {
+        Ok(serde_json::to_string(self).unwrap())
+    }
+}
+
 /// Output of the PSO binary fitting algorithm.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 #[pyclass(module = "normalization", frozen)]
 pub struct BinaryOptimizationResult {
     /// (Teff, [M/H], logg, vsini, RV)
@@ -170,6 +178,12 @@ impl From<fitting::BinaryOptimizationResult> for BinaryOptimizationResult {
             iterations: result.iters,
             time: result.time,
         }
+    }
+}
+
+impl BinaryOptimizationResult {
+    fn to_json(&self) -> PyResult<String> {
+        Ok(serde_json::to_string(self).unwrap())
     }
 }
 
