@@ -945,31 +945,14 @@ impl OnDiskInterpolator {
 
 /// Interpolator that loads every grid spectrum into memory in the beginning.
 #[pyclass]
-#[derive(Clone)]
-pub struct InMemInterpolator {
-    dir: String,
-    includes_factor: bool,
-    wavelength: WlGrid,
-}
-
-/// Interpolator where all spectra have been loaded into memory.
-#[pyclass]
-pub struct LoadedInMemInterpolator(GridInterpolator<InMemFetcher>);
+pub struct InMemInterpolator(GridInterpolator<InMemFetcher>);
 
 #[pymethods]
 impl InMemInterpolator {
     #[new]
-    pub fn new(dir: &str, includes_factor: bool, wavelength: WlGrid) -> Self {
-        Self {
-            dir: dir.to_string(),
-            includes_factor,
-            wavelength,
-        }
-    }
-
-    fn load(&self) -> LoadedInMemInterpolator {
-        let fetcher = InMemFetcher::new(&self.dir, self.includes_factor).unwrap();
-        LoadedInMemInterpolator(GridInterpolator::new(fetcher, self.wavelength.0))
+    fn new(dir: &str, includes_factor: bool, wavelength: WlGrid) -> InMemInterpolator {
+        let fetcher = InMemFetcher::new(&dir, includes_factor).unwrap();
+        InMemInterpolator(GridInterpolator::new(fetcher, wavelength.0))
     }
 }
 /// Interpolator that caches the last _lrucap_ spectra
@@ -1002,7 +985,7 @@ impl CachedInterpolator {
 }
 
 implement_methods!(OnDiskInterpolator, OnDiskFetcher, OnDiskSingleFitter);
-implement_methods!(LoadedInMemInterpolator, InMemFetcher, InMemSingleFitter);
+implement_methods!(InMemInterpolator, InMemFetcher, InMemSingleFitter);
 implement_methods!(CachedInterpolator, CachedFetcher, CachedSingleFitter);
 
 #[pyfunction]
