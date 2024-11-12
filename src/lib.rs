@@ -121,25 +121,25 @@ impl Label {
 #[pyclass(module = "normalization", frozen)]
 pub struct LabelUncertainties {
     #[pyo3(get)]
-    dteff: (Option<f64>, Option<f64>),
+    teff: (Option<f64>, Option<f64>),
     #[pyo3(get)]
-    dm: (Option<f64>, Option<f64>),
+    m: (Option<f64>, Option<f64>),
     #[pyo3(get)]
-    dlogg: (Option<f64>, Option<f64>),
+    logg: (Option<f64>, Option<f64>),
     #[pyo3(get)]
-    dvsini: (Option<f64>, Option<f64>),
+    vsini: (Option<f64>, Option<f64>),
     #[pyo3(get)]
-    drv: (Option<f64>, Option<f64>),
+    rv: (Option<f64>, Option<f64>),
 }
 
 impl From<fitting::Label<(Result<f64>, Result<f64>)>> for LabelUncertainties {
     fn from(value: fitting::Label<(Result<f64>, Result<f64>)>) -> Self {
         Self {
-            dteff: (value.teff.0.ok(), value.teff.1.ok()),
-            dm: (value.m.0.ok(), value.m.1.ok()),
-            dlogg: (value.logg.0.ok(), value.logg.1.ok()),
-            dvsini: (value.vsini.0.ok(), value.vsini.1.ok()),
-            drv: (value.rv.0.ok(), value.rv.1.ok()),
+            teff: (value.teff.0.ok(), value.teff.1.ok()),
+            m: (value.m.0.ok(), value.m.1.ok()),
+            logg: (value.logg.0.ok(), value.logg.1.ok()),
+            vsini: (value.vsini.0.ok(), value.vsini.1.ok()),
+            rv: (value.rv.0.ok(), value.rv.1.ok()),
         }
     }
 }
