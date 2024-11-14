@@ -643,6 +643,23 @@ macro_rules! implement_methods {
                 ))
             }
 
+            pub fn get_binary_fitter(
+                &self,
+                dispersion: PyWavelengthDispersion,
+                continuum_fitter: PyContinuumFitter,
+                settings: PSOSettings,
+                vsini_range: (f64, f64),
+                rv_range: (f64, f64),
+            ) -> $PyBinaryFitter {
+                $PyBinaryFitter(BinaryFitter::new(
+                    dispersion.0,
+                    continuum_fitter.0,
+                    settings.into(),
+                    vsini_range,
+                    rv_range,
+                ))
+            }
+
             /// Fit a continuum to an observed spectrum and model,
             /// as given by the labels (Teff, [M/H], logg, vsini, RV).
             /// Return the continuum.

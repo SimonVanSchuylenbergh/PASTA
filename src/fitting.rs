@@ -38,9 +38,7 @@ pub struct BoundsSingle<B: GridBounds> {
     rv_range: (f64, f64),
 }
 
-pub struct BoundsSingleConstraint {
-
-}
+pub struct BoundsSingleConstraint {}
 
 impl<B: GridBounds> BoundsSingle<B> {
     fn new(grid: B, vsini_range: (f64, f64), rv_range: (f64, f64)) -> Self {
@@ -916,6 +914,22 @@ pub struct BinaryFitter<T: WavelengthDispersion, F: ContinuumFitter> {
 }
 
 impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
+    pub fn new(
+        target_dispersion: T,
+        continuum_fitter: F,
+        settings: PSOSettings,
+        vsini_range: (f64, f64),
+        rv_range: (f64, f64),
+    ) -> Self {
+        Self {
+            target_dispersion,
+            continuum_fitter,
+            settings,
+            vsini_range,
+            rv_range,
+        }
+    }
+    
     pub fn fit<I: Interpolator>(
         &self,
         interpolator: &I,
