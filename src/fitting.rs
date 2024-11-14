@@ -152,12 +152,15 @@ impl<B: GridBounds> PSOBounds<11> for BoundsBinary<B> {
     }
 
     fn clamp_1d(&self, param: na::SVector<f64, 11>, index: usize) -> Result<f64> {
+        if index >= 11 {
+            panic!("Index for binary clamp_1d out out bounds")
+        }
         match index {
             3 => Ok(param[3].clamp(self.vsini_range.0, self.vsini_range.1)),
             4 => Ok(param[4].clamp(self.rv_range1.0, self.rv_range1.1)),
             8 => Ok(param[3].clamp(self.vsini_range.0, self.vsini_range.1)),
             9 => Ok(param[4].clamp(self.rv_range2.0, self.rv_range2.1)),
-            i => self.grid.clamp_1d(param.fixed_rows::<3>(0).into_owned(), i),
+            i => self.grid.clamp_1d(param.fixed_rows::<3>(0).into_owned(), i % 5),
         }
     }
 
