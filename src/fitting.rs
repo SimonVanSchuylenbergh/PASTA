@@ -948,10 +948,10 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
         };
         let bounds = BoundsBinary::new(
             interpolator.grid_bounds(),
-            (0., 0.5),
-            (0.0, 1e4),
-            (-1e3, 1e3),
-            (-1e3, 1e3),
+            (0.0, 0.5),
+            self.vsini_range,
+            self.rv_range,
+            self.rv_range,
         );
         let solver = setup_pso(bounds, self.settings.clone());
         let fitter = Executor::new(cost_function, solver)
