@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 /// Parameters to the PSO algorithm
 #[derive(Clone, Debug)]
-#[pyclass(module = "normalization", frozen)]
+#[pyclass(module = "pasta", frozen)]
 pub struct PSOSettings(fitting::PSOSettings);
 
 #[pymethods]
@@ -72,7 +72,7 @@ impl From<PSOSettings> for fitting::PSOSettings {
 }
 
 #[derive(Clone, Debug, Serialize)]
-#[pyclass(module = "normalization", frozen)]
+#[pyclass(module = "pasta", frozen)]
 pub struct Label {
     #[pyo3(get)]
     teff: f64,
@@ -118,7 +118,7 @@ impl Label {
 }
 
 #[derive(Clone, Debug, Serialize)]
-#[pyclass(module = "normalization", frozen)]
+#[pyclass(module = "pasta", frozen)]
 pub struct LabelUncertainties {
     #[pyo3(get)]
     teff: (Option<f64>, Option<f64>),
@@ -153,7 +153,7 @@ impl LabelUncertainties {
 
 /// Output of the PSO fitting algorithm.
 #[derive(Clone, Debug, Serialize)]
-#[pyclass(module = "normalization", frozen)]
+#[pyclass(module = "pasta", frozen)]
 pub struct OptimizationResult {
     /// Teff, [M/H], logg, vsini, RV
     #[pyo3(get)]
@@ -195,7 +195,7 @@ impl OptimizationResult {
 
 /// Output of the PSO binary fitting algorithm.
 #[derive(Clone, Debug, Serialize)]
-#[pyclass(module = "normalization", frozen)]
+#[pyclass(module = "pasta", frozen)]
 pub struct BinaryOptimizationResult {
     /// (Teff, [M/H], logg, vsini, RV)
     #[pyo3(get)]
@@ -241,7 +241,7 @@ impl BinaryOptimizationResult {
 }
 
 #[derive(Clone, Debug)]
-#[pyclass(module = "normalization", frozen)]
+#[pyclass(module = "pasta", frozen)]
 pub struct WlGrid(interpolate::WlGrid);
 
 #[pymethods]
@@ -269,7 +269,7 @@ enum WavelengthDispersionWrapper {
 }
 
 #[derive(Clone, Debug)]
-#[pyclass(module = "normalization", frozen)]
+#[pyclass(module = "pasta", frozen)]
 pub struct PyWavelengthDispersion(WavelengthDispersionWrapper);
 
 #[pymethods]
@@ -393,7 +393,7 @@ enum ContinuumFitterWrapper {
 }
 
 #[derive(Clone, Debug)]
-#[pyclass(module = "normalization", frozen)]
+#[pyclass(module = "pasta", frozen)]
 pub struct PyContinuumFitter(ContinuumFitterWrapper);
 
 #[pymethods]
@@ -1020,7 +1020,7 @@ macro_rules! implement_methods {
 }
 
 #[derive(Clone, Debug)]
-#[pyclass(module = "normalization", frozen)]
+#[pyclass(module = "pasta", frozen)]
 pub struct PyInterpolator();
 
 /// Interpolator that loads every spectrum from disk every time.
