@@ -929,7 +929,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
             rv_range,
         }
     }
-    
+
     pub fn fit<I: Interpolator>(
         &self,
         interpolator: &I,
@@ -948,7 +948,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
         };
         let bounds = BoundsBinary::new(
             interpolator.grid_bounds(),
-            (0.0, 1.0),
+            (0., 0.5),
             (0.0, 1e4),
             (-1e3, 1e3),
             (-1e3, 1e3),
