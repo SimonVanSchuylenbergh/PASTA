@@ -317,7 +317,7 @@ impl PyWavelengthDispersion {
                     .map(|x| (x as FluxFloat) / 65535.0 * factor);
                 let convolved = self.0.convolve(spectrum_float).unwrap();
                 let resampled =
-                    shift_and_resample(&convolved, input_wavelength.0, self.0.wavelength(), 0.0)
+                    shift_and_resample(&convolved, &input_wavelength.0, self.0.wavelength(), 0.0)
                         .unwrap();
 
                 let max = resampled.max();
@@ -338,7 +338,7 @@ impl PyWavelengthDispersion {
                 let spectrum_float = arr.map(|x| (x as FluxFloat) / 65535.0);
                 let convolved = self.0.convolve(spectrum_float).unwrap();
                 let resampled =
-                    shift_and_resample(&convolved, input_wavelength.0, self.0.wavelength(), 0.0)
+                    shift_and_resample(&convolved, &input_wavelength.0, self.0.wavelength(), 0.0)
                         .unwrap();
                 let resampled_u16 = resampled
                     .into_iter()

@@ -1,6 +1,6 @@
 use crate::continuum_fitting::ContinuumFitter;
-use crate::convolve_rv::WavelengthDispersion;
-use crate::interpolate::{FluxFloat, GridBounds, Interpolator};
+use crate::convolve_rv::{shift_and_resample, WavelengthDispersion};
+use crate::interpolate::{FluxFloat, GridBounds, Interpolator, WlGrid};
 use crate::particleswarm::{self, PSOBounds};
 use anyhow::{anyhow, Context, Result};
 use argmin::core::observers::{Observe, ObserverMode};
@@ -8,7 +8,6 @@ use argmin::core::{Executor, PopulationState, State, KV};
 use argmin::solver::brent::BrentRoot;
 use argmin_math::ArgminRandom;
 use nalgebra as na;
-use num_traits::Float;
 use rand::Rng;
 use serde::Serialize;
 use std::fs::File;
@@ -33,13 +32,17 @@ impl ObservedSpectrum {
 }
 
 #[derive(Clone)]
-pub struct GridBoundsSingle<B: GridBounds> {
+pub struct BoundsSingle<B: GridBounds> {
     grid: B,
     vsini_range: (f64, f64),
     rv_range: (f64, f64),
 }
 
-impl<B: GridBounds> GridBoundsSingle<B> {
+pub struct BoundsSingleConstraint {
+
+}
+
+impl<B: GridBounds> BoundsSingle<B> {
     fn new(grid: B, vsini_range: (f64, f64), rv_range: (f64, f64)) -> Self {
         Self {
             grid,
@@ -49,7 +52,7 @@ impl<B: GridBounds> GridBoundsSingle<B> {
     }
 }
 
-impl<B: GridBounds> PSOBounds<5> for GridBoundsSingle<B> {
+impl<B: GridBounds> PSOBounds<5> for BoundsSingle<B> {
     fn limits(&self) -> (nalgebra::SVector<f64, 5>, nalgebra::SVector<f64, 5>) {
         let (min, max) = self.grid.limits();
         (
@@ -97,7 +100,7 @@ impl<B: GridBounds> PSOBounds<5> for GridBoundsSingle<B> {
 }
 
 #[derive(Clone)]
-pub struct GridBoundsBinary<B: GridBounds> {
+pub struct BoundsBinary<B: GridBounds> {
     grid: B,
     light_ratio: (f64, f64),
     vsini_range: (f64, f64),
@@ -105,7 +108,7 @@ pub struct GridBoundsBinary<B: GridBounds> {
     rv_range2: (f64, f64),
 }
 
-impl<B: GridBounds> GridBoundsBinary<B> {
+impl<B: GridBounds> BoundsBinary<B> {
     fn new(
         grid: B,
         light_ratio: (f64, f64),
@@ -121,17 +124,9 @@ impl<B: GridBounds> GridBoundsBinary<B> {
             rv_range2,
         }
     }
-
-    fn get_first_grid(&self) -> GridBoundsSingle<B> {
-        GridBoundsSingle::new(self.grid.clone(), self.vsini_range, self.rv_range1)
-    }
-
-    fn get_second_grid(&self) -> GridBoundsSingle<B> {
-        GridBoundsSingle::new(self.grid.clone(), self.vsini_range, self.rv_range2)
-    }
 }
 
-impl<B: GridBounds> PSOBounds<11> for GridBoundsBinary<B> {
+impl<B: GridBounds> PSOBounds<11> for BoundsBinary<B> {
     fn limits(&self) -> (na::SVector<f64, 11>, na::SVector<f64, 11>) {
         let (min, max) = self.grid.limits();
         (
@@ -159,14 +154,12 @@ impl<B: GridBounds> PSOBounds<11> for GridBoundsBinary<B> {
     }
 
     fn clamp_1d(&self, param: na::SVector<f64, 11>, index: usize) -> Result<f64> {
-        let grid1 = self.get_first_grid();
-        let grid2 = self.get_second_grid();
-        if index < 5 {
-            grid1.clamp_1d(param.fixed_rows::<5>(0).into_owned(), index)
-        } else if index < 10 {
-            grid2.clamp_1d(param.fixed_rows::<5>(5).into_owned(), index - 5)
-        } else {
-            Ok(param[10].max(self.light_ratio.0).min(self.light_ratio.1))
+        match index {
+            3 => Ok(param[3].clamp(self.vsini_range.0, self.vsini_range.1)),
+            4 => Ok(param[4].clamp(self.rv_range1.0, self.rv_range1.1)),
+            8 => Ok(param[3].clamp(self.vsini_range.0, self.vsini_range.1)),
+            9 => Ok(param[4].clamp(self.rv_range2.0, self.rv_range2.1)),
+            i => self.grid.clamp_1d(param.fixed_rows::<3>(0).into_owned(), i),
         }
     }
 
@@ -175,29 +168,103 @@ impl<B: GridBounds> PSOBounds<11> for GridBoundsBinary<B> {
         rng: &mut impl Rng,
         num_particles: usize,
     ) -> Vec<na::SVector<f64, 11>> {
-        let grid1 = self.get_first_grid();
-        let grid2 = self.get_second_grid();
-        let first = grid1.generate_random_within_bounds(rng, num_particles);
-        let second = grid2.generate_random_within_bounds(rng, num_particles);
-        let light_ratios = (0..num_particles)
-            .map(|_| rng.gen_range(self.light_ratio.0..self.light_ratio.1))
-            .collect::<Vec<f64>>();
-        first
-            .into_iter()
-            .zip(second)
-            .zip(light_ratios)
-            .map(|((first, second), light_ratio)| {
-                na::SVector::from_iterator(
-                    first
-                        .iter()
-                        .copied()
-                        .chain(second.iter().copied())
-                        .chain(once(light_ratio)),
-                )
-            })
-            .collect()
+        let mut particles = Vec::with_capacity(num_particles);
+        let (min, max) = self.limits();
+        while particles.len() < num_particles {
+            let param = na::SVector::rand_from_range(&min, &max, rng);
+            if self
+                .grid
+                .is_within_bounds(param.fixed_rows::<3>(0).into_owned())
+                && self
+                    .grid
+                    .is_within_bounds(param.fixed_rows::<3>(5).into_owned())
+            {
+                particles.push(param);
+            }
+        }
+        particles
     }
 }
+
+#[derive(Clone)]
+pub struct BoundsBinaryWithoutRV<B: GridBounds> {
+    grid: B,
+    light_ratio: (f64, f64),
+    vsini_range: (f64, f64),
+}
+
+impl<B: GridBounds> BoundsBinaryWithoutRV<B> {
+    fn new(grid: B, light_ratio: (f64, f64), vsini_range: (f64, f64)) -> Self {
+        Self {
+            grid,
+            light_ratio,
+            vsini_range,
+        }
+    }
+}
+
+impl<B: GridBounds> PSOBounds<9> for BoundsBinaryWithoutRV<B> {
+    fn limits(&self) -> (na::SVector<f64, 9>, na::SVector<f64, 9>) {
+        let (min, max) = self.grid.limits();
+        (
+            na::SVector::from_iterator(
+                min.iter()
+                    .copied()
+                    .chain(once(self.vsini_range.0))
+                    .chain(min.iter().copied())
+                    .chain(once(self.vsini_range.0))
+                    .chain(once(self.light_ratio.0)),
+            ),
+            na::SVector::from_iterator(
+                max.iter()
+                    .copied()
+                    .chain(once(self.vsini_range.1))
+                    .chain(max.iter().copied())
+                    .chain(once(self.vsini_range.1))
+                    .chain(once(self.light_ratio.1)),
+            ),
+        )
+    }
+
+    fn clamp_1d(&self, param: na::SVector<f64, 9>, index: usize) -> Result<f64> {
+        match index {
+            3 => Ok(param[3].clamp(self.vsini_range.0, self.vsini_range.1)),
+            7 => Ok(param[4].clamp(self.vsini_range.0, self.vsini_range.1)),
+            i => self.grid.clamp_1d(param.fixed_rows::<3>(0).into_owned(), i),
+        }
+    }
+
+    fn generate_random_within_bounds(
+        &self,
+        rng: &mut impl Rng,
+        num_particles: usize,
+    ) -> Vec<na::SVector<f64, 9>> {
+        let mut particles = Vec::with_capacity(num_particles);
+        let (min, max) = self.limits();
+        while particles.len() < num_particles {
+            let param = na::SVector::rand_from_range(&min, &max, rng);
+            if self
+                .grid
+                .is_within_bounds(param.fixed_rows::<3>(0).into_owned())
+                && self
+                    .grid
+                    .is_within_bounds(param.fixed_rows::<3>(4).into_owned())
+            {
+                particles.push(param);
+            }
+        }
+        particles
+    }
+}
+
+pub struct BinaryRVBounds {
+    rv_range1: (f64, f64),
+    rv_range2: (f64, f64),
+}
+
+// impl PSOBounds<2> for BinaryRVBounds {
+
+// }
 
 /// Cost function used in the PSO fitting
 struct CostFunction<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
@@ -344,11 +411,14 @@ pub struct BinaryOptimizationResult {
 
 struct RVCostFunction<'a, F: ContinuumFitter> {
     continuum_fitter: &'a F,
+    observed_wl: &'a na::DVector<f64>,
     observed_spectrum: &'a ObservedSpectrum,
-    synth_spec1: na::DVector<FluxFloat>,
-    synth_spec2: na::DVector<FluxFloat>,
-    continuum1: na::DVector<FluxFloat>,
-    continuum2: na::DVector<FluxFloat>,
+    synth_wl: &'a WlGrid,
+    model1: &'a na::DVector<FluxFloat>,
+    model2: &'a na::DVector<FluxFloat>,
+    continuum1: &'a na::DVector<FluxFloat>,
+    continuum2: &'a na::DVector<FluxFloat>,
+    light_ratio: f64,
 }
 
 impl<'a, F: ContinuumFitter> argmin::core::CostFunction for RVCostFunction<'a, F> {
@@ -356,7 +426,27 @@ impl<'a, F: ContinuumFitter> argmin::core::CostFunction for RVCostFunction<'a, F
     type Output = f64;
 
     fn cost(&self, param: &Self::Param) -> std::result::Result<Self::Output, argmin::core::Error> {
-        panic!("Not implemented")
+        let rv1 = param[0];
+        let rv2 = param[1];
+
+        let shifted_synth1 =
+            shift_and_resample(&self.model1, self.synth_wl, self.observed_wl, rv1)?;
+        let shifted_synth2 =
+            shift_and_resample(&self.model2, self.synth_wl, self.observed_wl, rv2)?;
+        let shifted_continuum1 =
+            shift_and_resample(&self.continuum1, self.synth_wl, self.observed_wl, rv1)?;
+        let shifted_continuum2 =
+            shift_and_resample(&self.continuum2, self.synth_wl, self.observed_wl, rv2)?;
+
+        let synth_spec = shifted_synth1.component_mul(&shifted_continuum1)
+            * self.light_ratio as FluxFloat
+            + shifted_synth2.component_mul(&shifted_continuum2)
+                * (1.0 - self.light_ratio as FluxFloat);
+
+        let (_, ls) = self
+            .continuum_fitter
+            .fit_continuum(self.observed_spectrum, &synth_spec)?;
+        Ok(ls)
     }
 }
 
@@ -365,17 +455,21 @@ struct BinaryTimeseriesCostFunction<
     I: Interpolator,
     T: WavelengthDispersion,
     F: ContinuumFitter,
+    B: PSOBounds<2>,
 > {
     interpolator: &'a I,
     continuum_interpolator: &'a I,
     target_dispersion: &'a T,
     observed_spectra: &'a Vec<ObservedSpectrum>,
     continuum_fitter: &'a F,
+    synth_wl: &'a WlGrid,
+    rv_fit_settings: PSOSettings,
+    rv_bounds: B,
     parallelize: bool,
 }
 
-impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
-    for BinaryTimeseriesCostFunction<'a, I, T, F>
+impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter, B: PSOBounds<2>>
+    argmin::core::CostFunction for BinaryTimeseriesCostFunction<'a, I, T, F, B>
 {
     type Param = na::SVector<f64, 9>;
     type Output = f64;
@@ -414,16 +508,30 @@ impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::c
             star2_parameters[3],
         )?;
 
-        // let innerCostFunction = RVCostFunction {
-        //     continuum_fitter: self.continuum_fitter,
-        //     observed_spectrum: &self.observed_spectra,
-        //     synth_spec1,
-        //     synth_spec2,
-        //     continuum1,
-        //     continuum2,
-        // };
+        let chi2 = self
+            .observed_spectra
+            .iter()
+            .map(|observed_spectrum| {
+                let inner_cost_function = RVCostFunction {
+                    continuum_fitter: self.continuum_fitter,
+                    observed_wl: self.target_dispersion.wavelength(),
+                    observed_spectrum: &observed_spectrum,
+                    synth_wl: self.synth_wl,
+                    model1: &synth_spec1,
+                    model2: &synth_spec2,
+                    continuum1: &continuum1,
+                    continuum2: &continuum2,
+                    light_ratio,
+                };
+                let solver = setup_pso(self.rv_bounds.clone(), self.rv_fit_settings.clone());
+                let fitter = Executor::new(inner_cost_function, solver)
+                    .configure(|state| state.max_iters(self.rv_fit_settings.max_iters));
+                let result = fitter.run()?;
+                Ok::<f64, anyhow::Error>(result.state.best_cost)
+            })
+            .sum::<Result<f64>>()?;
 
-        panic!("Not")
+        Ok(chi2)
     }
 
     fn parallelize(&self) -> bool {
@@ -663,8 +771,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> PSOFitter<T, F> {
             continuum_fitter: &self.continuum_fitter,
             parallelize,
         };
-        let bounds =
-            GridBoundsSingle::new(interpolator.grid_bounds(), self.vsini_range, self.rv_range);
+        let bounds = BoundsSingle::new(interpolator.grid_bounds(), self.vsini_range, self.rv_range);
         let solver = setup_pso(bounds, self.settings.clone());
         let fitter = Executor::new(cost_function, solver)
             .configure(|state| state.max_iters(self.settings.max_iters));
@@ -746,7 +853,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> PSOFitter<T, F> {
 
         let computer = |i| {
             // Maybe don't hardcode here
-            let bounds = GridBoundsSingle::new(interpolator.grid_bounds(), (0.0, 1e4), (-1e3, 1e3));
+            let bounds = BoundsSingle::new(interpolator.grid_bounds(), (0.0, 1e4), (-1e3, 1e3));
 
             let get_bound = |right: bool| {
                 let costfunction = ModelFitCost {
@@ -815,7 +922,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> PSOFitter<T, F> {
             continuum_fitter: &self.continuum_fitter,
             parallelize,
         };
-        let bounds = GridBoundsBinary::new(
+        let bounds = BoundsBinary::new(
             interpolator.grid_bounds(),
             (0.0, 1.0),
             (0.0, 1e4),

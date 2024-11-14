@@ -336,7 +336,7 @@ pub fn convolve_rotation(
 
 pub fn shift_and_resample(
     input_array: &na::DVector<FluxFloat>,
-    synth_wl: WlGrid,
+    synth_wl: &WlGrid,
     observed_wl: &na::DVector<f64>,
     rv: f64,
 ) -> Result<na::DVector<FluxFloat>> {
