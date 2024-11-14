@@ -218,7 +218,6 @@ pub struct BinaryOptimizationResult {
     #[pyo3(get)]
     pub time: f64,
 }
-
 /// Rust to Python bindings.
 impl From<fitting::BinaryOptimizationResult> for BinaryOptimizationResult {
     fn from(result: fitting::BinaryOptimizationResult) -> Self {
@@ -234,6 +233,7 @@ impl From<fitting::BinaryOptimizationResult> for BinaryOptimizationResult {
     }
 }
 
+#[pymethods]
 impl BinaryOptimizationResult {
     fn to_json(&self) -> PyResult<String> {
         Ok(serde_json::to_string(self).unwrap())
