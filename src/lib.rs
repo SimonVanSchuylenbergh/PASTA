@@ -18,7 +18,7 @@ use convolve_rv::{
 };
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
 use enum_dispatch::enum_dispatch;
-use fitting::{ObservedSpectrum, PSOFitter};
+use fitting::{BinaryFitter, ObservedSpectrum, SingleFitter};
 use indicatif::ProgressBar;
 use interpolate::{FluxFloat, GridBounds, GridInterpolator, Interpolator};
 use model_fetchers::{read_npy_file, CachedFetcher, InMemFetcher, OnDiskFetcher};
@@ -506,7 +506,7 @@ fn ConstantContinuum() -> PyContinuumFitter {
 /// Implement methods for all the interpolator classes.
 /// We can't use traits with pyo3, so we have to use macros.
 macro_rules! implement_methods {
-    ($name: ident, $fetcher_type: ty, $fitter_type: ident) => {
+    ($name: ident, $fetcher_type: ty, $PySingleFitter: ident, $PyBinaryFitter: ident) => {
         #[pymethods]
         impl $name {
             /// Produce a model spectrum by interpolating, convolving, shifting by rv and resampling to wl array.
@@ -633,8 +633,8 @@ macro_rules! implement_methods {
                 settings: PSOSettings,
                 vsini_range: (f64, f64),
                 rv_range: (f64, f64),
-            ) -> $fitter_type {
-                $fitter_type(PSOFitter::new(
+            ) -> $PySingleFitter {
+                $PySingleFitter(SingleFitter::new(
                     dispersion.0,
                     continuum_fitter.0,
                     settings.into(),
@@ -860,10 +860,12 @@ macro_rules! implement_methods {
         }
 
         #[pyclass]
-        pub struct $fitter_type(PSOFitter<WavelengthDispersionWrapper, ContinuumFitterWrapper>);
+        pub struct $PySingleFitter(
+            SingleFitter<WavelengthDispersionWrapper, ContinuumFitterWrapper>,
+        );
 
         #[pymethods]
-        impl $fitter_type {
+        impl $PySingleFitter {
             /// Fit the model and pseudo continuum using PSO.
             /// Using chunk based continuum fitting.
             pub fn fit(
@@ -965,8 +967,16 @@ macro_rules! implement_methods {
                     })
                     .collect()
             }
+        }
 
-            pub fn fit_binary_normalized(
+        #[pyclass]
+        pub struct $PyBinaryFitter(
+            BinaryFitter<WavelengthDispersionWrapper, ContinuumFitterWrapper>,
+        );
+
+        #[pymethods]
+        impl $PyBinaryFitter {
+            pub fn fit(
                 &self,
                 interpolator: &$name,
                 continuum_interpolator: &$name,
@@ -979,7 +989,7 @@ macro_rules! implement_methods {
                     flux: observed_flux.as_matrix().column(0).into_owned(),
                     var: observed_var.as_matrix().column(0).into_owned(),
                 };
-                let result = self.0.fit_binary_normalized(
+                let result = self.0.fit(
                     &interpolator.0,
                     &continuum_interpolator.0,
                     &observed_spectrum.into(),
@@ -1051,9 +1061,24 @@ impl CachedInterpolator {
     }
 }
 
-implement_methods!(OnDiskInterpolator, OnDiskFetcher, OnDiskSingleFitter);
-implement_methods!(InMemInterpolator, InMemFetcher, InMemSingleFitter);
-implement_methods!(CachedInterpolator, CachedFetcher, CachedSingleFitter);
+implement_methods!(
+    OnDiskInterpolator,
+    OnDiskFetcher,
+    OnDiskSingleFitter,
+    OnDiskBinaryFitter
+);
+implement_methods!(
+    InMemInterpolator,
+    InMemFetcher,
+    InMemSingleFitter,
+    InMemBinaryFitter
+);
+implement_methods!(
+    CachedInterpolator,
+    CachedFetcher,
+    CachedSingleFitter,
+    CachedBinaryFitter
+);
 
 #[pyfunction]
 pub fn get_vsini_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<FluxFloat> {

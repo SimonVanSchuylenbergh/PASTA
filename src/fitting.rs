@@ -732,7 +732,7 @@ impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::c
     }
 }
 
-pub struct PSOFitter<T: WavelengthDispersion, F: ContinuumFitter> {
+pub struct SingleFitter<T: WavelengthDispersion, F: ContinuumFitter> {
     target_dispersion: T,
     continuum_fitter: F,
     settings: PSOSettings,
@@ -740,7 +740,7 @@ pub struct PSOFitter<T: WavelengthDispersion, F: ContinuumFitter> {
     rv_range: (f64, f64),
 }
 
-impl<T: WavelengthDispersion, F: ContinuumFitter> PSOFitter<T, F> {
+impl<T: WavelengthDispersion, F: ContinuumFitter> SingleFitter<T, F> {
     pub fn new(
         target_dispersion: T,
         continuum_fitter: F,
@@ -905,8 +905,18 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> PSOFitter<T, F> {
             rv: computer(4),
         })
     }
+}
 
-    pub fn fit_binary_normalized<I: Interpolator>(
+pub struct BinaryFitter<T: WavelengthDispersion, F: ContinuumFitter> {
+    target_dispersion: T,
+    continuum_fitter: F,
+    settings: PSOSettings,
+    vsini_range: (f64, f64),
+    rv_range: (f64, f64),
+}
+
+impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
+    pub fn fit<I: Interpolator>(
         &self,
         interpolator: &I,
         continuum_interpolator: &I,
