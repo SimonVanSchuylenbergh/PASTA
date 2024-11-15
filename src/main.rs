@@ -7,6 +7,7 @@ mod fitting;
 mod interpolate;
 mod model_fetchers;
 mod particleswarm;
+mod bounds;
 use crate::fitting::ObservedSpectrum;
 use crate::interpolate::{Grid, GridInterpolator};
 use anyhow::Result;
@@ -22,7 +23,7 @@ use itertools::Itertools;
 use model_fetchers::{CachedFetcher, InMemFetcher, OnDiskFetcher};
 use nalgebra as na;
 use npy::NpyData;
-use particleswarm::PSOBounds;
+use bounds::PSOBounds;
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::hint::black_box;
@@ -58,13 +59,6 @@ pub fn main() -> Result<()> {
             4,
         )?,
         wl_grid,
-    );
-
-    println!(
-        "{}",
-        interpolator
-            .grid_bounds()
-            .clamp_1d(na::Vector3::new(35_000.0, 0.0, 2.99), 0)?
     );
 
     let wl = read_npy_file("wl_hermes.npy".into())?;

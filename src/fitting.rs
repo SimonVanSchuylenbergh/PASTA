@@ -1,17 +1,13 @@
+use crate::bounds::{BinaryBounds, BoundsConstraint, SingleBounds, PSOBounds};
 use crate::continuum_fitting::ContinuumFitter;
 use crate::convolve_rv::{shift_and_resample, WavelengthDispersion};
-use crate::interpolate::{
-    BoundsConstraint, Constrainable, Constraint, FluxFloat, GridBounds, GridBoundsConstraint,
-    GridParameter, Interpolator, WlGrid,
-};
-use crate::particleswarm::{self, PSOBounds};
+use crate::interpolate::{FluxFloat, GridBounds, Interpolator, WlGrid};
+use crate::particleswarm::{self};
 use anyhow::{anyhow, Context, Result};
 use argmin::core::observers::{Observe, ObserverMode};
 use argmin::core::{CostFunction as _, Executor, PopulationState, State, KV};
 use argmin::solver::brent::BrentRoot;
-use argmin_math::ArgminRandom;
 use nalgebra as na;
-use rand::Rng;
 use serde::Serialize;
 use std::fs::File;
 use std::io::BufWriter;
@@ -34,349 +30,6 @@ impl ObservedSpectrum {
     }
 }
 
-#[derive(Clone)]
-pub struct BoundsSingle<B: GridBounds> {
-    grid: B,
-    vsini_range: (f64, f64),
-    rv_range: (f64, f64),
-}
-
-pub struct BoundsSingleConstraint {}
-
-impl<B: GridBounds> BoundsSingle<B> {
-    fn new(grid: B, vsini_range: (f64, f64), rv_range: (f64, f64)) -> Self {
-        Self {
-            grid,
-            vsini_range,
-            rv_range,
-        }
-    }
-}
-
-impl<B: GridBounds> PSOBounds<5> for BoundsSingle<B> {
-    fn limits(&self) -> (nalgebra::SVector<f64, 5>, nalgebra::SVector<f64, 5>) {
-        let (min, max) = self.grid.limits();
-        (
-            nalgebra::SVector::from_iterator(
-                min.iter()
-                    .copied()
-                    .chain(once(self.vsini_range.0))
-                    .chain(once(self.rv_range.0)),
-            ),
-            nalgebra::SVector::from_iterator(
-                max.iter()
-                    .copied()
-                    .chain(once(self.vsini_range.1))
-                    .chain(once(self.rv_range.1)),
-            ),
-        )
-    }
-
-    fn clamp_1d(&self, param: nalgebra::SVector<f64, 5>, index: usize) -> Result<f64> {
-        match index {
-            3 => Ok(param[3].clamp(self.vsini_range.0, self.vsini_range.1)),
-            4 => Ok(param[4].clamp(self.rv_range.0, self.rv_range.1)),
-            i => self.grid.clamp_1d(param.fixed_rows::<3>(0).into_owned(), i),
-        }
-    }
-
-    fn generate_random_within_bounds(
-        &self,
-        rng: &mut impl Rng,
-        num_particles: usize,
-    ) -> Vec<nalgebra::SVector<f64, 5>> {
-        let mut particles = Vec::with_capacity(num_particles);
-        let (min, max) = self.limits();
-        while particles.len() < num_particles {
-            let param = na::SVector::rand_from_range(&min, &max, rng);
-            if self
-                .grid
-                .is_within_bounds(param.fixed_rows::<3>(0).into_owned())
-            {
-                particles.push(param);
-            }
-        }
-        particles
-    }
-}
-
-#[derive(Clone)]
-pub struct BinaryBounds<B: GridBounds> {
-    grid1: B,
-    grid2: B,
-    light_ratio: (f64, f64),
-    vsini_range: (f64, f64),
-    rv_range1: (f64, f64),
-    rv_range2: (f64, f64),
-}
-
-pub enum BinaryParameter {
-    Teff1,
-    M1,
-    Logg1,
-    Vsini1,
-    Rv1,
-    Teff2,
-    M2,
-    Logg2,
-    Vsini2,
-    Rv2,
-    LightRatio,
-}
-
-impl BinaryParameter {
-    pub fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "teff1" => Ok(Self::Teff1),
-            "m1" => Ok(Self::M1),
-            "logg1" => Ok(Self::Logg1),
-            "vsini1" => Ok(Self::Vsini1),
-            "rv1" => Ok(Self::Rv1),
-            "teff2" => Ok(Self::Teff2),
-            "m2" => Ok(Self::M2),
-            "logg2" => Ok(Self::Logg2),
-            "vsini2" => Ok(Self::Vsini2),
-            "rv2" => Ok(Self::Rv2),
-            "light_ratio" => Ok(Self::LightRatio),
-            _ => Err(anyhow!("Invalid parameter for binary: {}", s)),
-        }
-    }
-}
-
-pub type BinaryBoundsConstraint = BoundsConstraint<BinaryParameter>;
-
-impl<B: GridBounds> BinaryBounds<B> {
-    fn new(
-        grid1: B,
-        grid2: B,
-        light_ratio: (f64, f64),
-        vsini_range: (f64, f64),
-        rv_range1: (f64, f64),
-        rv_range2: (f64, f64),
-    ) -> Self {
-        Self {
-            grid1,
-            grid2,
-            light_ratio,
-            vsini_range,
-            rv_range1,
-            rv_range2,
-        }
-    }
-}
-
-impl<B: GridBounds> Constrainable<BinaryParameter> for BinaryBounds<B> {
-    fn with_constraint(&self, constraint: BinaryBoundsConstraint) -> Result<Self> {
-        let BinaryBoundsConstraint {
-            parameter,
-            constraint,
-        } = constraint;
-        let mut grid1 = self.grid1.clone();
-        let mut grid2 = self.grid2.clone();
-        let mut light_ratio = self.light_ratio;
-        let mut vsini_range = self.vsini_range;
-        let mut rv_range1 = self.rv_range1;
-        let mut rv_range2 = self.rv_range2;
-        match parameter {
-            BinaryParameter::Teff1 => {
-                grid1 = grid1.with_constraint(GridBoundsConstraint {
-                    parameter: GridParameter::Teff,
-                    constraint,
-                })?
-            }
-            BinaryParameter::M1 => {
-                grid1 = grid1.with_constraint(GridBoundsConstraint {
-                    parameter: GridParameter::M,
-                    constraint,
-                })?
-            }
-            BinaryParameter::Logg1 => {
-                grid1 = grid1.with_constraint(GridBoundsConstraint {
-                    parameter: GridParameter::Logg,
-                    constraint,
-                })?
-            }
-            BinaryParameter::Vsini1 => vsini_range = constraint.intersection_with(vsini_range),
-            BinaryParameter::Rv1 => rv_range1 = constraint.intersection_with(rv_range1),
-            BinaryParameter::Teff2 => {
-                grid2 = grid2.with_constraint(GridBoundsConstraint {
-                    parameter: GridParameter::Teff,
-                    constraint,
-                })?
-            }
-            BinaryParameter::M2 => {
-                grid2 = grid2.with_constraint(GridBoundsConstraint {
-                    parameter: GridParameter::M,
-                    constraint,
-                })?
-            }
-            BinaryParameter::Logg2 => {
-                grid2 = grid2.with_constraint(GridBoundsConstraint {
-                    parameter: GridParameter::Logg,
-                    constraint,
-                })?
-            }
-            BinaryParameter::Vsini2 => vsini_range = constraint.intersection_with(vsini_range),
-            BinaryParameter::Rv2 => rv_range2 = constraint.intersection_with(rv_range2),
-            BinaryParameter::LightRatio => light_ratio = constraint.intersection_with(light_ratio),
-        };
-
-        Ok(Self {
-            grid1,
-            grid2,
-            light_ratio,
-            vsini_range,
-            rv_range1,
-            rv_range2,
-        })
-    }
-}
-
-impl<B: GridBounds> PSOBounds<11> for BinaryBounds<B> {
-    fn limits(&self) -> (na::SVector<f64, 11>, na::SVector<f64, 11>) {
-        let (min1, max1) = self.grid1.limits();
-        let (min2, max2) = self.grid2.limits();
-        (
-            na::SVector::from_iterator(
-                min1.iter()
-                    .copied()
-                    .chain(once(self.vsini_range.0))
-                    .chain(once(self.rv_range1.0))
-                    .chain(min2.iter().copied())
-                    .chain(once(self.vsini_range.0))
-                    .chain(once(self.rv_range2.0))
-                    .chain(once(self.light_ratio.0)),
-            ),
-            na::SVector::from_iterator(
-                max1.iter()
-                    .copied()
-                    .chain(once(self.vsini_range.1))
-                    .chain(once(self.rv_range1.1))
-                    .chain(max2.iter().copied())
-                    .chain(once(self.vsini_range.1))
-                    .chain(once(self.rv_range2.1))
-                    .chain(once(self.light_ratio.1)),
-            ),
-        )
-    }
-
-    fn clamp_1d(&self, param: na::SVector<f64, 11>, index: usize) -> Result<f64> {
-        if index >= 11 {
-            panic!("Index for binary clamp_1d out out bounds")
-        }
-        match index {
-            3 => Ok(param[3].clamp(self.vsini_range.0, self.vsini_range.1)),
-            4 => Ok(param[4].clamp(self.rv_range1.0, self.rv_range1.1)),
-            8 => Ok(param[3].clamp(self.vsini_range.0, self.vsini_range.1)),
-            9 => Ok(param[4].clamp(self.rv_range2.0, self.rv_range2.1)),
-            10 => Ok(param[10].clamp(self.light_ratio.0, self.light_ratio.1)),
-            i if i < 5 => self
-                .grid1
-                .clamp_1d(param.fixed_rows::<3>(0).into_owned(), i % 5),
-            i => self
-                .grid2
-                .clamp_1d(param.fixed_rows::<3>(5).into_owned(), i % 5),
-        }
-    }
-
-    fn generate_random_within_bounds(
-        &self,
-        rng: &mut impl Rng,
-        num_particles: usize,
-    ) -> Vec<na::SVector<f64, 11>> {
-        let mut particles = Vec::with_capacity(num_particles);
-        let (min, max) = self.limits();
-        while particles.len() < num_particles {
-            let param = na::SVector::rand_from_range(&min, &max, rng);
-            if self
-                .grid1
-                .is_within_bounds(param.fixed_rows::<3>(0).into_owned())
-                && self
-                    .grid2
-                    .is_within_bounds(param.fixed_rows::<3>(5).into_owned())
-            {
-                particles.push(param);
-            }
-        }
-        particles
-    }
-}
-
-#[derive(Clone)]
-pub struct BoundsBinaryWithoutRV<B: GridBounds> {
-    grid: B,
-    light_ratio: (f64, f64),
-    vsini_range: (f64, f64),
-}
-
-impl<B: GridBounds> BoundsBinaryWithoutRV<B> {
-    fn new(grid: B, light_ratio: (f64, f64), vsini_range: (f64, f64)) -> Self {
-        Self {
-            grid,
-            light_ratio,
-            vsini_range,
-        }
-    }
-}
-
-impl<B: GridBounds> PSOBounds<9> for BoundsBinaryWithoutRV<B> {
-    fn limits(&self) -> (na::SVector<f64, 9>, na::SVector<f64, 9>) {
-        let (min, max) = self.grid.limits();
-        (
-            na::SVector::from_iterator(
-                min.iter()
-                    .copied()
-                    .chain(once(self.vsini_range.0))
-                    .chain(min.iter().copied())
-                    .chain(once(self.vsini_range.0))
-                    .chain(once(self.light_ratio.0)),
-            ),
-            na::SVector::from_iterator(
-                max.iter()
-                    .copied()
-                    .chain(once(self.vsini_range.1))
-                    .chain(max.iter().copied())
-                    .chain(once(self.vsini_range.1))
-                    .chain(once(self.light_ratio.1)),
-            ),
-        )
-    }
-
-    fn clamp_1d(&self, param: na::SVector<f64, 9>, index: usize) -> Result<f64> {
-        match index {
-            3 => Ok(param[3].clamp(self.vsini_range.0, self.vsini_range.1)),
-            7 => Ok(param[4].clamp(self.vsini_range.0, self.vsini_range.1)),
-            i => self.grid.clamp_1d(param.fixed_rows::<3>(0).into_owned(), i),
-        }
-    }
-
-    fn generate_random_within_bounds(
-        &self,
-        rng: &mut impl Rng,
-        num_particles: usize,
-    ) -> Vec<na::SVector<f64, 9>> {
-        let mut particles = Vec::with_capacity(num_particles);
-        let (min, max) = self.limits();
-        while particles.len() < num_particles {
-            let param = na::SVector::rand_from_range(&min, &max, rng);
-            if self
-                .grid
-                .is_within_bounds(param.fixed_rows::<3>(0).into_owned())
-                && self
-                    .grid
-                    .is_within_bounds(param.fixed_rows::<3>(4).into_owned())
-            {
-                particles.push(param);
-            }
-        }
-        particles
-    }
-}
-
-pub struct BinaryRVBounds {
-    rv_range1: (f64, f64),
-    rv_range2: (f64, f64),
-}
 
 // impl PSOBounds<2> for BinaryRVBounds {
 
@@ -887,7 +540,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> SingleFitter<T, F> {
             continuum_fitter: &self.continuum_fitter,
             parallelize,
         };
-        let bounds = BoundsSingle::new(interpolator.grid_bounds(), self.vsini_range, self.rv_range);
+        let bounds = SingleBounds::new(interpolator.grid_bounds(), self.vsini_range, self.rv_range);
         let solver = setup_pso(bounds, self.settings.clone());
         let fitter = Executor::new(cost_function, solver)
             .configure(|state| state.max_iters(self.settings.max_iters));
@@ -985,7 +638,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> SingleFitter<T, F> {
 
         let computer = |i| {
             // Maybe don't hardcode here
-            let bounds = BoundsSingle::new(interpolator.grid_bounds(), (0.0, 1e4), (-1e3, 1e3));
+            let bounds = SingleBounds::new(interpolator.grid_bounds(), (0.0, 1e4), (-1e3, 1e3));
 
             let get_bound = |right: bool| {
                 let costfunction = ModelFitCost {
@@ -1071,7 +724,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
         observed_spectrum: &ObservedSpectrum,
         trace_directory: Option<String>,
         parallelize: bool,
-        constraints: Vec<BinaryBoundsConstraint>,
+        constraints: Vec<BoundsConstraint>,
     ) -> Result<BinaryOptimizationResult> {
         let cost_function = BinaryCostFunction {
             interpolator,
@@ -1083,13 +736,11 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
         };
         let bounds = BinaryBounds::new(
             interpolator.grid_bounds(),
-            interpolator.grid_bounds(),
             (0.0, 0.5),
             self.vsini_range,
             self.rv_range,
-            self.rv_range,
         )
-        .with_constraints(constraints)?;
+        .with_constraints(constraints);
         let solver = setup_pso(bounds, self.settings.clone());
         let fitter = Executor::new(cost_function, solver)
             .configure(|state| state.max_iters(self.settings.max_iters));

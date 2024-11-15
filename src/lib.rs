@@ -6,6 +6,7 @@ mod fitting;
 mod interpolate;
 mod model_fetchers;
 mod particleswarm;
+mod bounds;
 
 use anyhow::Result;
 use continuum_fitting::{
@@ -18,17 +19,16 @@ use convolve_rv::{
 };
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
 use enum_dispatch::enum_dispatch;
-use fitting::{
-    BinaryBoundsConstraint, BinaryFitter, BinaryParameter, ObservedSpectrum, SingleFitter,
-};
+use fitting::{BinaryFitter, ObservedSpectrum, SingleFitter};
 use indicatif::ProgressBar;
-use interpolate::{Constraint, FluxFloat, GridBounds, GridInterpolator, Interpolator};
+use interpolate::{FluxFloat, GridInterpolator, Interpolator};
 use model_fetchers::{read_npy_file, CachedFetcher, InMemFetcher, OnDiskFetcher};
 use nalgebra as na;
 use nalgebra::Storage;
 use npy::to_file;
 use numpy::array::PyArray;
 use numpy::{Ix1, Ix2, PyArrayLike};
+use bounds::{BoundsConstraint, Constraint};
 use pyo3::{prelude::*, pyclass};
 use rayon::prelude::*;
 use serde::Serialize;
@@ -410,27 +410,21 @@ enum ContinuumFitterWrapper {
     RsConstantContinuum,
 }
 
-#[derive(Clone, Debug)]
-pub struct PyConstraint {
-    pub parameter: String,
-    pub constraint: Constraint,
-}
-
 #[pyclass(module = "pasta", frozen)]
 #[derive(Clone, Debug)]
-pub struct PyConstraintWrapper(PyConstraint);
+pub struct PyConstraintWrapper(BoundsConstraint);
 
 #[pyfunction]
-fn FixConstraint(parameter: String, value: f64) -> PyConstraintWrapper {
-    PyConstraintWrapper(PyConstraint {
+fn FixConstraint(parameter: usize, value: f64) -> PyConstraintWrapper {
+    PyConstraintWrapper(BoundsConstraint {
         parameter,
         constraint: Constraint::Fixed(value),
     })
 }
 
 #[pyfunction]
-fn RangeConstraint(parameter: String, lower: f64, upper: f64) -> PyConstraintWrapper {
-    PyConstraintWrapper(PyConstraint {
+fn RangeConstraint(parameter: usize, lower: f64, upper: f64) -> PyConstraintWrapper {
+    PyConstraintWrapper(BoundsConstraint {
         parameter,
         constraint: Constraint::Range(lower, upper),
     })
@@ -1047,10 +1041,7 @@ macro_rules! implement_methods {
                 let constraints = match constraints {
                     Some(constraints) => constraints
                         .into_iter()
-                        .map(|constraint| BinaryBoundsConstraint {
-                            parameter: BinaryParameter::from_str(&constraint.0.parameter).unwrap(),
-                            constraint: constraint.0.constraint,
-                        })
+                        .map(|constraint| constraint.0)
                         .collect(),
                     None => vec![],
                 };

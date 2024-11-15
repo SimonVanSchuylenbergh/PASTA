@@ -1,7 +1,6 @@
 use crate::convolve_rv::{convolve_rotation, shift_and_resample, WavelengthDispersion};
 use crate::cubic::{calculate_interpolation_coefficients, LocalGrid};
 use anyhow::{anyhow, bail, Context, Result};
-use approx::abs_diff_eq;
 use itertools::Itertools;
 use nalgebra::{self as na};
 
@@ -50,58 +49,10 @@ impl<'a> CowVector<'a> {
     }
 }
 
-pub enum GridParameter {
-    Teff,
-    M,
-    Logg,
-}
-
-#[derive(Clone, Debug)]
-pub enum Constraint {
-    Fixed(f64),
-    Range(f64, f64),
-    None,
-}
-
-impl Constraint {
-    pub fn intersection_with(&self, limits: (f64, f64)) -> (f64, f64) {
-        match self {
-            Constraint::Fixed(value) => (*value, *value),
-            Constraint::Range(cmin, cmax) => (limits.0.max(*cmin), limits.1.min(*cmax)),
-            Constraint::None => limits,
-        }
-    }
-
-    pub fn is_within_bounds(&self, x: f64) -> bool {
-        match self {
-            Constraint::Fixed(value) => abs_diff_eq!(x, *value),
-            Constraint::Range(min, max) => x >= *min && x <= *max,
-            Constraint::None => true,
-        }
-    }
-}
-pub struct BoundsConstraint<P> {
-    pub parameter: P,
-    pub constraint: Constraint,
-}
-
-pub type GridBoundsConstraint = BoundsConstraint<GridParameter>;
-
-pub trait Constrainable<P>: Sized + Clone {
-    fn with_constraint(&self, constraint: BoundsConstraint<P>) -> Result<Self>;
-    fn with_constraints(&self, constraints: Vec<BoundsConstraint<P>>) -> Result<Self> {
-        constraints
-            .into_iter()
-            .fold(Ok(self.clone()), |bounds: Result<Self>, constraint| {
-                bounds?.with_constraint(constraint)
-            })
-    }
-}
-
-pub trait GridBounds: Constrainable<GridParameter> + Clone {
+pub trait GridBounds: Clone {
     fn limits(&self) -> (na::SVector<f64, 3>, na::SVector<f64, 3>);
     fn is_within_bounds(&self, param: na::SVector<f64, 3>) -> bool;
-    fn clamp_1d(&self, param: na::SVector<f64, 3>, index: usize) -> Result<f64>;
+    fn get_limits_at(&self, param: na::SVector<f64, 3>, index: usize) -> Result<(f64, f64)>;
 }
 
 #[derive(Clone)]
@@ -223,9 +174,6 @@ pub struct Grid {
     pub logg_limits: Vec<(usize, usize)>, // For every Teff value, the min and max logg index
     // For every Teff value, the number of (teff, logg) pairs with lower Teff
     pub cumulative_grid_size: Vec<usize>,
-    pub teff_constraint: Constraint,
-    pub m_constraint: Constraint,
-    pub logg_constraint: Constraint,
 }
 
 impl Grid {
@@ -292,9 +240,6 @@ impl Grid {
             logg: Range { values: loggs },
             logg_limits,
             cumulative_grid_size,
-            teff_constraint: Constraint::None,
-            m_constraint: Constraint::None,
-            logg_constraint: Constraint::None,
         })
     }
 
@@ -315,32 +260,27 @@ impl Grid {
     }
 
     pub fn is_teff_logg_between_bounds(&self, teff: f64, logg: f64) -> bool {
-        self.teff_constraint.is_within_bounds(teff)
-            && self.logg_constraint.is_within_bounds(logg)
-            && match self.teff.get_right_index(teff) {
-                Ok(i) => {
-                    let bounds = self.logg_limits[i];
-                    logg >= self.logg.get(bounds.0).unwrap()
-                        && logg <= self.logg.get(bounds.1).unwrap()
-                }
-                Err(i) => {
-                    if i == 0 || i == self.teff.n() {
-                        return false;
-                    }
-                    let bounds_left = self.logg_limits[i - 1];
-                    let bounds_right = self.logg_limits[i];
-                    logg >= self.logg.get(bounds_left.0).unwrap()
-                        && logg <= self.logg.get(bounds_left.1).unwrap()
-                        && logg >= self.logg.get(bounds_right.0).unwrap()
-                        && logg <= self.logg.get(bounds_right.1).unwrap()
-                }
+        match self.teff.get_right_index(teff) {
+            Ok(i) => {
+                let bounds = self.logg_limits[i];
+                logg >= self.logg.get(bounds.0).unwrap() && logg <= self.logg.get(bounds.1).unwrap()
             }
+            Err(i) => {
+                if i == 0 || i == self.teff.n() {
+                    return false;
+                }
+                let bounds_left = self.logg_limits[i - 1];
+                let bounds_right = self.logg_limits[i];
+                logg >= self.logg.get(bounds_left.0).unwrap()
+                    && logg <= self.logg.get(bounds_left.1).unwrap()
+                    && logg >= self.logg.get(bounds_right.0).unwrap()
+                    && logg <= self.logg.get(bounds_right.1).unwrap()
+            }
+        }
     }
 
     pub fn is_m_between_bounds(&self, m: f64) -> bool {
-        self.m_constraint.is_within_bounds(m)
-            && m >= self.m.values[0]
-            && m <= *self.m.values.last().unwrap()
+        m >= self.m.values[0] && m <= *self.m.values.last().unwrap()
     }
 
     pub fn get_logg_index_limits_at(&self, teff: f64) -> Result<(usize, usize)> {
@@ -495,89 +435,46 @@ impl Grid {
             m_indices: m_neighbors.into(),
         })
     }
-}
 
-impl Constrainable<GridParameter> for Grid {
-    fn with_constraint(&self, constraint: GridBoundsConstraint) -> Result<Self> {
-        let (teff_constraint, m_constraint, logg_constraint) = match constraint.parameter {
-            GridParameter::Teff => (
-                constraint.constraint,
-                self.m_constraint.clone(),
-                self.logg_constraint.clone(),
-            ),
-            GridParameter::M => (
-                self.teff_constraint.clone(),
-                constraint.constraint,
-                self.logg_constraint.clone(),
-            ),
-            GridParameter::Logg => (
-                self.teff_constraint.clone(),
-                self.m_constraint.clone(),
-                constraint.constraint,
-            ),
-        };
-        Ok(Grid {
-            teff: self.teff.clone(),
-            m: self.m.clone(),
-            logg: self.logg.clone(),
-            logg_limits: self.logg_limits.clone(),
-            cumulative_grid_size: self.cumulative_grid_size.clone(),
-            teff_constraint,
-            m_constraint,
-            logg_constraint,
-        })
+    pub fn clamp_1d(&self, param: na::SVector<f64, 3>, index: usize) -> Result<f64> {
+        let limits = self.get_limits_at(param, index)?;
+        Ok(param[index].clamp(limits.0, limits.1))
     }
 }
 
 impl GridBounds for Grid {
     fn limits(&self) -> (na::SVector<f64, 3>, na::SVector<f64, 3>) {
-        let teff_limit = self.teff_constraint.intersection_with((
-            *self.teff.values.first().unwrap(),
-            *self.teff.values.last().unwrap(),
-        ));
-        let m_limit = self.m_constraint.intersection_with((
-            *self.m.values.first().unwrap(),
-            *self.m.values.last().unwrap(),
-        ));
-        let logg_limit = self.logg_constraint.intersection_with((
-            *self.logg.values.first().unwrap(),
-            *self.logg.values.last().unwrap(),
-        ));
         (
-            na::Vector3::new(teff_limit.0, m_limit.0, logg_limit.0),
-            na::Vector3::new(teff_limit.1, m_limit.1, logg_limit.1),
+            na::Vector3::new(
+                *self.teff.values.first().unwrap(),
+                *self.m.values.first().unwrap(),
+                *self.logg.values.first().unwrap(),
+            ),
+            na::Vector3::new(
+                *self.teff.values.last().unwrap(),
+                *self.m.values.last().unwrap(),
+                *self.logg.values.last().unwrap(),
+            ),
         )
     }
 
-    fn clamp_1d(&self, param: na::SVector<f64, 3>, index: usize) -> Result<f64> {
-        let bound = match index {
+    fn get_limits_at(&self, param: na::SVector<f64, 3>, index: usize) -> Result<(f64, f64)> {
+        Ok(match index {
             0 => {
-                // Avoid doing more expensive checks if the parameter is already within bounds
-                if self.is_within_bounds(param) {
-                    return Ok(param[0]);
-                } else {
-                    let (left_index, right_index) = self
-                        .get_teff_index_limits_at(param[2])
-                        .context(anyhow!("Cannot clamp teff at logg={}", param[2]))?;
-                    self.teff_constraint.intersection_with((
-                        self.teff.get(left_index)?,
-                        self.teff.get(right_index)?,
-                    ))
-                }
+                let (left_index, right_index) = self
+                    .get_teff_index_limits_at(param[2])
+                    .context(anyhow!("Cannot clamp teff at logg={}", param[2]))?;
+                (self.teff.get(left_index)?, self.teff.get(right_index)?)
             }
-            1 => self
-                .m_constraint
-                .intersection_with(self.m.get_first_and_last()),
+            1 => self.m.get_first_and_last(),
             2 => {
                 let (left_index, right_index) = self
                     .get_logg_index_limits_at(param[0])
                     .context(anyhow!("Cannot clamp logg at Teff={}", param[0]))?;
-                self.logg_constraint
-                    .intersection_with((self.logg.get(left_index)?, self.logg.get(right_index)?))
+                (self.logg.get(left_index)?, self.logg.get(right_index)?)
             }
             _ => panic!("Index out of bounds"),
-        };
-        Ok(param[index].clamp(bound.0, bound.1))
+        })
     }
 
     fn is_within_bounds(&self, param: na::SVector<f64, 3>) -> bool {

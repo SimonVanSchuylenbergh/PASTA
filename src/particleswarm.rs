@@ -20,6 +20,7 @@
 //!
 //! \[1\] <https://en.wikipedia.org/wiki/Particle_swarm_optimization>
 
+use crate::bounds::PSOBounds;
 use anyhow::{Context, Result};
 use argmin::{
     argmin_error, argmin_error_closure,
@@ -29,20 +30,6 @@ use argmin::{
 use argmin_math::{ArgminRandom, ArgminSub};
 use nalgebra as na;
 use rand::{Rng, SeedableRng};
-
-pub trait PSOBounds<const N: usize>: Clone {
-    fn clamp_1d(&self, param: na::SVector<f64, N>, index: usize) -> Result<f64>;
-    fn limits(&self) -> (na::SVector<f64, N>, na::SVector<f64, N>);
-    fn widths(&self) -> na::SVector<f64, N> {
-        let (min, max) = self.limits();
-        max.sub(&min)
-    }
-    fn generate_random_within_bounds(
-        &self,
-        rng: &mut impl Rng,
-        num_particles: usize,
-    ) -> Vec<na::SVector<f64, N>>;
-}
 
 #[derive(Clone)]
 pub struct ParticleSwarm<const N: usize, B: PSOBounds<N>, F> {
@@ -148,7 +135,7 @@ where
 
     /// Initializes positions and velocities for all particles
     fn initialize_positions_and_velocities(&mut self) -> (Vec<V<N>>, Vec<V<N>>) {
-        let (min, max) = self.bounds.limits();
+        let (min, max) = self.bounds.outer_limits();
         let delta = max.sub(&min);
         let delta_neg = -delta;
         let positions = self
