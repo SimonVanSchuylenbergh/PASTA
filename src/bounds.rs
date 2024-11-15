@@ -126,7 +126,7 @@ impl<const N: usize, B: PSOBounds<N>> PSOBounds<N> for ConstrainedPSOBounds<N, B
             .iter()
             .zip(self.constraints.iter())
             .all(|(p, c)| match c {
-                Constraint::Fixed(f) => !abs_diff_eq!(p, f),
+                Constraint::Fixed(f) => abs_diff_eq!(p, f),
                 Constraint::Range(a, b) => *p >= *a && *p <= *b,
                 Constraint::None => true,
             })
