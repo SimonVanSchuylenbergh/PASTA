@@ -503,7 +503,7 @@ impl GridBounds for Grid {
         ));
         let logg_limit = self.logg_constraint.intersection_with((
             *self.logg.values.first().unwrap(),
-            *self.logg.values.first().unwrap(),
+            *self.logg.values.last().unwrap(),
         ));
         (
             na::Vector3::new(teff_limit.0, m_limit.0, logg_limit.0),
