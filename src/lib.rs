@@ -1189,6 +1189,8 @@ fn pasta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ChunkContinuumFitter, m)?)?;
     m.add_function(wrap_pyfunction!(FixedContinuum, m)?)?;
     m.add_function(wrap_pyfunction!(ConstantContinuum, m)?)?;
+    m.add_function(wrap_pyfunction!(FixConstraint, m)?)?;
+    m.add_function(wrap_pyfunction!(RangeConstraint, m)?)?;
     m.add_function(wrap_pyfunction!(get_vsini_kernel, m)?)?;
     Ok(())
 }
