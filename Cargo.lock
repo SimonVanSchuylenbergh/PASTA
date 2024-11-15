@@ -433,6 +433,7 @@ name = "pasta"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "approx",
  "argmin",
  "argmin-math",
  "enum_dispatch",
