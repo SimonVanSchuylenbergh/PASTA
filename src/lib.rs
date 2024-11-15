@@ -238,6 +238,22 @@ impl BinaryOptimizationResult {
     fn to_json(&self) -> PyResult<String> {
         Ok(serde_json::to_string(self).unwrap())
     }
+
+    fn label_list(&self) -> [f64; 11] {
+        [
+            self.label1.teff,
+            self.label1.m,
+            self.label1.logg,
+            self.label1.vsini,
+            self.label1.rv,
+            self.label2.teff,
+            self.label2.m,
+            self.label2.logg,
+            self.label2.vsini,
+            self.label2.rv,
+            self.light_ratio,
+        ]
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -717,40 +733,6 @@ macro_rules! implement_methods {
                     .collect())
             }
 
-            /// Compute the chi2 value at a given set of labels, continuum is fitted.
-            pub fn chi2(
-                &self,
-                fitter: PyContinuumFitter,
-                dispersion: PyWavelengthDispersion,
-                observed_flux: Vec<FluxFloat>,
-                observed_var: Vec<FluxFloat>,
-                labels: Vec<[f64; 5]>,
-                allow_nan: Option<bool>,
-            ) -> PyResult<Vec<f64>> {
-                let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
-                Ok(labels
-                    .into_par_iter()
-                    .map(|[teff, m, logg, vsini, rv]| {
-                        let synth_model_result =
-                            self.0
-                                .produce_model(&dispersion.0, teff, m, logg, vsini, rv);
-                        let synth_model = match allow_nan {
-                            Some(true) => match synth_model_result {
-                                Ok(x) => x,
-                                Err(_) => return f64::NAN,
-                            },
-                            _ => synth_model_result.unwrap(),
-                        };
-                        let (_, chi2) = fitter
-                            .0
-                            .fit_continuum(&observed_spectrum, &synth_model)
-                            .unwrap();
-                        chi2
-                        // 0.0
-                    })
-                    .collect())
-            }
-
             /// Compute the chi2 value at a given set of labels for multiple spectra.
             /// Continuum is fitted.
             pub fn chi2_bulk(
@@ -984,6 +966,33 @@ macro_rules! implement_methods {
                     })
                     .collect()
             }
+
+            /// Compute the chi2 value at a given set of labels, continuum is fitted.
+            pub fn chi2(
+                &self,
+                interpolator: &$name,
+                observed_flux: Vec<FluxFloat>,
+                observed_var: Vec<FluxFloat>,
+                labels: Vec<[f64; 5]>,
+                allow_nan: Option<bool>,
+            ) -> PyResult<Vec<f64>> {
+                let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
+                Ok(labels
+                    .into_par_iter()
+                    .map(|labels| {
+                        let chi = self
+                            .0
+                            .chi2(&interpolator.0, &observed_spectrum, labels.into());
+                        match allow_nan {
+                            Some(false) => chi.unwrap(),
+                            _ => match chi {
+                                Ok(x) => x,
+                                Err(_) => f64::NAN,
+                            },
+                        }
+                    })
+                    .collect())
+            }
         }
 
         #[pyclass]
@@ -1014,6 +1023,36 @@ macro_rules! implement_methods {
                     parallelize.unwrap_or(true),
                 );
                 Ok(result?.into())
+            }
+
+            pub fn chi2(
+                &self,
+                interpolator: &$name,
+                continuum_interpolator: &$name,
+                observed_flux: Vec<FluxFloat>,
+                observed_var: Vec<FluxFloat>,
+                labels: Vec<[f64; 11]>,
+                allow_nan: Option<bool>,
+            ) -> PyResult<Vec<f64>> {
+                let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
+                Ok(labels
+                    .into_par_iter()
+                    .map(|labels| {
+                        let chi = self.0.chi2(
+                            &interpolator.0,
+                            &continuum_interpolator.0,
+                            &observed_spectrum,
+                            labels.into(),
+                        );
+                        match allow_nan {
+                            Some(false) => chi.unwrap(),
+                            _ => match chi {
+                                Ok(x) => x,
+                                Err(_) => f64::NAN,
+                            },
+                        }
+                    })
+                    .collect())
             }
         }
     };

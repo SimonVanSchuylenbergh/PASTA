@@ -4,7 +4,7 @@ use crate::interpolate::{FluxFloat, GridBounds, Interpolator, WlGrid};
 use crate::particleswarm::{self, PSOBounds};
 use anyhow::{anyhow, Context, Result};
 use argmin::core::observers::{Observe, ObserverMode};
-use argmin::core::{Executor, PopulationState, State, KV};
+use argmin::core::{CostFunction as _, Executor, PopulationState, State, KV};
 use argmin::solver::brent::BrentRoot;
 use argmin_math::ArgminRandom;
 use nalgebra as na;
@@ -640,7 +640,7 @@ impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 5>, f64>, 
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct BinaryParticleInfo {
     teff1: f64,
     m1: f64,
@@ -782,7 +782,6 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> SingleFitter<T, F> {
         let solver = setup_pso(bounds, self.settings.clone());
         let fitter = Executor::new(cost_function, solver)
             .configure(|state| state.max_iters(self.settings.max_iters));
-
         let result = if let Some(dir) = trace_directory {
             let observer = PSObserver::new(&dir, "iteration");
             fitter.add_observer(observer, ObserverMode::Always).run()?
@@ -824,6 +823,23 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> SingleFitter<T, F> {
             time,
             iters: result.state.iter,
         })
+    }
+
+    pub fn chi2(
+        &self,
+        interpolator: &impl Interpolator,
+        observed_spectrum: &ObservedSpectrum,
+        labels: na::SVector<f64, 5>,
+    ) -> Result<f64> {
+        let cost_function = CostFunction {
+            interpolator,
+            target_dispersion: &self.target_dispersion,
+            observed_spectrum,
+            continuum_fitter: &self.continuum_fitter,
+            parallelize: false,
+        };
+
+        cost_function.cost(&labels)
     }
 
     /// Compute uncertainty in every label
@@ -1006,5 +1022,24 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
             time,
             iters: result.state.iter,
         })
+    }
+
+    pub fn chi2<I: Interpolator>(
+        &self,
+        interpolator: &I,
+        continuum_interpolator: &I,
+        observed_spectrum: &ObservedSpectrum,
+        labels: na::SVector<f64, 11>,
+    ) -> Result<f64> {
+        let cost_function = BinaryCostFunction {
+            interpolator,
+            continuum_interpolator,
+            target_dispersion: &self.target_dispersion,
+            observed_spectrum,
+            continuum_fitter: &self.continuum_fitter,
+            parallelize: false,
+        };
+
+        cost_function.cost(&labels)
     }
 }
