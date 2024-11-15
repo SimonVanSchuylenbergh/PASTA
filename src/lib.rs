@@ -18,9 +18,11 @@ use convolve_rv::{
 };
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
 use enum_dispatch::enum_dispatch;
-use fitting::{BinaryFitter, ObservedSpectrum, SingleFitter};
+use fitting::{
+    BinaryBoundsConstraint, BinaryFitter, BinaryParameter, ObservedSpectrum, SingleFitter,
+};
 use indicatif::ProgressBar;
-use interpolate::{FluxFloat, GridBounds, GridInterpolator, Interpolator};
+use interpolate::{Constraint, FluxFloat, GridBounds, GridInterpolator, Interpolator};
 use model_fetchers::{read_npy_file, CachedFetcher, InMemFetcher, OnDiskFetcher};
 use nalgebra as na;
 use nalgebra::Storage;
@@ -406,6 +408,32 @@ enum ContinuumFitterWrapper {
     LinearModelFitter,
     RsFixedContinuum,
     RsConstantContinuum,
+}
+
+#[derive(Clone, Debug)]
+pub struct PyConstraint {
+    pub parameter: String,
+    pub constraint: Constraint,
+}
+
+#[pyclass(module = "pasta", frozen)]
+#[derive(Clone, Debug)]
+pub struct PyConstraintWrapper(PyConstraint);
+
+#[pyfunction]
+fn FixConstraint(parameter: String, value: f64) -> PyConstraintWrapper {
+    PyConstraintWrapper(PyConstraint {
+        parameter,
+        constraint: Constraint::Fixed(value),
+    })
+}
+
+#[pyfunction]
+fn RangeConstraint(parameter: String, lower: f64, upper: f64) -> PyConstraintWrapper {
+    PyConstraintWrapper(PyConstraint {
+        parameter,
+        constraint: Constraint::Range(lower, upper),
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -1010,10 +1038,21 @@ macro_rules! implement_methods {
                 observed_var: PyArrayLike<FluxFloat, Ix1>,
                 trace_directory: Option<String>,
                 parallelize: Option<bool>,
+                constraints: Option<Vec<PyConstraintWrapper>>,
             ) -> PyResult<BinaryOptimizationResult> {
                 let observed_spectrum = ObservedSpectrum {
                     flux: observed_flux.as_matrix().column(0).into_owned(),
                     var: observed_var.as_matrix().column(0).into_owned(),
+                };
+                let constraints = match constraints {
+                    Some(constraints) => constraints
+                        .into_iter()
+                        .map(|constraint| BinaryBoundsConstraint {
+                            parameter: BinaryParameter::from_str(&constraint.0.parameter).unwrap(),
+                            constraint: constraint.0.constraint,
+                        })
+                        .collect(),
+                    None => vec![],
                 };
                 let result = self.0.fit(
                     &interpolator.0,
@@ -1021,6 +1060,7 @@ macro_rules! implement_methods {
                     &observed_spectrum.into(),
                     trace_directory,
                     parallelize.unwrap_or(true),
+                    constraints,
                 );
                 Ok(result?.into())
             }

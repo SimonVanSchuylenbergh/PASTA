@@ -98,7 +98,7 @@ pub fn main() -> Result<()> {
     
     let start = Instant::now();
     // fitter.fit(&interpolator, &continuum_interpolator, &spec, None, true);
-    fitter.fit(&interpolator, &continuum_interpolator, &spec, None, false)?;
+    fitter.fit(&interpolator, &continuum_interpolator, &spec, None, false, vec![])?;
     println!("Time: {:?}", start.elapsed());
     Ok(())
 }

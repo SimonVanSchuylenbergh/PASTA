@@ -1,6 +1,7 @@
 use crate::convolve_rv::{convolve_rotation, shift_and_resample, WavelengthDispersion};
 use crate::cubic::{calculate_interpolation_coefficients, LocalGrid};
 use anyhow::{anyhow, bail, Context, Result};
+use approx::abs_diff_eq;
 use itertools::Itertools;
 use nalgebra::{self as na};
 
@@ -49,13 +50,13 @@ impl<'a> CowVector<'a> {
     }
 }
 
-enum GridParameter {
+pub enum GridParameter {
     Teff,
     M,
     Logg,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Constraint {
     Fixed(f64),
     Range(f64, f64),
@@ -63,7 +64,7 @@ pub enum Constraint {
 }
 
 impl Constraint {
-    fn intersection_with(&self, limits: (f64, f64)) -> (f64, f64) {
+    pub fn intersection_with(&self, limits: (f64, f64)) -> (f64, f64) {
         match self {
             Constraint::Fixed(value) => (*value, *value),
             Constraint::Range(cmin, cmax) => (limits.0.max(*cmin), limits.1.min(*cmax)),
@@ -71,31 +72,36 @@ impl Constraint {
         }
     }
 
-    fn is_within_bounds(&self, x: f64) -> bool {
+    pub fn is_within_bounds(&self, x: f64) -> bool {
         match self {
-            Constraint::Fixed(value) => x == *value,
+            Constraint::Fixed(value) => abs_diff_eq!(x, *value),
             Constraint::Range(min, max) => x >= *min && x <= *max,
             Constraint::None => true,
         }
     }
 }
-pub struct GridBoundsConstraint {
-    parameter: GridParameter,
-    constraint: Constraint,
+pub struct BoundsConstraint<P> {
+    pub parameter: P,
+    pub constraint: Constraint,
 }
 
-pub trait GridBounds: Clone {
-    fn limits(&self) -> (na::SVector<f64, 3>, na::SVector<f64, 3>);
-    fn is_within_bounds(&self, param: na::SVector<f64, 3>) -> bool;
-    fn clamp_1d(&self, param: na::SVector<f64, 3>, index: usize) -> Result<f64>;
-    fn with_constraint(&self, constraint: GridBoundsConstraint) -> Result<Self>;
-    fn with_constraints(&self, constraints: Vec<GridBoundsConstraint>) -> Result<Self> {
+pub type GridBoundsConstraint = BoundsConstraint<GridParameter>;
+
+pub trait Constrainable<P>: Sized + Clone {
+    fn with_constraint(&self, constraint: BoundsConstraint<P>) -> Result<Self>;
+    fn with_constraints(&self, constraints: Vec<BoundsConstraint<P>>) -> Result<Self> {
         constraints
             .into_iter()
             .fold(Ok(self.clone()), |bounds: Result<Self>, constraint| {
                 bounds?.with_constraint(constraint)
             })
     }
+}
+
+pub trait GridBounds: Constrainable<GridParameter> + Clone {
+    fn limits(&self) -> (na::SVector<f64, 3>, na::SVector<f64, 3>);
+    fn is_within_bounds(&self, param: na::SVector<f64, 3>) -> bool;
+    fn clamp_1d(&self, param: na::SVector<f64, 3>, index: usize) -> Result<f64>;
 }
 
 #[derive(Clone)]
@@ -491,6 +497,38 @@ impl Grid {
     }
 }
 
+impl Constrainable<GridParameter> for Grid {
+    fn with_constraint(&self, constraint: GridBoundsConstraint) -> Result<Self> {
+        let (teff_constraint, m_constraint, logg_constraint) = match constraint.parameter {
+            GridParameter::Teff => (
+                constraint.constraint,
+                self.m_constraint.clone(),
+                self.logg_constraint.clone(),
+            ),
+            GridParameter::M => (
+                self.teff_constraint.clone(),
+                constraint.constraint,
+                self.logg_constraint.clone(),
+            ),
+            GridParameter::Logg => (
+                self.teff_constraint.clone(),
+                self.m_constraint.clone(),
+                constraint.constraint,
+            ),
+        };
+        Ok(Grid {
+            teff: self.teff.clone(),
+            m: self.m.clone(),
+            logg: self.logg.clone(),
+            logg_limits: self.logg_limits.clone(),
+            cumulative_grid_size: self.cumulative_grid_size.clone(),
+            teff_constraint,
+            m_constraint,
+            logg_constraint,
+        })
+    }
+}
+
 impl GridBounds for Grid {
     fn limits(&self) -> (na::SVector<f64, 3>, na::SVector<f64, 3>) {
         let teff_limit = self.teff_constraint.intersection_with((
@@ -545,36 +583,6 @@ impl GridBounds for Grid {
     fn is_within_bounds(&self, param: na::SVector<f64, 3>) -> bool {
         // When the parameters are not in the rectangular grid:
         self.is_m_between_bounds(param[1]) & self.is_teff_logg_between_bounds(param[0], param[2])
-    }
-
-    fn with_constraint(&self, constraint: GridBoundsConstraint) -> Result<Self> {
-        let (teff_constraint, m_constraint, logg_constraint) = match constraint.parameter {
-            GridParameter::Teff => (
-                constraint.constraint,
-                self.m_constraint.clone(),
-                self.logg_constraint.clone(),
-            ),
-            GridParameter::M => (
-                self.teff_constraint.clone(),
-                constraint.constraint,
-                self.logg_constraint.clone(),
-            ),
-            GridParameter::Logg => (
-                self.teff_constraint.clone(),
-                self.m_constraint.clone(),
-                constraint.constraint,
-            ),
-        };
-        Ok(Grid {
-            teff: self.teff.clone(),
-            m: self.m.clone(),
-            logg: self.logg.clone(),
-            logg_limits: self.logg_limits.clone(),
-            cumulative_grid_size: self.cumulative_grid_size.clone(),
-            teff_constraint,
-            m_constraint,
-            logg_constraint,
-        })
     }
 }
 
