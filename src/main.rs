@@ -1,5 +1,6 @@
 #![allow(unused_imports, dead_code, non_upper_case_globals, unused)]
 
+mod bounds;
 mod continuum_fitting;
 mod convolve_rv;
 mod cubic;
@@ -7,10 +8,11 @@ mod fitting;
 mod interpolate;
 mod model_fetchers;
 mod particleswarm;
-mod bounds;
 use crate::fitting::ObservedSpectrum;
 use crate::interpolate::{Grid, GridInterpolator};
 use anyhow::Result;
+use bounds::PSOBounds;
+use bounds::{BoundsConstraint, Constraint};
 use continuum_fitting::ChunkFitter;
 use convolve_rv::{
     oa_convolve, NoConvolutionDispersionTarget, VariableTargetDispersion, WavelengthDispersion,
@@ -21,9 +23,8 @@ use interpolate::{GridBounds, Interpolator, Range, WlGrid};
 use iter_num_tools::arange;
 use itertools::Itertools;
 use model_fetchers::{CachedFetcher, InMemFetcher, OnDiskFetcher};
-use nalgebra as na;
+use nalgebra::{self as na, constraint};
 use npy::NpyData;
-use bounds::PSOBounds;
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::hint::black_box;
@@ -68,7 +69,7 @@ pub fn main() -> Result<()> {
     let continuum_fitter = ChunkFitter::new(wl.clone(), 10, 5, 0.2);
     let settings = PSOSettings {
         num_particles: 50,
-        max_iters: 3,
+        max_iters: 10,
         inertia_factor: -0.3085,
         cognitive_factor: 0.0,
         social_factor: 2.0273,
@@ -89,10 +90,28 @@ pub fn main() -> Result<()> {
         (1.0, 600.0),
         (-150.0, 150.0),
     );
-    
+
+    let constraints = vec![
+        BoundsConstraint {
+            parameter: 4,
+            constraint: Constraint::Fixed(0.0),
+        },
+        BoundsConstraint {
+            parameter: 9,
+            constraint: Constraint::Fixed(50.0),
+        },
+    ];
+
     let start = Instant::now();
     // fitter.fit(&interpolator, &continuum_interpolator, &spec, None, true);
-    fitter.fit(&interpolator, &continuum_interpolator, &spec, None, false, vec![])?;
+    fitter.fit(
+        &interpolator,
+        &continuum_interpolator,
+        &spec,
+        None,
+        false,
+        constraints,
+    )?;
     println!("Time: {:?}", start.elapsed());
     Ok(())
 }
