@@ -1,7 +1,7 @@
-use crate::bounds::{BinaryBounds, BoundsConstraint, SingleBounds, PSOBounds};
+use crate::bounds::{BinaryBounds, BoundsConstraint, PSOBounds, SingleBounds};
 use crate::continuum_fitting::ContinuumFitter;
 use crate::convolve_rv::{shift_and_resample, WavelengthDispersion};
-use crate::interpolate::{FluxFloat, GridBounds, Interpolator, WlGrid};
+use crate::interpolate::{FluxFloat, Interpolator, WlGrid};
 use crate::particleswarm::{self};
 use anyhow::{anyhow, Context, Result};
 use argmin::core::observers::{Observe, ObserverMode};
@@ -11,7 +11,6 @@ use nalgebra as na;
 use serde::Serialize;
 use std::fs::File;
 use std::io::BufWriter;
-use std::iter::once;
 use std::path::PathBuf;
 
 /// Observed specrum with flux and variance
@@ -27,46 +26,6 @@ impl ObservedSpectrum {
         let flux = na::DVector::from_vec(flux);
         let var = na::DVector::from_vec(var);
         Self { flux, var }
-    }
-}
-
-
-// impl PSOBounds<2> for BinaryRVBounds {
-
-// }
-
-/// Cost function used in the PSO fitting
-struct CostFunction<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
-    interpolator: &'a I,
-    target_dispersion: &'a T,
-    observed_spectrum: &'a ObservedSpectrum,
-    continuum_fitter: &'a F,
-    parallelize: bool,
-}
-
-impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
-    for CostFunction<'a, I, T, F>
-{
-    type Param = na::SVector<f64, 5>;
-    type Output = f64;
-
-    fn cost(&self, params: &Self::Param) -> Result<Self::Output> {
-        let teff = params[0];
-        let m = params[1];
-        let logg = params[2];
-        let vsini = params[3];
-        let rv = params[4];
-        let synth_spec =
-            self.interpolator
-                .produce_model(self.target_dispersion, teff, m, logg, vsini, rv)?;
-        let (_, ls) = self
-            .continuum_fitter
-            .fit_continuum(self.observed_spectrum, &synth_spec)?;
-        Ok(ls)
-    }
-
-    fn parallelize(&self) -> bool {
-        self.parallelize
     }
 }
 
@@ -122,6 +81,7 @@ pub struct RvLessLabel {
     pub logg: f64,
     pub vsini: f64,
 }
+
 #[derive(Debug)]
 pub struct OptimizationResult {
     pub label: Label<f64>,
@@ -129,43 +89,6 @@ pub struct OptimizationResult {
     pub ls: f64,
     pub iters: u64,
     pub time: f64,
-}
-struct BinaryCostFunction<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
-    interpolator: &'a I,
-    continuum_interpolator: &'a I,
-    target_dispersion: &'a T,
-    observed_spectrum: &'a ObservedSpectrum,
-    continuum_fitter: &'a F,
-    parallelize: bool,
-}
-
-impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
-    for BinaryCostFunction<'a, I, T, F>
-{
-    type Param = na::SVector<f64, 11>;
-    type Output = f64;
-
-    fn cost(&self, params: &Self::Param) -> Result<Self::Output> {
-        let star1_parameters = params.fixed_rows::<5>(0).into_owned();
-        let star2_parameters = params.fixed_rows::<5>(5).into_owned();
-        let light_ratio = params[10];
-
-        let synth_spec = self.interpolator.produce_binary_model_norm(
-            self.continuum_interpolator,
-            self.target_dispersion,
-            &star1_parameters,
-            &star2_parameters,
-            light_ratio as f32,
-        )?;
-        let (_, ls) = self
-            .continuum_fitter
-            .fit_continuum(self.observed_spectrum, &synth_spec)?;
-        Ok(ls)
-    }
-
-    fn parallelize(&self) -> bool {
-        self.parallelize
-    }
 }
 
 pub struct BinaryOptimizationResult {
@@ -176,136 +99,6 @@ pub struct BinaryOptimizationResult {
     pub ls: f64,
     pub iters: u64,
     pub time: f64,
-}
-
-struct RVCostFunction<'a, F: ContinuumFitter> {
-    continuum_fitter: &'a F,
-    observed_wl: &'a na::DVector<f64>,
-    observed_spectrum: &'a ObservedSpectrum,
-    synth_wl: &'a WlGrid,
-    model1: &'a na::DVector<FluxFloat>,
-    model2: &'a na::DVector<FluxFloat>,
-    continuum1: &'a na::DVector<FluxFloat>,
-    continuum2: &'a na::DVector<FluxFloat>,
-    light_ratio: f64,
-}
-
-impl<'a, F: ContinuumFitter> argmin::core::CostFunction for RVCostFunction<'a, F> {
-    type Param = na::SVector<f64, 2>;
-    type Output = f64;
-
-    fn cost(&self, param: &Self::Param) -> std::result::Result<Self::Output, argmin::core::Error> {
-        let rv1 = param[0];
-        let rv2 = param[1];
-
-        let shifted_synth1 =
-            shift_and_resample(&self.model1, self.synth_wl, self.observed_wl, rv1)?;
-        let shifted_synth2 =
-            shift_and_resample(&self.model2, self.synth_wl, self.observed_wl, rv2)?;
-        let shifted_continuum1 =
-            shift_and_resample(&self.continuum1, self.synth_wl, self.observed_wl, rv1)?;
-        let shifted_continuum2 =
-            shift_and_resample(&self.continuum2, self.synth_wl, self.observed_wl, rv2)?;
-
-        let synth_spec = shifted_synth1.component_mul(&shifted_continuum1)
-            * self.light_ratio as FluxFloat
-            + shifted_synth2.component_mul(&shifted_continuum2)
-                * (1.0 - self.light_ratio as FluxFloat);
-
-        let (_, ls) = self
-            .continuum_fitter
-            .fit_continuum(self.observed_spectrum, &synth_spec)?;
-        Ok(ls)
-    }
-}
-
-struct BinaryTimeseriesCostFunction<
-    'a,
-    I: Interpolator,
-    T: WavelengthDispersion,
-    F: ContinuumFitter,
-    B: PSOBounds<2>,
-> {
-    interpolator: &'a I,
-    continuum_interpolator: &'a I,
-    target_dispersion: &'a T,
-    observed_spectra: &'a Vec<ObservedSpectrum>,
-    continuum_fitter: &'a F,
-    synth_wl: &'a WlGrid,
-    rv_fit_settings: PSOSettings,
-    rv_bounds: B,
-    parallelize: bool,
-}
-
-impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter, B: PSOBounds<2>>
-    argmin::core::CostFunction for BinaryTimeseriesCostFunction<'a, I, T, F, B>
-{
-    type Param = na::SVector<f64, 9>;
-    type Output = f64;
-
-    fn cost(&self, params: &Self::Param) -> Result<Self::Output> {
-        let star1_parameters = params.fixed_rows::<4>(0).into_owned();
-        let star2_parameters = params.fixed_rows::<4>(5).into_owned();
-        let light_ratio = params[8];
-
-        let synth_spec1 = self.interpolator.interpolate_and_convolve(
-            self.target_dispersion,
-            star1_parameters[0],
-            star1_parameters[1],
-            star1_parameters[2],
-            star1_parameters[3],
-        )?;
-        let continuum1 = self.continuum_interpolator.interpolate_and_convolve(
-            self.target_dispersion,
-            star1_parameters[0],
-            star1_parameters[1],
-            star1_parameters[2],
-            star1_parameters[3],
-        )?;
-        let synth_spec2 = self.interpolator.interpolate_and_convolve(
-            self.target_dispersion,
-            star2_parameters[0],
-            star2_parameters[1],
-            star2_parameters[2],
-            star2_parameters[3],
-        )?;
-        let continuum2 = self.continuum_interpolator.interpolate_and_convolve(
-            self.target_dispersion,
-            star2_parameters[0],
-            star2_parameters[1],
-            star2_parameters[2],
-            star2_parameters[3],
-        )?;
-
-        let chi2 = self
-            .observed_spectra
-            .iter()
-            .map(|observed_spectrum| {
-                let inner_cost_function = RVCostFunction {
-                    continuum_fitter: self.continuum_fitter,
-                    observed_wl: self.target_dispersion.wavelength(),
-                    observed_spectrum: &observed_spectrum,
-                    synth_wl: self.synth_wl,
-                    model1: &synth_spec1,
-                    model2: &synth_spec2,
-                    continuum1: &continuum1,
-                    continuum2: &continuum2,
-                    light_ratio,
-                };
-                let solver = setup_pso(self.rv_bounds.clone(), self.rv_fit_settings.clone());
-                let fitter = Executor::new(inner_cost_function, solver)
-                    .configure(|state| state.max_iters(self.rv_fit_settings.max_iters));
-                let result = fitter.run()?;
-                Ok::<f64, anyhow::Error>(result.state.best_cost)
-            })
-            .sum::<Result<f64>>()?;
-
-        Ok(chi2)
-    }
-
-    fn parallelize(&self) -> bool {
-        self.parallelize
-    }
 }
 
 pub struct BinaryTimeseriesOptimizationResult {
@@ -355,7 +148,6 @@ impl PSObserver {
         }
     }
 }
-
 #[derive(Serialize)]
 struct ParticleInfo {
     teff: f64,
@@ -460,7 +252,42 @@ impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 11>, f64>,
     }
 }
 
-struct ModelFitCost<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
+/// Cost function used in the PSO fitting
+struct CostFunction<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
+    interpolator: &'a I,
+    target_dispersion: &'a T,
+    observed_spectrum: &'a ObservedSpectrum,
+    continuum_fitter: &'a F,
+    parallelize: bool,
+}
+
+impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
+    for CostFunction<'a, I, T, F>
+{
+    type Param = na::SVector<f64, 5>;
+    type Output = f64;
+
+    fn cost(&self, params: &Self::Param) -> Result<Self::Output> {
+        let teff = params[0];
+        let m = params[1];
+        let logg = params[2];
+        let vsini = params[3];
+        let rv = params[4];
+        let synth_spec =
+            self.interpolator
+                .produce_model(self.target_dispersion, teff, m, logg, vsini, rv)?;
+        let (_, ls) = self
+            .continuum_fitter
+            .fit_continuum(self.observed_spectrum, &synth_spec)?;
+        Ok(ls)
+    }
+
+    fn parallelize(&self) -> bool {
+        self.parallelize
+    }
+}
+
+struct UncertaintyCostFunction<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
     interpolator: &'a I,
     target_dispersion: &'a T,
     observed_spectrum: &'a ObservedSpectrum,
@@ -472,7 +299,7 @@ struct ModelFitCost<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFi
 }
 
 impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
-    for ModelFitCost<'a, I, T, F>
+    for UncertaintyCostFunction<'a, I, T, F>
 {
     type Param = f64;
     type Output = f64;
@@ -641,7 +468,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> SingleFitter<T, F> {
             let bounds = SingleBounds::new(interpolator.grid_bounds(), (0.0, 1e4), (-1e3, 1e3));
 
             let get_bound = |right: bool| {
-                let costfunction = ModelFitCost {
+                let costfunction = UncertaintyCostFunction {
                     interpolator,
                     target_dispersion: &self.target_dispersion,
                     observed_spectrum,
@@ -689,6 +516,44 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> SingleFitter<T, F> {
             vsini: computer(3),
             rv: computer(4),
         })
+    }
+}
+
+struct BinaryCostFunction<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
+    interpolator: &'a I,
+    continuum_interpolator: &'a I,
+    target_dispersion: &'a T,
+    observed_spectrum: &'a ObservedSpectrum,
+    continuum_fitter: &'a F,
+    parallelize: bool,
+}
+
+impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
+    for BinaryCostFunction<'a, I, T, F>
+{
+    type Param = na::SVector<f64, 11>;
+    type Output = f64;
+
+    fn cost(&self, params: &Self::Param) -> Result<Self::Output> {
+        let star1_parameters = params.fixed_rows::<5>(0).into_owned();
+        let star2_parameters = params.fixed_rows::<5>(5).into_owned();
+        let light_ratio = params[10];
+
+        let synth_spec = self.interpolator.produce_binary_model_norm(
+            self.continuum_interpolator,
+            self.target_dispersion,
+            &star1_parameters,
+            &star2_parameters,
+            light_ratio as f32,
+        )?;
+        let (_, ls) = self
+            .continuum_fitter
+            .fit_continuum(self.observed_spectrum, &synth_spec)?;
+        Ok(ls)
+    }
+
+    fn parallelize(&self) -> bool {
+        self.parallelize
     }
 }
 
@@ -804,5 +669,135 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
         };
 
         cost_function.cost(&labels)
+    }
+}
+
+struct RVCostFunction<'a, F: ContinuumFitter> {
+    continuum_fitter: &'a F,
+    observed_wl: &'a na::DVector<f64>,
+    observed_spectrum: &'a ObservedSpectrum,
+    synth_wl: &'a WlGrid,
+    model1: &'a na::DVector<FluxFloat>,
+    model2: &'a na::DVector<FluxFloat>,
+    continuum1: &'a na::DVector<FluxFloat>,
+    continuum2: &'a na::DVector<FluxFloat>,
+    light_ratio: f64,
+}
+
+impl<'a, F: ContinuumFitter> argmin::core::CostFunction for RVCostFunction<'a, F> {
+    type Param = na::SVector<f64, 2>;
+    type Output = f64;
+
+    fn cost(&self, param: &Self::Param) -> std::result::Result<Self::Output, argmin::core::Error> {
+        let rv1 = param[0];
+        let rv2 = param[1];
+
+        let shifted_synth1 =
+            shift_and_resample(&self.model1, self.synth_wl, self.observed_wl, rv1)?;
+        let shifted_synth2 =
+            shift_and_resample(&self.model2, self.synth_wl, self.observed_wl, rv2)?;
+        let shifted_continuum1 =
+            shift_and_resample(&self.continuum1, self.synth_wl, self.observed_wl, rv1)?;
+        let shifted_continuum2 =
+            shift_and_resample(&self.continuum2, self.synth_wl, self.observed_wl, rv2)?;
+
+        let synth_spec = shifted_synth1.component_mul(&shifted_continuum1)
+            * self.light_ratio as FluxFloat
+            + shifted_synth2.component_mul(&shifted_continuum2)
+                * (1.0 - self.light_ratio as FluxFloat);
+
+        let (_, ls) = self
+            .continuum_fitter
+            .fit_continuum(self.observed_spectrum, &synth_spec)?;
+        Ok(ls)
+    }
+}
+
+struct BinaryTimeseriesCostFunction<
+    'a,
+    I: Interpolator,
+    T: WavelengthDispersion,
+    F: ContinuumFitter,
+    B: PSOBounds<2>,
+> {
+    interpolator: &'a I,
+    continuum_interpolator: &'a I,
+    target_dispersion: &'a T,
+    observed_spectra: &'a Vec<ObservedSpectrum>,
+    continuum_fitter: &'a F,
+    synth_wl: &'a WlGrid,
+    rv_fit_settings: PSOSettings,
+    rv_bounds: B,
+    parallelize: bool,
+}
+
+impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter, B: PSOBounds<2>>
+    argmin::core::CostFunction for BinaryTimeseriesCostFunction<'a, I, T, F, B>
+{
+    type Param = na::SVector<f64, 9>;
+    type Output = f64;
+
+    fn cost(&self, params: &Self::Param) -> Result<Self::Output> {
+        let star1_parameters = params.fixed_rows::<4>(0).into_owned();
+        let star2_parameters = params.fixed_rows::<4>(5).into_owned();
+        let light_ratio = params[8];
+
+        let synth_spec1 = self.interpolator.interpolate_and_convolve(
+            self.target_dispersion,
+            star1_parameters[0],
+            star1_parameters[1],
+            star1_parameters[2],
+            star1_parameters[3],
+        )?;
+        let continuum1 = self.continuum_interpolator.interpolate_and_convolve(
+            self.target_dispersion,
+            star1_parameters[0],
+            star1_parameters[1],
+            star1_parameters[2],
+            star1_parameters[3],
+        )?;
+        let synth_spec2 = self.interpolator.interpolate_and_convolve(
+            self.target_dispersion,
+            star2_parameters[0],
+            star2_parameters[1],
+            star2_parameters[2],
+            star2_parameters[3],
+        )?;
+        let continuum2 = self.continuum_interpolator.interpolate_and_convolve(
+            self.target_dispersion,
+            star2_parameters[0],
+            star2_parameters[1],
+            star2_parameters[2],
+            star2_parameters[3],
+        )?;
+
+        let chi2 = self
+            .observed_spectra
+            .iter()
+            .map(|observed_spectrum| {
+                let inner_cost_function = RVCostFunction {
+                    continuum_fitter: self.continuum_fitter,
+                    observed_wl: self.target_dispersion.wavelength(),
+                    observed_spectrum: &observed_spectrum,
+                    synth_wl: self.synth_wl,
+                    model1: &synth_spec1,
+                    model2: &synth_spec2,
+                    continuum1: &continuum1,
+                    continuum2: &continuum2,
+                    light_ratio,
+                };
+                let solver = setup_pso(self.rv_bounds.clone(), self.rv_fit_settings.clone());
+                let fitter = Executor::new(inner_cost_function, solver)
+                    .configure(|state| state.max_iters(self.rv_fit_settings.max_iters));
+                let result = fitter.run()?;
+                Ok::<f64, anyhow::Error>(result.state.best_cost)
+            })
+            .sum::<Result<f64>>()?;
+
+        Ok(chi2)
+    }
+
+    fn parallelize(&self) -> bool {
+        self.parallelize
     }
 }
