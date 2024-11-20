@@ -1,4 +1,4 @@
-use crate::bounds::{BinaryBounds, BoundsConstraint, SingleBounds, PSOBounds};
+use crate::bounds::{BinaryBounds, BinaryRVBounds, BoundsConstraint, PSOBounds, SingleBounds};
 use crate::continuum_fitting::ContinuumFitter;
 use crate::convolve_rv::{shift_and_resample, WavelengthDispersion};
 use crate::interpolate::{FluxFloat, GridBounds, Interpolator, WlGrid};
@@ -29,7 +29,6 @@ impl ObservedSpectrum {
         Self { flux, var }
     }
 }
-
 
 // impl PSOBounds<2> for BinaryRVBounds {
 
@@ -217,6 +216,14 @@ impl<'a, F: ContinuumFitter> argmin::core::CostFunction for RVCostFunction<'a, F
             .fit_continuum(self.observed_spectrum, &synth_spec)?;
         Ok(ls)
     }
+}
+
+pub struct BinaryRVOptimizationResult {
+    pub rv1: f64,
+    pub rv2: f64,
+    pub chi2: f64,
+    pub iters: u64,
+    pub time: f64,
 }
 
 struct BinaryTimeseriesCostFunction<
@@ -450,6 +457,46 @@ impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 11>, f64>,
             .get_population()
             .ok_or(argmin::core::Error::msg("No particles"))?;
         let values: Vec<BinaryParticleInfo> = particles
+            .iter()
+            .map(|p| (p.position, p.cost).into())
+            .collect();
+        let filename = self.dir.join(format!("{}_{}.json", self.file_prefix, iter));
+        let f = BufWriter::new(File::create(filename)?);
+        serde_json::to_writer(f, &values)?;
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Debug)]
+struct RVParticleInfo {
+    rv1: f64,
+    rv2: f64,
+    cost: f64,
+}
+
+impl From<(na::SVector<f64, 2>, f64)> for RVParticleInfo {
+    fn from(p: (na::SVector<f64, 2>, f64)) -> Self {
+        Self {
+            rv1: p.0[0],
+            rv2: p.0[1],
+            cost: p.1,
+        }
+    }
+}
+
+impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 2>, f64>, f64>>
+    for PSObserver
+{
+    fn observe_iter(
+        &mut self,
+        state: &PopulationState<particleswarm::Particle<na::SVector<f64, 2>, f64>, f64>,
+        _kv: &KV,
+    ) -> Result<()> {
+        let iter = state.get_iter();
+        let particles = state
+            .get_population()
+            .ok_or(argmin::core::Error::msg("No particles"))?;
+        let values: Vec<RVParticleInfo> = particles
             .iter()
             .map(|p| (p.position, p.cost).into())
             .collect();
@@ -804,5 +851,85 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
         };
 
         cost_function.cost(&labels)
+    }
+}
+
+pub struct BinaryRVFitter<F: ContinuumFitter> {
+    observed_wl: na::DVector<f64>,
+    continuum_fitter: F,
+    settings: PSOSettings,
+    rv_range: (f64, f64),
+}
+
+impl<F: ContinuumFitter> BinaryRVFitter<F> {
+    pub fn new(
+        observed_wl: na::DVector<f64>,
+        continuum_fitter: F,
+        settings: PSOSettings,
+        rv_range: (f64, f64),
+    ) -> Self {
+        Self {
+            observed_wl,
+            continuum_fitter,
+            settings,
+            rv_range,
+        }
+    }
+
+    pub fn fit(
+        &self,
+        model1: &na::DVector<FluxFloat>,
+        model2: &na::DVector<FluxFloat>,
+        continuum1: &na::DVector<FluxFloat>,
+        continuum2: &na::DVector<FluxFloat>,
+        light_ratio: f64,
+        synth_wl: &WlGrid,
+        observed_spectrum: &ObservedSpectrum,
+        trace_directory: Option<String>,
+        constraints: Vec<BoundsConstraint>,
+    ) -> Result<BinaryRVOptimizationResult> {
+        let cost_function = RVCostFunction {
+            observed_wl: &self.observed_wl,
+            observed_spectrum,
+            continuum_fitter: &self.continuum_fitter,
+            model1: &model1,
+            model2: &model2,
+            continuum1: &continuum1,
+            continuum2: &continuum2,
+            light_ratio,
+            synth_wl,
+        };
+        let bounds = BinaryRVBounds::new(self.rv_range).with_constraints(constraints);
+        let solver = setup_pso(bounds, self.settings.clone());
+        let fitter = Executor::new(cost_function, solver)
+            .configure(|state| state.max_iters(self.settings.max_iters));
+
+        let result = if let Some(dir) = trace_directory {
+            let observer = PSObserver::new(&dir, "iteration");
+            fitter.add_observer(observer, ObserverMode::Always).run()?
+        } else {
+            fitter.run()?
+        };
+
+        let best_param = result
+            .state
+            .best_individual
+            .ok_or(anyhow!("No best parameter found"))?
+            .position;
+
+        let rv1 = best_param[0];
+        let rv2 = best_param[1];
+
+        let time = match result.state.time {
+            Some(t) => t.as_secs_f64(),
+            None => 0.0,
+        };
+        Ok(BinaryRVOptimizationResult {
+            rv1,
+            rv2,
+            chi2: result.state.best_cost,
+            time,
+            iters: result.state.iter,
+        })
     }
 }
