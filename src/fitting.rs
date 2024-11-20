@@ -206,14 +206,17 @@ impl<'a, F: ContinuumFitter> argmin::core::CostFunction for RVCostFunction<'a, F
         let shifted_continuum2 =
             shift_and_resample(&self.continuum2, self.synth_wl, self.observed_wl, rv2)?;
 
-        let synth_spec = shifted_synth1.component_mul(&shifted_continuum1)
-            * self.light_ratio as FluxFloat
-            + shifted_synth2.component_mul(&shifted_continuum2)
-                * (1.0 - self.light_ratio as FluxFloat);
+        let lr =
+            self.light_ratio as FluxFloat * shifted_continuum2.mean() / shifted_continuum1.mean();
+
+        let synth_spec = shifted_synth1.component_mul(&shifted_continuum1) * lr
+            + shifted_synth2.component_mul(&shifted_continuum2);
+        let continuum = (shifted_continuum1 * lr + shifted_continuum2);
+        let synth_spec_norm = synth_spec.component_div(&continuum);
 
         let (_, ls) = self
             .continuum_fitter
-            .fit_continuum(self.observed_spectrum, &synth_spec)?;
+            .fit_continuum(self.observed_spectrum, &synth_spec_norm)?;
         Ok(ls)
     }
 }
@@ -783,7 +786,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
         };
         let bounds = BinaryBounds::new(
             interpolator.grid_bounds(),
-            (0.0, 0.5),
+            (0.0, 1.0),
             self.vsini_range,
             self.rv_range,
         )

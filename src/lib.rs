@@ -1277,6 +1277,7 @@ fn pasta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(NoConvolutionDispersion, m)?)?;
     m.add_function(wrap_pyfunction!(FixedResolutionDispersion, m)?)?;
     m.add_function(wrap_pyfunction!(VariableResolutionDispersion, m)?)?;
+    m.add_function(wrap_pyfunction!(LinearModelContinuumFitter, m)?)?;
     m.add_function(wrap_pyfunction!(ChunkContinuumFitter, m)?)?;
     m.add_function(wrap_pyfunction!(FixedContinuum, m)?)?;
     m.add_function(wrap_pyfunction!(ConstantContinuum, m)?)?;
