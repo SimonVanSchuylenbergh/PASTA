@@ -317,7 +317,7 @@ pub fn convolve_rotation(
         WlGrid::Logspace(_, step, _) => std::f64::consts::LN_10 * step,
     };
     let kernel = build_rotation_kernel(vsini, dvelo);
-    if kernel.len() <= 2 {
+    if vsini == 0.0 || kernel.len() <= 2 {
         return Ok(input_array.clone());
     }
     if kernel.len() > FFTSIZE {
