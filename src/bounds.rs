@@ -343,7 +343,33 @@ impl<B: GridBounds> PSOBounds<9> for BinaryBoundsWithoutRV<B> {
     }
 }
 
+#[derive(Clone)]
 pub struct BinaryRVBounds {
-    rv_range1: (f64, f64),
-    rv_range2: (f64, f64),
+    rv_range: (f64, f64),
+}
+
+impl BinaryRVBounds {
+    pub fn new(rv_range: (f64, f64)) -> Self {
+        Self { rv_range }
+    }
+}
+
+impl PSOBounds<2> for BinaryRVBounds {
+    fn outer_limits(&self) -> (na::SVector<f64, 2>, na::SVector<f64, 2>) {
+        (
+            na::Vector2::new(self.rv_range.0, self.rv_range.0),
+            na::Vector2::new(self.rv_range.1, self.rv_range.1),
+        )
+    }
+
+    fn get_limits_at(&self, _param: na::SVector<f64, 2>, _index: usize) -> Result<(f64, f64)> {
+        Ok(self.rv_range)
+    }
+
+    fn is_within_bounds(&self, param: na::SVector<f64, 2>) -> bool {
+        param[0] >= self.rv_range.0
+            && param[0] <= self.rv_range.1
+            && param[1] >= self.rv_range.0
+            && param[1] <= self.rv_range.1
+    }
 }

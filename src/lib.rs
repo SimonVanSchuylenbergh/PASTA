@@ -1,4 +1,5 @@
 #![allow(non_snake_case, clippy::too_many_arguments, non_upper_case_globals)]
+mod bounds;
 mod continuum_fitting;
 mod convolve_rv;
 mod cubic;
@@ -6,9 +7,9 @@ mod fitting;
 mod interpolate;
 mod model_fetchers;
 mod particleswarm;
-mod bounds;
 
 use anyhow::Result;
+use bounds::{BoundsConstraint, Constraint};
 use continuum_fitting::{
     ChunkFitter, ConstantContinuum as RsConstantContinuum, ContinuumFitter,
     FixedContinuum as RsFixedContinuum, LinearModelFitter,
@@ -19,7 +20,7 @@ use convolve_rv::{
 };
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
 use enum_dispatch::enum_dispatch;
-use fitting::{BinaryFitter, ObservedSpectrum, SingleFitter};
+use fitting::{BinaryFitter, BinaryRVFitter, ObservedSpectrum, SingleFitter};
 use indicatif::ProgressBar;
 use interpolate::{FluxFloat, GridInterpolator, Interpolator};
 use model_fetchers::{read_npy_file, CachedFetcher, InMemFetcher, OnDiskFetcher};
@@ -28,7 +29,6 @@ use nalgebra::Storage;
 use npy::to_file;
 use numpy::array::PyArray;
 use numpy::{Ix1, Ix2, PyArrayLike};
-use bounds::{BoundsConstraint, Constraint};
 use pyo3::{prelude::*, pyclass};
 use rayon::prelude::*;
 use serde::Serialize;
@@ -255,6 +255,36 @@ impl BinaryOptimizationResult {
             self.label2.rv,
             self.light_ratio,
         ]
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[pyclass(module = "pasta", frozen)]
+pub struct RVOptimizationResult {
+    #[pyo3(get)]
+    pub rv1: f64,
+    #[pyo3(get)]
+    pub rv2: f64,
+    #[pyo3(get)]
+    pub chi2: f64,
+    /// Number of iterations used
+    #[pyo3(get)]
+    pub iterations: u64,
+    /// Time taken
+    #[pyo3(get)]
+    pub time: f64,
+}
+
+/// Rust to Python bindings.
+impl From<fitting::BinaryRVOptimizationResult> for RVOptimizationResult {
+    fn from(result: fitting::BinaryRVOptimizationResult) -> Self {
+        RVOptimizationResult {
+            rv1: result.rv1,
+            rv2: result.rv2,
+            chi2: result.chi2,
+            iterations: result.iters,
+            time: result.time,
+        }
     }
 }
 
@@ -544,7 +574,7 @@ fn ConstantContinuum() -> PyContinuumFitter {
 /// Implement methods for all the interpolator classes.
 /// We can't use traits with pyo3, so we have to use macros.
 macro_rules! implement_methods {
-    ($name: ident, $fetcher_type: ty, $PySingleFitter: ident, $PyBinaryFitter: ident) => {
+    ($name: ident, $fetcher_type: ty, $PySingleFitter: ident, $PyBinaryFitter: ident, $PyRVFitter: ident) => {
         #[pymethods]
         impl $name {
             /// Produce a model spectrum by interpolating, convolving, shifting by rv and resampling to wl array.
@@ -682,6 +712,23 @@ macro_rules! implement_methods {
             }
 
             pub fn get_binary_fitter(
+                &self,
+                dispersion: PyWavelengthDispersion,
+                continuum_fitter: PyContinuumFitter,
+                settings: PSOSettings,
+                vsini_range: (f64, f64),
+                rv_range: (f64, f64),
+            ) -> $PyBinaryFitter {
+                $PyBinaryFitter(BinaryFitter::new(
+                    dispersion.0,
+                    continuum_fitter.0,
+                    settings.into(),
+                    vsini_range,
+                    rv_range,
+                ))
+            }
+
+            pub fn get_binary_rv_fitter(
                 &self,
                 dispersion: PyWavelengthDispersion,
                 continuum_fitter: PyContinuumFitter,
@@ -1086,6 +1133,47 @@ macro_rules! implement_methods {
                     .collect())
             }
         }
+
+        #[pyclass]
+        pub struct $PyRVFitter(BinaryRVFitter<ContinuumFitterWrapper>);
+
+        #[pymethods]
+        impl $PyRVFitter {
+            pub fn fit(
+                &self,
+                model1: Vec<FluxFloat>,
+                model2: Vec<FluxFloat>,
+                continuum1: Vec<FluxFloat>,
+                continuum2: Vec<FluxFloat>,
+                light_ratio: f64,
+                synth_wl: WlGrid,
+                observed_flux: Vec<FluxFloat>,
+                observed_var: Vec<FluxFloat>,
+                trace_directory: Option<String>,
+                constraints: Option<Vec<PyConstraintWrapper>>,
+            ) -> PyResult<RVOptimizationResult> {
+                let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
+                let constraints = match constraints {
+                    Some(constraints) => constraints
+                        .into_iter()
+                        .map(|constraint| constraint.0)
+                        .collect(),
+                    None => vec![],
+                };
+                let result = self.0.fit(
+                    &model1.into(),
+                    &model2.into(),
+                    &continuum1.into(),
+                    &continuum2.into(),
+                    light_ratio,
+                    &synth_wl.0,
+                    &observed_spectrum,
+                    trace_directory,
+                    constraints,
+                );
+                Ok(result?.into())
+            }
+        }
     };
 }
 
@@ -1152,19 +1240,22 @@ implement_methods!(
     OnDiskInterpolator,
     OnDiskFetcher,
     OnDiskSingleFitter,
-    OnDiskBinaryFitter
+    OnDiskBinaryFitter,
+    OnDiskRVFitter
 );
 implement_methods!(
     InMemInterpolator,
     InMemFetcher,
     InMemSingleFitter,
-    InMemBinaryFitter
+    InMemBinaryFitter,
+    InMemRVFitter
 );
 implement_methods!(
     CachedInterpolator,
     CachedFetcher,
     CachedSingleFitter,
-    CachedBinaryFitter
+    CachedBinaryFitter,
+    CachedRVFitter
 );
 
 #[pyfunction]
@@ -1186,6 +1277,7 @@ fn pasta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(NoConvolutionDispersion, m)?)?;
     m.add_function(wrap_pyfunction!(FixedResolutionDispersion, m)?)?;
     m.add_function(wrap_pyfunction!(VariableResolutionDispersion, m)?)?;
+    m.add_function(wrap_pyfunction!(LinearModelContinuumFitter, m)?)?;
     m.add_function(wrap_pyfunction!(ChunkContinuumFitter, m)?)?;
     m.add_function(wrap_pyfunction!(FixedContinuum, m)?)?;
     m.add_function(wrap_pyfunction!(ConstantContinuum, m)?)?;

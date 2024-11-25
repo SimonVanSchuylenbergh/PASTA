@@ -234,35 +234,44 @@ where
         for p in 0..particles.len() {
             // println!("Iterate particle {}: {}", p, particles[p].position);
             for d in 0..N {
-                let condition = particles.iter().all(|particle| {
-                    calculate_potential(particle, best_particle.position[d], d) < self.delta[d]
-                });
-                if condition {
-                    // forced update
-                    // println!("Forced update in d={}, i={}, p={}", d, state.iter, p);
-                    // particles[p].velocity[d] =
-                    //     random_uniform(&mut self.rng_generator, -self.delta[d], self.delta[d]);
-                } else {
-                    // Regular PSO update
-                    let momentum = particles[p].velocity[d] * self.weight_inertia;
+                // let condition = particles.iter().all(|particle| {
+                //     calculate_potential(particle, best_particle.position[d], d) < self.delta[d]
+                // });
+                // if condition {
+                //     // forced update
+                //     // println!("Forced update in d={}, i={}, p={}", d, state.iter, p);
+                //     // particles[p].velocity[d] =
+                //     //     random_uniform(&mut self.rng_generator, -self.delta[d], self.delta[d]);
+                // } else {
+                // Regular PSO update
+                let momentum = particles[p].velocity[d] * self.weight_inertia;
 
-                    let to_optimum = particles[p].best_position[d] - particles[p].position[d];
-                    let pull_to_optimum = random_uniform(&mut self.rng_generator, 0.0, to_optimum)
-                        * self.weight_cognitive;
+                let to_optimum = particles[p].best_position[d] - particles[p].position[d];
+                let pull_to_optimum = random_uniform(&mut self.rng_generator, 0.0, to_optimum)
+                    * self.weight_cognitive;
 
-                    let to_global_optimum = best_particle.position[d] - particles[p].position[d];
-                    let pull_to_global_optimum =
-                        random_uniform(&mut self.rng_generator, 0.0, to_global_optimum)
-                            * self.weight_social;
+                let to_global_optimum = best_particle.position[d] - particles[p].position[d];
+                let pull_to_global_optimum =
+                    random_uniform(&mut self.rng_generator, 0.0, to_global_optimum)
+                        * self.weight_social;
 
-                    particles[p].velocity[d] = momentum + pull_to_optimum + pull_to_global_optimum;
-                    let mut new_position = particles[p].position;
-                    new_position[d] += particles[p].velocity[d];
-                    particles[p].position[d] = self
-                        .bounds
-                        .clamp_1d(new_position, d)
-                        .with_context(|| format!("Error clamping {:?} dim {}", new_position, d))?;
-                    // println!("Particle {}: dim {} at {}", p, d, particles[p].position[d]);
+                particles[p].velocity[d] = momentum + pull_to_optimum + pull_to_global_optimum;
+                let mut new_position = particles[p].position;
+                new_position[d] += particles[p].velocity[d];
+                particles[p].position[d] = self
+                    .bounds
+                    .clamp_1d(new_position, d)
+                    .with_context(|| format!("Error clamping {:?} dim {}", new_position, d))?;
+                // println!("Particle {}: dim {} at {}", p, d, particles[p].position[d]);
+                // }
+                if !self.bounds.is_within_bounds(particles[p].position) {
+                    return Err(argmin_error!(
+                            InvalidParameter,
+                            format!(
+                                "`ParticleSwarm`: Particle {} is not within bounds: {:?}. Before clamping in {}: {:?}",
+                                p, particles[p].position, d, new_position
+                            )
+                        ));
                 }
             }
             // println!("Done particle {}: {}", p, particles[p].position);

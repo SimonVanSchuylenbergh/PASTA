@@ -627,9 +627,10 @@ pub trait Interpolator: Send + Sync {
             star2_parameters[4],
         )?;
 
-        let flux = model1.component_mul(&continuum1) * light_ratio
-            + model2.component_mul(&continuum2) * (1.0 - light_ratio);
-        let continuum = continuum1 * light_ratio + continuum2 * (1.0 - light_ratio);
+        let lr = light_ratio * continuum2.mean() / continuum1.mean();
+
+        let flux = model1.component_mul(&continuum1) * lr + model2.component_mul(&continuum2);
+        let continuum = continuum1 * lr + continuum2;
         Ok(flux.component_div(&continuum))
     }
 }
