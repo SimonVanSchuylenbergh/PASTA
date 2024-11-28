@@ -5,65 +5,24 @@ from pathlib import Path
 import numpy as np
 from astropy.io import fits  # type: ignore
 from matplotlib import pyplot as plt
-from pasta import (
+from pasta import (  # type: ignore
+    CachedInterpolator,
     ChunkContinuumFitter,
+    FixedResolutionDispersion,
+    InMemInterpolator,
     NoConvolutionDispersion,
-    OnDiskCompound,
-    OnDiskInterpolator,
+    PSOSettings,
     WlGrid,
 )
 
 # Get more info on errors on Rust side
 environ["RUST_BACKTRACE"] = "1"
 
-
-# Set up the interpolator object for the model grid
-# We combine three rectangular grids
-
-path = "/STER/hermesnet/fine_grid_log"
-# The wavelength grid of the models (first wavelength, step, number of pixels) in log10 scale
-wl_grid = WlGrid(np.log10(4_000), 1.6833119454e-06, 90470, log=True)
-vsini_range = (1, 500)
-rv_range = (-150, 150)
-InterpolatorType = OnDiskInterpolator
-
-interpolator1 = InterpolatorType(
-    path,
-    wavelength=wl_grid,
-    teff_range=list(np.arange(25_250, 30_250, 250)),
-    m_range=list(np.arange(-0.8, 0.9, 0.1)),
-    logg_range=list(np.arange(3.3, 5.1, 0.1)),
-    vsini_range=vsini_range,
-    rv_range=rv_range,
-)
-interpolator2 = InterpolatorType(
-    path,
-    wavelength=wl_grid,
-    teff_range=list(
-        np.concatenate([np.arange(9800, 10000, 100), np.arange(10000, 26_000, 250)])
-    ),
-    m_range=list(np.arange(-0.8, 0.9, 0.1)),
-    logg_range=list(np.arange(3.0, 5.1, 0.1)),
-    vsini_range=vsini_range,
-    rv_range=rv_range,
-)
-interpolator3 = InterpolatorType(
-    path,
-    wavelength=wl_grid,
-    teff_range=list(np.arange(6000, 10_100, 100)),
-    m_range=list(np.arange(-0.8, 0.9, 0.1)),
-    logg_range=list(np.arange(2.5, 5.1, 0.1)),
-    vsini_range=vsini_range,
-    rv_range=rv_range,
-)
-
-# The 'compound' interpolator combines the three grids
-# Replace by OnDiskCompound or CachedCompound if necessary
-interpolator = OnDiskCompound(interpolator1, interpolator2, interpolator3)
-
-spectra_folder = Path("/path/to/observed_spectra")
+wl_rng = (4007, 5673)
 
 
+# Read the observed spectrum from a fits file
+# Return the wavelength, and flux arrays
 def read_spectrum(index: str, dtype=np.float32) -> tuple[np.ndarray, np.ndarray]:
     path = spectra_folder / f"{index}_HRF_OBJ_ext_CosmicsRemoved_log_merged_c.fits"
     with fits.open(path) as image:
@@ -76,31 +35,67 @@ def read_spectrum(index: str, dtype=np.float32) -> tuple[np.ndarray, np.ndarray]
                 len(flux),
             )
         )
-    mask = (wl >= 4007) & (wl <= 5673)
+    print(flux.shape, wl.shape)
+    print(wl[0], wl[-1])
+    mask = (wl >= wl_rng[0]) & (wl <= wl_rng[1])
     wl = wl[mask]
     flux = flux[mask]
     return wl, flux
 
 
+# Set up the interpolator object for the model grid
+# We combine three rectangular grids
+
+# Set up the interpolator object for the model grid
+# InMemInterpolator can be replaced by OnDiskInterpolator or CachedInterpolator
+# if the models are too large to fit in memory
+
+# We use the pre-convolved model grid
+# model_path = "/scratch/ragnarv/hermes_norm_convolved_u16"
+model_path = "/STER/hermesnet/hermes_norm_convolved_u16"
+# The wavelength grid of the models (first wavelength, step, number of pixels) in log10 scale
+wl_grid = WlGrid(np.log10(4000), 2e-6, 76145, log=True)
+
+# Alternatively use the unconvoled models:
+# model_path = "/scratch/ragnarv/unconvolved_norm_u16"
+# wl_grid = WlGrid(np.log10(3500), 1.5e-6, 316699, log=True)
+
+interpolator = CachedInterpolator(
+    str(model_path),
+    False,  # We are using normalized models that don't include the max value.
+    wavelength=wl_grid,
+    n_shards=24,  # Applies to CachedInterpolator only
+    lrucap=50_000,  # Applies to CachedInterpolator only
+)
+
+spectra_folder = Path("/STER/hermesnet/observed")
 solutions_file = Path("output.json")
+
 with open(solutions_file, "r") as file:
     solutions = load(file)
 
 # Index of the spectrum to plot
-index = "00275318"
+index = "00272174"
 
 wl, flux = read_spectrum(index)
 solution = [s for s in solutions if s["index"] == index][0]
 
-labels = solution["labels"]
-number_of_chunks = 10
+label = solution["label"]
+number_of_chunks = 5
 polynomial_degree = 8
 blending_length = 0.2
 fitter = ChunkContinuumFitter(wl, number_of_chunks, polynomial_degree, blending_length)
 dispersion = NoConvolutionDispersion(wl)
 
-normalized_model = interpolator.produce_model(dispersion, *labels)
-continuum = fitter.build_continuum(solution["continuum"])
+normalized_model = interpolator.produce_model(
+    dispersion,
+    label["teff"],
+    label["m"],
+    label["logg"],
+    label["vsini"],
+    label["rv"],
+)
+continuum = fitter.build_continuum(solution["continuum_params"])
 
 
 fig, ax = plt.subplots()
@@ -110,6 +105,7 @@ ax.axhline(1, c="blue", linestyle="--", linewidth=0.8)
 ax.set_xlabel("Wavelength [A]")
 ax.set_ylabel("Normalized flux")
 ax.set_title(
-    f"{index}, Teff={round(labels[0])} K, [M/H]={labels[1]:.2f} dex,\nlogg={labels[2]:.2f} dex, vsini={labels[3]:.1f} km/s, RV={labels[4]:.1f} km/s"
+    f"{index}, Teff={round(label['teff'])} K, [M/H]={label['m']:.2f} dex,\nlogg={label['logg']:.2f} dex, vsini={label['vsini']:.1f} km/s, RV={label['rv']:.1f} km/s"
 )
 plt.show()
+fig.savefig("fit_example.png")

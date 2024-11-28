@@ -2,19 +2,18 @@
 # The models are assumed to be already convolved to the resolution of the instrument.
 # Example for the HERMES spectrograph.
 
-from json import dump, load
+from json import dump, load, loads
 from os import environ
 from pathlib import Path
 
 import numpy as np
 from astropy.io import fits  # type: ignore
-from pasta import (
+from pasta import (  # type: ignore
+    CachedInterpolator,
     ChunkContinuumFitter,
-    InMemCompound,
+    FixedResolutionDispersion,
     InMemInterpolator,
     NoConvolutionDispersion,
-    OnDiskCompound,
-    OnDiskInterpolator,
     PSOSettings,
     WlGrid,
 )
@@ -22,6 +21,8 @@ from tqdm.auto import tqdm  # Optional progress bar
 
 # Get more info on errors on Rust side
 environ["RUST_BACKTRACE"] = "1"
+
+wl_rng = (4007, 5673)
 
 
 # Read the observed spectrum from a fits file
@@ -44,7 +45,7 @@ def read_and_prepare_spectrum(
         var = np.array(image[0].data, dtype=dtype)  # type: ignore
 
     # Only use 4007-5673 Angstroms
-    mask = (wl >= 4007) & (wl <= 5673)
+    mask = (wl >= wl_rng[0]) & (wl <= wl_rng[1])
     wl = wl[mask]
     flux = flux[mask]
     var = var[mask]
@@ -55,63 +56,46 @@ def read_and_prepare_spectrum(
 
 
 # Set up the interpolator object for the model grid
-# We combine three rectangular grids
 # InMemInterpolator can be replaced by OnDiskInterpolator or CachedInterpolator
 # if the models are too large to fit in memory
-model_path = "/path/to/models"
+
+# We use the pre-convolved model grid
+# model_path = "/scratch/ragnarv/hermes_norm_convolved_u16"
+model_path = "/STER/hermesnet/hermes_norm_convolved_u16"
 # The wavelength grid of the models (first wavelength, step, number of pixels) in log10 scale
-wl_grid = WlGrid(np.log10(4_000), 1.6833119454e-06, 90470, log=True)
-vsini_range = (1, 500)
-rv_range = (-150, 150)
-InterpolatorType = InMemInterpolator
+wl_grid = WlGrid(np.log10(4000), 2e-6, 76145, log=True)
 
-interpolator1 = InterpolatorType(
-    model_path,
-    wavelength=wl_grid,
-    teff_range=list(np.arange(25_250, 30_250, 250)),
-    m_range=list(np.arange(-0.8, 0.9, 0.1)),
-    logg_range=list(np.arange(3.3, 5.1, 0.1)),
-    vsini_range=vsini_range,
-    rv_range=rv_range,
-)
-interpolator2 = InterpolatorType(
-    model_path,
-    wavelength=wl_grid,
-    teff_range=list(
-        np.concatenate([np.arange(9800, 10000, 100), np.arange(10000, 26_000, 250)])
-    ),
-    m_range=list(np.arange(-0.8, 0.9, 0.1)),
-    logg_range=list(np.arange(3.0, 5.1, 0.1)),
-    vsini_range=vsini_range,
-    rv_range=rv_range,
-)
-interpolator3 = InterpolatorType(
-    model_path,
-    wavelength=wl_grid,
-    teff_range=list(np.arange(6000, 10_100, 100)),
-    m_range=list(np.arange(-0.8, 0.9, 0.1)),
-    logg_range=list(np.arange(2.5, 5.1, 0.1)),
-    vsini_range=vsini_range,
-    rv_range=rv_range,
-)
+# Alternatively use the unconvoled models:
+# model_path = "/scratch/ragnarv/unconvolved_norm_u16"
+# wl_grid = WlGrid(np.log10(3500), 1.5e-6, 316699, log=True)
 
-# The 'compound' interpolator combines the three grids
-# Replace by OnDiskCompound or CachedCompound if necessary
-interpolator = InMemCompound(interpolator1, interpolator2, interpolator3)
-
+interpolator = CachedInterpolator(
+    str(model_path),
+    False,  # We are using normalized models that don't include the max value.
+    wavelength=wl_grid,
+    n_shards=24,  # Applies to CachedInterpolator only
+    lrucap=50_000 # Applies to CachedInterpolator only
+)
 
 # Output is written in json format
 output_file = Path("output.json")
+
 # Settings to the PSO algorithm
 settings = PSOSettings(
-    num_particles=44,  # Recommended to use a multiple of the number of cores on the system
-    max_iters=100,
-    social_factor=0.5,
+    num_particles=46,
+    max_iters=60,
+    inertia_factor=-0.3085,
+    cognitive_factor=0,
+    social_factor=2.0273,
 )
+
+vsini_range = (1, 500)
+rv_range = (-150, 150)
+
 # Parameters to continuum fitting
-number_of_chunks = 10
+number_of_chunks = 5
 polynomial_degree = 8
-blending_length = 0.2
+blending_fraction = 0.2
 
 # In case the output file already exists, overwrite it,
 # or append to it and skip the already computed solutions
@@ -122,48 +106,60 @@ if not overwrite and output_file.exists():
 else:
     solutions = []
 
-spectra_folder = Path("/path/to/observed_spectra")
+# Path to folder with observed spectra
+spectra_folder = Path("/STER/hermesnet/observed")
 # For HERMES, don't include the Var files here
 flux_files = sorted(
     [f for f in list(spectra_folder.glob("*.fits")) if "Var" not in f.name]
 )
 
-# Optional progress bar written to file progress.txt (useful for slurm)
-with open("progress.txt", "w") as prog_file:
-    for file in tqdm(flux_files, file=prog_file):
-        index = file.stem.split("_")[0]
-        if index in [sol["index"] for sol in solutions]:
-            continue  # Skip if the solution is already computed
+# Read the first spectrum to get the wavelength grid
+wl, _, _ = read_and_prepare_spectrum(flux_files[0])
 
-        wl, flux, var = read_and_prepare_spectrum(file)
-        # The object for fitting the continuum in chunks
-        fitter = ChunkContinuumFitter(
-            wl, number_of_chunks, polynomial_degree, blending_length
-        )
-        # The dispersion object, in this case no convolution for resolution is needed
-        # because the models are already convolved
-        dispersion = NoConvolutionDispersion(wl)
-        # Fit the spectrum and write the solution to the output file
-        solution = interpolator.fit_pso(fitter, dispersion, flux, var, settings)
-        teff, m, logg, vsini, rv = solution.labels
-        # The chi2 landscape will be sampled in this region to determine the uncertainty
-        search_radius = [teff/4, 0.4, 0.5, vsini/4, 10.0]
-        uncertainty = interpolator.uncertainty_chi2(
-            fitter, dispersion, flux, var, 86_000, solution.labels, search_radius
-        )
-        # Left and right bounds are returned for each parameter
-        # take the average to get the uncertainty
-        # Sometimes no solution is found in the search region,
-        # in that case the uncertainty is set to 0
-        uncertainty = [0 if u is None else (u[0] + u[1])/2 for u in uncertainty]
+# For the preconvolved grid, we don't need to convolve the models anymore
+dispersion = NoConvolutionDispersion(wl)
+# Otherwise specify the spectral resolution here
+# dispersion = FixedResolutionDispersion(wl, 86000, wl_grid)
 
-        json_output = {
-            "index": index,
-            "labels": solution.labels,  # (teff, logg, m, vsini, rv)
-            "uncertainty": uncertainty,
-            "continuum": solution.continuum_params,  # Polynomial coefficients for every chunk
-            "chi2": solution.chi2,  # Chi-squared of the best solution
-        }
-        solutions.append(json_output)
-        with open(output_file, "w") as f:
-            dump(solutions, f)
+# The object for fitting the continuum in chunks
+continuum_fitter = ChunkContinuumFitter(
+    wl, number_of_chunks, polynomial_degree, blending_fraction
+)
+
+# The fitter object for the PSO algorithm
+fitter = interpolator.get_fitter(
+    dispersion, continuum_fitter, settings, vsini_range, rv_range
+)
+
+overwrite = False
+if not overwrite and output_file.exists():
+    solutions = load(open(output_file))
+else:
+    solutions = []
+
+for file in tqdm(flux_files):
+    index = file.stem.split("_")[0]
+    if index in [sol["index"] for sol in solutions]:
+        continue  # Skip if the solution is already computed
+
+    wl, flux, var = read_and_prepare_spectrum(file)
+
+    # Fit the spectrum and write the solution to the output file
+    solution = fitter.fit(
+        interpolator,
+        flux,
+        var,
+    )
+    # The chi2 landscape will be sampled in this region to determine the uncertainty.
+    # Teff and vsini are relative to the solution value, others absolute.
+    search_radius = [1 / 10, 0.8, 1.0, 0.5, 60.0]
+    uncertainty = fitter.compute_uncertainty(
+        interpolator, flux, var, 86_000, solution.label, search_radius
+    )
+
+    # Convert the outputs to dictionaries, and write to json file
+    solution_dict = loads(solution.to_json())
+    uncertainty_dict = loads(uncertainty.to_json())
+    solutions.append({"index": index, **solution_dict, "uncertainties": uncertainty_dict})
+    with open(output_file, "w") as f:
+        dump(solutions, f)
