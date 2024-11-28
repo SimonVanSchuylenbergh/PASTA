@@ -29,6 +29,7 @@ use nalgebra::Storage;
 use npy::to_file;
 use numpy::array::PyArray;
 use numpy::{Ix1, Ix2, PyArrayLike};
+use pyo3::types::PyDict;
 use pyo3::{prelude::*, pyclass};
 use rayon::prelude::*;
 use serde::Serialize;
@@ -117,6 +118,16 @@ impl Label {
     fn as_list(&self) -> [f64; 5] {
         [self.teff, self.m, self.logg, self.vsini, self.rv]
     }
+
+    fn to_dict<'a>(&self, py: Python<'a>) -> Bound<'a, PyDict> {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("teff", self.teff).unwrap();
+        dict.set_item("m", self.m).unwrap();
+        dict.set_item("logg", self.logg).unwrap();
+        dict.set_item("vsini", self.vsini).unwrap();
+        dict.set_item("rv", self.rv).unwrap();
+        dict
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -150,6 +161,16 @@ impl From<fitting::Label<(Result<f64>, Result<f64>)>> for LabelUncertainties {
 impl LabelUncertainties {
     fn to_json(&self) -> PyResult<String> {
         Ok(serde_json::to_string(self).unwrap())
+    }
+
+    fn to_dict<'a>(&self, py: Python<'a>) -> Bound<'a, PyDict> {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("teff", self.teff).unwrap();
+        dict.set_item("m", self.m).unwrap();
+        dict.set_item("logg", self.logg).unwrap();
+        dict.set_item("vsini", self.vsini).unwrap();
+        dict.set_item("rv", self.rv).unwrap();
+        dict
     }
 }
 
@@ -192,6 +213,16 @@ impl From<fitting::OptimizationResult> for OptimizationResult {
 impl OptimizationResult {
     fn to_json(&self) -> PyResult<String> {
         Ok(serde_json::to_string(self).unwrap())
+    }
+
+    fn to_dict<'a>(&self, py: Python<'a>) -> Bound<'a, PyDict> {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("label", self.label.to_dict(py)).unwrap();
+        dict.set_item("continuum_params", self.continuum_params.clone()).unwrap();
+        dict.set_item("chi2", self.chi2).unwrap();
+        dict.set_item("iterations", self.iterations).unwrap();
+        dict.set_item("time", self.time).unwrap();
+        dict
     }
 }
 

@@ -204,10 +204,16 @@ impl ChunkFitter {
         &self,
         pfits: Vec<na::DVector<FluxFloat>>,
     ) -> Result<na::DVector<FluxFloat>> {
-        if !(pfits.len() != self.design_matrices.len())
-            || !pfits.iter().all(|p| p.len() == self.p_order + 1)
+        if (pfits.len() != self.n_chunks)
+            || pfits.iter().any(|p| p.len() != self.p_order + 1)
         {
-            bail!("Incorrect number of parameters");
+            bail!(
+                "Incorrect number of parameters {:?}, {:?}. Expected: {:?}, {:?}",
+                pfits.len(),
+                pfits.iter().map(|x| x.len()).collect::<Vec<_>>(),
+                self.n_chunks,
+                self.p_order + 1
+            );
         }
         let polynomials: Vec<na::DVector<FluxFloat>> = self
             .design_matrices

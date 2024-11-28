@@ -2,8 +2,7 @@
 # The models are assumed to be already convolved to the resolution of the instrument.
 # Example for the HERMES spectrograph.
 
-from json import dump, load, loads
-from os import environ
+from json import dump, load
 from pathlib import Path
 
 import numpy as np
@@ -20,7 +19,6 @@ from pasta import (  # type: ignore
 from tqdm.auto import tqdm  # Optional progress bar
 
 # Get more info on errors on Rust side
-environ["RUST_BACKTRACE"] = "1"
 
 wl_rng = (4007, 5673)
 
@@ -74,7 +72,7 @@ interpolator = CachedInterpolator(
     False,  # We are using normalized models that don't include the max value.
     wavelength=wl_grid,
     n_shards=24,  # Applies to CachedInterpolator only
-    lrucap=50_000 # Applies to CachedInterpolator only
+    lrucap=50_000,  # Applies to CachedInterpolator only
 )
 
 # Output is written in json format
@@ -158,8 +156,10 @@ for file in tqdm(flux_files):
     )
 
     # Convert the outputs to dictionaries, and write to json file
-    solution_dict = loads(solution.to_json())
-    uncertainty_dict = loads(uncertainty.to_json())
-    solutions.append({"index": index, **solution_dict, "uncertainties": uncertainty_dict})
+    solution_dict = solution.to_dict()
+    uncertainty_dict = uncertainty.to_dict()
+    solutions.append(
+        {"index": index, **solution.to_dict(), "uncertainties": uncertainty.to_dict()}
+    )
     with open(output_file, "w") as f:
         dump(solutions, f)

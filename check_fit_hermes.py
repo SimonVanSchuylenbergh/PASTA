@@ -1,5 +1,4 @@
 from json import load
-from os import environ
 from pathlib import Path
 
 import numpy as np
@@ -16,7 +15,6 @@ from pasta import (  # type: ignore
 )
 
 # Get more info on errors on Rust side
-environ["RUST_BACKTRACE"] = "1"
 
 wl_rng = (4007, 5673)
 
