@@ -101,14 +101,14 @@ impl From<fitting::Label<f64>> for Label {
     }
 }
 
-impl Into<fitting::Label<f64>> for Label {
-    fn into(self) -> fitting::Label<f64> {
+impl From<Label> for fitting::Label<f64> {
+    fn from(val: Label) -> Self {
         fitting::Label {
-            teff: self.teff,
-            m: self.m,
-            logg: self.logg,
-            vsini: self.vsini,
-            rv: self.rv,
+            teff: val.teff,
+            m: val.m,
+            logg: val.logg,
+            vsini: val.vsini,
+            rv: val.rv,
         }
     }
 }
@@ -218,7 +218,8 @@ impl OptimizationResult {
     fn to_dict<'a>(&self, py: Python<'a>) -> Bound<'a, PyDict> {
         let dict = PyDict::new_bound(py);
         dict.set_item("label", self.label.to_dict(py)).unwrap();
-        dict.set_item("continuum_params", self.continuum_params.clone()).unwrap();
+        dict.set_item("continuum_params", self.continuum_params.clone())
+            .unwrap();
         dict.set_item("chi2", self.chi2).unwrap();
         dict.set_item("iterations", self.iterations).unwrap();
         dict.set_item("time", self.time).unwrap();
@@ -1312,7 +1313,7 @@ pub struct InMemInterpolator(GridInterpolator<InMemFetcher>);
 impl InMemInterpolator {
     #[new]
     fn new(dir: &str, includes_factor: bool, wavelength: WlGrid) -> InMemInterpolator {
-        let fetcher = InMemFetcher::new(&dir, includes_factor).unwrap();
+        let fetcher = InMemFetcher::new(dir, includes_factor).unwrap();
         InMemInterpolator(GridInterpolator::new(fetcher, wavelength.0))
     }
 }

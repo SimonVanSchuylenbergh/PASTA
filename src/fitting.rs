@@ -752,21 +752,19 @@ impl<'a, F: ContinuumFitter> argmin::core::CostFunction for RVCostFunction<'a, F
         let rv1 = param[0];
         let rv2 = param[1];
 
-        let shifted_synth1 =
-            shift_and_resample(self.synth_wl, &self.model1, self.observed_wl, rv1)?;
-        let shifted_synth2 =
-            shift_and_resample(self.synth_wl, &self.model2, self.observed_wl, rv2)?;
+        let shifted_synth1 = shift_and_resample(self.synth_wl, self.model1, self.observed_wl, rv1)?;
+        let shifted_synth2 = shift_and_resample(self.synth_wl, self.model2, self.observed_wl, rv2)?;
         let shifted_continuum1 =
-            shift_and_resample(self.synth_wl, &self.continuum1, self.observed_wl, rv1)?;
+            shift_and_resample(self.synth_wl, self.continuum1, self.observed_wl, rv1)?;
         let shifted_continuum2 =
-            shift_and_resample(self.synth_wl, &self.continuum2, self.observed_wl, rv2)?;
+            shift_and_resample(self.synth_wl, self.continuum2, self.observed_wl, rv2)?;
 
         let lr =
             self.light_ratio as FluxFloat * shifted_continuum2.mean() / shifted_continuum1.mean();
 
         let synth_spec = shifted_synth1.component_mul(&shifted_continuum1) * lr
             + shifted_synth2.component_mul(&shifted_continuum2);
-        let continuum = (shifted_continuum1 * lr + shifted_continuum2);
+        let continuum = shifted_continuum1 * lr + shifted_continuum2;
         let synth_spec_norm = synth_spec.component_div(&continuum);
 
         let (_, ls) = self
@@ -841,7 +839,7 @@ impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter, B: PSOBou
                 let inner_cost_function = RVCostFunction {
                     continuum_fitter: self.continuum_fitter,
                     observed_wl: self.target_dispersion.wavelength(),
-                    observed_spectrum: &observed_spectrum,
+                    observed_spectrum,
                     synth_wl: self.synth_wl,
                     model1: &synth_spec1,
                     model2: &synth_spec2,
@@ -903,10 +901,10 @@ impl<F: ContinuumFitter> BinaryRVFitter<F> {
             observed_wl: &self.observed_wl,
             observed_spectrum,
             continuum_fitter: &self.continuum_fitter,
-            model1: &model1,
-            model2: &model2,
-            continuum1: &continuum1,
-            continuum2: &continuum2,
+            model1,
+            model2,
+            continuum1,
+            continuum2,
             light_ratio,
             synth_wl,
         };

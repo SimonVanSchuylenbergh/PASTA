@@ -53,7 +53,7 @@ pub fn read_spectrum(
 
 fn labels_from_filename(filename: &str) -> Result<[f64; 3]> {
     // e.g. lp0020_08000_0430.npy
-    let parts: Vec<&str> = filename.split(".").next().unwrap().split('_').collect();
+    let parts: Vec<&str> = filename.split('.').next().unwrap().split('_').collect();
     if parts.len() != 3 || parts[0].len() != 6 || parts[1].len() != 5 || parts[2].len() != 4 {
         bail!("Invalid filename: {}", filename);
     }
@@ -155,7 +155,7 @@ impl InMemFetcher {
         let model_labels = get_model_labels_in_dir(&PathBuf::from(dir))?;
         let grid = Grid::new(model_labels)?;
         let (loaded_spectra, factors) = load_spectra(PathBuf::from(dir), includes_factor, &grid)?;
-        let n = loaded_spectra.shape().0;
+        let _n = loaded_spectra.shape().0;
         Ok(Self {
             grid,
             loaded_spectra,

@@ -90,20 +90,16 @@ fn intersect_limits<const N: usize>(
     max: na::SVector<f64, N>,
 ) -> (na::SVector<f64, N>, na::SVector<f64, N>) {
     (
-        na::SVector::from_iterator(min.into_iter().zip(constraints.into_iter()).map(
-            |(m, c)| match c {
-                Constraint::Fixed(f) => f,
-                Constraint::Range(a, _) => m.max(a),
-                Constraint::None => *m,
-            },
-        )),
-        na::SVector::from_iterator(max.into_iter().zip(constraints.into_iter()).map(
-            |(m, c)| match c {
-                Constraint::Fixed(f) => f,
-                Constraint::Range(_, b) => m.min(b),
-                Constraint::None => *m,
-            },
-        )),
+        na::SVector::from_iterator(min.into_iter().zip(constraints).map(|(m, c)| match c {
+            Constraint::Fixed(f) => f,
+            Constraint::Range(a, _) => m.max(a),
+            Constraint::None => *m,
+        })),
+        na::SVector::from_iterator(max.into_iter().zip(constraints).map(|(m, c)| match c {
+            Constraint::Fixed(f) => f,
+            Constraint::Range(_, b) => m.min(b),
+            Constraint::None => *m,
+        })),
     )
 }
 

@@ -92,7 +92,11 @@ pub struct FixedTargetDispersion {
 }
 
 impl FixedTargetDispersion {
-    pub fn new(wavelength: na::DVector<f64>, resolution: f64, modeltarget_wl: WlGrid) -> Result<Self> {
+    pub fn new(
+        wavelength: na::DVector<f64>,
+        resolution: f64,
+        modeltarget_wl: WlGrid,
+    ) -> Result<Self> {
         if resolution <= 0.0 {
             return Err(anyhow!("Resolution must be positive"));
         }
@@ -187,7 +191,8 @@ impl VariableTargetDispersion {
         modeltarget_wl: WlGrid,
     ) -> Result<Self> {
         // Resample observed dispersion to synthetic wavelength grid
-        let dispersion_resampled = resample_observed_to_synth(&wavelength, modeltarget_wl, dispersion)?;
+        let dispersion_resampled =
+            resample_observed_to_synth(&wavelength, modeltarget_wl, dispersion)?;
 
         let larges_disp = match modeltarget_wl {
             WlGrid::Linspace(_, step, _) => {

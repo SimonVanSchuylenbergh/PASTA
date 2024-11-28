@@ -204,9 +204,7 @@ impl ChunkFitter {
         &self,
         pfits: Vec<na::DVector<FluxFloat>>,
     ) -> Result<na::DVector<FluxFloat>> {
-        if (pfits.len() != self.n_chunks)
-            || pfits.iter().any(|p| p.len() != self.p_order + 1)
-        {
+        if (pfits.len() != self.n_chunks) || pfits.iter().any(|p| p.len() != self.p_order + 1) {
             bail!(
                 "Incorrect number of parameters {:?}, {:?}. Expected: {:?}, {:?}",
                 pfits.len(),
@@ -296,7 +294,7 @@ impl ContinuumFitter for ChunkFitter {
     }
 
     fn build_continuum(&self, params: &na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>> {
-        if !(params.len() == self.n_chunks * (self.p_order + 1)) {
+        if params.len() != self.n_chunks * (self.p_order + 1) {
             bail!(
                 "Incorrect number of continuum parameters: {}, expected: {}",
                 params.len(),
