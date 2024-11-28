@@ -38,17 +38,17 @@ To produce a model spectrum, the code performs the following steps:
 For the pseudo continuum function, we developed a method that splits the continuum into overlapping chunks, fits each with a polynomial, and merges them together to one smooth function.
 The code allows the user to tweak the number of chunks, degree of the polynomials and width of the overlap regions.
 Alternatively, it is possible to use a linear model by providing a design matrix.
-The normalization can also easily be turned off for use on pre-normalized spectra.
+We also provide a class to use linear models, and the normalization can also be turned off for use on pre-normalized spectra.
 Additionally, due to the code's modularity it is relatively easy to add a custom normalization function.
 
-As the minimization algorithm the code uses particle swarm optimization (PSO).
-Specifically an adapted version of the implementation in [argmin-rs](https://github.com/argmin-rs/argmin).
-The metaparameters of the algorithm (e.g. number of particles, social attraction factor, etc) can be chosen by the user.
+The code uses particle swarm optimization (PSO) as the optimization algorithm. 
+Our implementation is based on the one in [argmin-rs](https://github.com/argmin-rs/argmin).
+The metaparameters of the algorithm (number of particles, social attraction factor, etc) can be chosen by the user.
 
-Example usage in `example_fit_hermes.py` and `check_fit_hermes.py`.
+See example usage in `example_fit_hermes.py` and `check_fit_hermes.py`.
 
 ## Installation
-The code is written in Rust, with an interface to Python. It can be installed as a Python package, either from the pre-built wheel or by compiling the source code.
+The code is written in Rust, and provides an interface to Python. It can be installed as a Python package, either from the pre-built wheel or by compiling the source code.
 
 
 ### Pre-built wheel
@@ -66,12 +66,29 @@ maturin develop --release
 
 ## The grid
 The code expects a 3D grid of model spectra for varying $T_\text{eff}$, [M/H] and $\log g$.
-The model spectra may be normalized or include the continuum flux.
-In the latter case, the the normalization function can no longer be interpreted as the pseudo continuum, but as the response function of the instrument, i.e. the ratio of the observed flux and the model flux.
-The files must be in Numpy's binary `.npy` format in uint16 and contain only one column.
-The flux values need to be converted to 16-bit integers for performance reasons.
-For normalized models ($F\le1$) this is done simply by multiplying by $2^{16}-1$ and using `np.uint16`.
-For models including continuum flux, they will first need to be divided by their maximum value.
+The model spectra may be normalized, or include continuum flux.
+In the former case, the model that is fitted in the normalization step represents the pseudo continuum (i.e. the product of the continuum of the star and the instrument response function), and in the latter case it represents only the instrument response function (and other contributions that are not modelled in the continuum of the models).
+
+The files must be in Numpy's binary `.npy` format in uint16 and contain only one column with the flux values.
+We chose to work with 16-bit integers to improve performance while still maintaining enough precision.
+Therefore, the flux values in the models need to be converted to integers between 0 and $2^{16}-1$ before saving them in the npy format.
+For normalized models ($0 \le F\le1$) this is done simply by multiplying by $2^{16}-1$ and using the `np.uint16` function.
+For non-normalized models, things are more difficult, because the magnitude of the flux values can vary greatly between models.
+Hence dividing every model by the same value would lead to insufficient precision.
+Our solution is to divide every model by its own maximum, and storing that maximum value as an aside in the npy file.
+The Rust code will then multiply the spectrum by this value again to retrieve the original spectrum.
+The maximum value is stored as a 32-bit float in the first four bytes of the npy file.
+When using these files, the flag `includes_factor=True` needs to be set in the interpolator object to signal that the first four bytes need to be interpreted as a factor to the rest of the spectrum.
+Using `numpy`, the following function can be used to convert a model spectrum and store it in npy format including the factor:
+```python
+def store_model(flux: np.ndarray, filename: str):
+    max_value = np.max(flux)
+    converted_flux = np.array(flux / max_value * (2**16-1), dtype=np.uint16)
+    max_byte_repr = np.frombuffer(np.float32(max_value).tobytes(), dtype=np.uint16)
+    output_arr = np.concatenate([max_byte_repr, converted_flux])
+    np.save(filename, output_arr)
+```
+
 It is recommended that the pixels are equally spaced in log-wavelength.
 Part of the code also works with linearly spaced models, but not all of it.
 
@@ -94,7 +111,7 @@ The full range in [M/H] must exist for every $T_\text{eff}$, $\log g$ combinatio
 All the functionality of the code can be accessed from Python through a few exposed classes and functions. API level documentation can be found in the [generated Rust docs](https://simonvanschuylenbergh.github.io/PASTA). Below is an overview of the classes.
 
 ### [Interpolator](https://simonvanschuylenbergh.github.io/PASTA/pasta/struct.OnDiskInterpolator.html)
-This is the central object that exposes methods for generating synthetic spectra, fitting observed spectra and calculating error margins.
+This is the object that handles retrieving the grid spectra and producing new model spectra.
 There are three different `Interpolator` classes available that differ in the way they load the files from the grid.
 `OnDiskInterpolator` loads the files straight from the disk every time they are needed.
 When using multiple cores however, the disk speed becomes a major bottleneck.
@@ -112,54 +129,47 @@ Arguments are
 ```python
 CachedInterpolator(
     dir: str,
+    includes_factor: bool
     wavelength: WlGrid,
-    vsini_range=(1, 600): tuple[float, float], # km/s
-    rv_range=(-150, 150): tuple[float, float], # km/s
+    n_shards=4: int
     lrucap=4000: int,
 )
 ```
 The first argument is the path to the directory in which the models are stored.
-The second argument specifies the wavelength grid of the models (see [WlGrid](#wlgrid)).
+The second argument specifies whether the model files include a factor that they need to be multiplied with (see above).
+The third argument specifies the wavelength grid of the models (see [WlGrid](#wlgrid)).
 Since the model files only contain flux values, the wavelength information needs to be provided through this argument.
-The third and fourth argument specify the range of $v \sin i$ and RV values that will be searched by the fitter.
-The last argument is exclusive to `CachedInterpolator` and specifies the maximum number of models that are kept in memory at a time.
+The last two arguments are exclusive to `CachedInterpolator` and specify the number of shards of the cache, and the maximum number of models that are kept in memory at a time.
 
 A full list of available methods on this object can be found [here](https://simonvanschuylenbergh.github.io/PASTA/pasta/struct.OnDiskInterpolator.html).
 Below an overview of the most important ones:
 
-#### fit_pso
+#### get_fitter
+
 ```python
-fit_pso(
+get_fitter(
     self,
-    fitter: PyContinuumFitter,
     dispersion: PyWavelengthDispersion,
-    observed_flux: np.ndarray[np.float32],
-    observed_var: np.ndarray[np.float32],
+    continuum_fitter: PyContinuumFitter,
     settings: PSOSettings,
-    trace_directory=None: str | None,
-    parallelize=True: bool,
-) -> PyOptimizationResult
+    vsini_range: (float, float),
+    rv_range: (float, float),
+) -> PySingleFitter
 ```
+This function creates a `fitter` object that handles fitting observed spectra of single stars.
 
-This is the method for fitting an observed spectrum through particle swarm optimization.
-
-The first argument specifies the function that will be fitted against the pseudo continuum before $\chi^2$ is evaluated.
-Currently three classes for this are provided. [ChunkContinuumFitter](#chunkcontinuumfitter) divides the spectrum in a specified number of chunks, fits every chunk by a polynomial of specified degree, and blends them together. This method is generally recommended. [LinearModelContinuumFitter](#linearmodelcontinuumfitter) allows using any linear model by supplying a design matrix. [FixedContinuum](#fixedcontinuum) and [ConstantContinuum](#constantcontinuum) turn off continuum fitting and use a user specified pseudo continuum or an array of ones respectively.
-
-The second argument specifies the wavelength dispersion of the instrument that the spectrum was taken with.
-It provides the information of the wavelength corresponding to every pixel, as well as the spectral resolution of the instrument, which the synthetic spectra will be convolved to.
+The first argument specifies the wavelength dispersion of the instrument that the spectrum was taken with.
+It provides the information of the wavelength corresponding to every pixel, as well as the spectral resolution of the instrument which the synthetic spectra will be convolved to.
 Three classes are provided: [FixedResolutionDispersion](#fixedresolutiondispersion) can be used when the spectral resolution of the instrument is constant across the wavelength range.
 In this case the synthetic spectrum will be convolved with a single gaussian kernel.
 [VariableResolutionDispersion](#variableresolutiondispersion) is used when the spectral resolution varies throughout the wavelength range, as is often the case with low resolution instruments. In this case every pixel will be convolved with its own gaussian kernel.
 This does come at a computational cost.
-[NoConvolutionDispersion](#noconvolutiondispersion) skips the convolution step, and is to be used in case the grid of models has already been convolved to the appropriate resolution. 
+[NoConvolutionDispersion](#noconvolutiondispersion) skips the convolution step, and is to be used in case the grid of models has already been convolved to the appropriate resolution.
 
-The third and fourth arguments provide the flux and variance values of the observed spectrum. The lengths of these arrays must match with the wavelength array that is provided through the dispersion argument.
+The second argument specifies the function that will be fitted against the pseudo continuum before $\chi^2$ is evaluated.
+Currently three classes for this are provided. [ChunkContinuumFitter](#chunkcontinuumfitter) divides the spectrum in a specified number of chunks, fits every chunk by a polynomial of specified degree, and blends them together. This method is generally recommended. [LinearModelContinuumFitter](#linearmodelcontinuumfitter) allows using any linear model by supplying a design matrix. [FixedContinuum](#fixedcontinuum) and [ConstantContinuum](#constantcontinuum) turn off continuum fitting and use a user specified pseudo continuum or an array of ones respectively.
 
-The fifth argument specifies the metaparameters to the particle swarm optimization. See [PSOSettings](#psosettings).
-The sixth argument is optional and is used to save the particle positions throughout the optimization run.
-The data will be stored in json files in the specified directory.
-Finally, the last argument specifies whether to speed up computations by multithreading over particles, i.e. let every particle be processed by its own thread.
+The third argument specifies the metaparameters to the particle swarm optimization. See [PSOSettings](#psosettings).
 
 
 #### produce_model
@@ -187,12 +197,39 @@ fit_continuum_and_return_model(
 ) -> list[float]
 ```
 
+
+### [PySingleFitter](https://simonvanschuylenbergh.github.io/PASTA/pasta/struct.OnDiskSingleFitter.html)
+
+This class handles fitting observed spectra of single stars, as well as computing uncertainties and sampling the $\chi^2$ landscape. It can be constructed by calling [`get_fitter`](#get_fitter) on an `Interpolator` object.
+Its methods are:
+
+
+#### fit
+```python
+fit(
+    self,
+    interpolator: Interpolator,
+    observed_flux: np.ndarray[np.float32],
+    observed_var: np.ndarray[np.float32],
+    trace_directory=None: str | None,
+    parallelize=True: bool,
+) -> OptimizationResult
+```
+
+This is the method for fitting an observed spectrum through particle swarm optimization.
+The first argument requires a reference to an interpolator object to handle the model generation.
+The second and third arguments demand the flux and variance values of the observed spectrum. The lengths of these arrays must match with the wavelength array that was provided through the dispersion argument when constructing the fitter object.
+The fourth argument is optional and is used to save the particle positions throughout the optimization run.
+That data will be stored in json files in the specified directory.
+Finally, the last argument specifies whether to speed up computations by multithreading over particles, i.e. let every particle be processed by its own thread.
+
+The function returns a [PyOptimizationResult](#optimizationresult) object that includes all the solved labels, continuum function parameters and other info. This data can be easily obtained using the `to_dict()` or `to_json()` method.
+
+
 #### uncertainty_chi2
 ```python
 uncertainty_chi2(
     self,
-    fitter: PyContinuumFitter,
-    dispersion: PyWavelengthDispersion,
     observed_flux: list[float],
     observed_var: list[float],
     spec_res: float,
@@ -201,26 +238,10 @@ uncertainty_chi2(
 ) -> list[(float | None, float | None); 5]
 ```
 
-#### uncertainty_chi2_bulk_fixed_wl
-```python
-uncertainty_chi2_bulk_fixed_wl(
-    self,
-    fitter: PyContinuumFitter,
-    dispersion: PyWavelengthDispersion,
-    observed_fluxes: list[list[float]],
-    observed_vars: list[list[float]],
-    spec_res: float,
-    parameters: list[float; 5],
-    search_radius=[2000.0, 0.3, 0.3, 40.0, 40.0]: list[float; 5],
-) -> list[list[(float | None, float | None); 5]]
-```
-
 #### chi2
 ```python
 chi2(
     self,
-    fitter: PyContinuumFitter,
-    dispersion: PyWavelengthDispersion,
     observed_flux: list[float],
     observed_var: list[float],
     labels: list[float; 5],
@@ -238,10 +259,28 @@ For linearly spaced models (`log=False`, not fully supported), the arguments are
 For log-spaced models (`log=True`), these are the $\log_{10}$ of the first wavelength, the step in $\log_{10}$ wavelength and the total number of pixels.
 
 ### [FixedResolutionDispersion](https://simonvanschuylenbergh.github.io/PASTA/pasta/fn.FixedResolutionDispersion.html)
+This dispersion class is used for instruments that have a constant resolution across the wavelenth range.
+```python
+FixedResolutionDispersion(
+    wl: list[float],
+    resolution[float],
+    synth_wl: WlGrid,
+)
+```
+The first argument specifies the wavelength array of the observed spectra.
+The second argument is the desired resolution ($\lambda / \Delta \lambda$) that the models wil be convolved to.
+The last argument specifies the wavelength grid of the models that the class will be used on.
+
 
 ### [VariableResolutionDispersion](https://simonvanschuylenbergh.github.io/PASTA/pasta/fn.VariableResolutionDispersion.html)
 
 ### [NoConvolutionDispersion](https://simonvanschuylenbergh.github.io/PASTA/pasta/fn.NoConvolutionDispersion.html)
+This dispersion class is used when the models have already been convolved to the instrument resolution.
+It skips the convolution step during model generation.
+Only the wavelength array of the observed spectra is required.
+```
+NoConvolutionDispersion(wl: list[float])
+```
 
 ### [ChunkContinuumFitter](https://simonvanschuylenbergh.github.io/PASTA/pasta/fn.ChunkContinuumFitter.html)
 
@@ -265,13 +304,18 @@ PSOSetttings(
 )
 ```
 
-### PyOptimizationResult
+### OptimizationResult
 ```python
-labels: tuple[float, float, float, float, float]
+label: tuple[float, float, float, float, float]
 continuum_params: list[float]
 chi2: float,
 iterations: int,
 time: float
+```
+
+#### to_dict
+```python
+to_dict(self) -> dict
 ```
 
 ## Rust code overview
