@@ -741,13 +741,13 @@ impl<'a, F: ContinuumFitter> argmin::core::CostFunction for RVCostFunction<'a, F
         let rv2 = param[1];
 
         let shifted_synth1 =
-            shift_and_resample(&self.model1, self.synth_wl, self.observed_wl, rv1)?;
+            shift_and_resample(self.synth_wl, &self.model1, self.observed_wl, rv1)?;
         let shifted_synth2 =
-            shift_and_resample(&self.model2, self.synth_wl, self.observed_wl, rv2)?;
+            shift_and_resample(self.synth_wl, &self.model2, self.observed_wl, rv2)?;
         let shifted_continuum1 =
-            shift_and_resample(&self.continuum1, self.synth_wl, self.observed_wl, rv1)?;
+            shift_and_resample(self.synth_wl, &self.continuum1, self.observed_wl, rv1)?;
         let shifted_continuum2 =
-            shift_and_resample(&self.continuum2, self.synth_wl, self.observed_wl, rv2)?;
+            shift_and_resample(self.synth_wl, &self.continuum2, self.observed_wl, rv2)?;
 
         let lr =
             self.light_ratio as FluxFloat * shifted_continuum2.mean() / shifted_continuum1.mean();

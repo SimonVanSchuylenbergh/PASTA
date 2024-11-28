@@ -13,6 +13,8 @@ pub trait WavelengthDispersion: Sync + Send {
     fn convolve(&self, flux: na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>>;
 }
 
+/// Used when the models are already convolved with the instrument resolution.
+/// The input flux is returned as is.
 #[derive(Clone, Debug)]
 pub struct NoConvolutionDispersionTarget(pub na::DVector<f64>);
 
@@ -20,6 +22,8 @@ impl WavelengthDispersion for NoConvolutionDispersionTarget {
     fn wavelength(&self) -> &na::DVector<f64> {
         &self.0
     }
+
+    /// Convolve the input flux with the instrument resolution dispersion kernel.
     fn convolve(&self, flux: na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>> {
         Ok(flux)
     }
@@ -38,7 +42,7 @@ fn make_gaussian(arr: &mut [FluxFloat], sigma: FluxFloat) {
     }
 }
 
-/// Convolution by overlap-add method with Fast Fourier transform.
+/// Convolution by overlap-add method with Fast Fourier Transform.
 pub fn oa_convolve(
     input_array: &na::DVector<FluxFloat>,
     kernel: &na::DVector<FluxFloat>,
@@ -77,21 +81,22 @@ pub fn oa_convolve(
     Ok(y)
 }
 
+/// For spectra with constant spectral resolution.
 #[derive(Clone, Debug)]
 
 pub struct FixedTargetDispersion {
-    pub observed_wl: na::DVector<f64>,
-    pub synth_wl: WlGrid,
+    pub wl: na::DVector<f64>,
+    pub modeltarget_wl: WlGrid,
     pub kernel: na::DVector<FluxFloat>,
     pub n: usize,
 }
 
 impl FixedTargetDispersion {
-    pub fn new(wavelength: na::DVector<f64>, resolution: f64, synth_wl: WlGrid) -> Result<Self> {
+    pub fn new(wavelength: na::DVector<f64>, resolution: f64, modeltarget_wl: WlGrid) -> Result<Self> {
         if resolution <= 0.0 {
             return Err(anyhow!("Resolution must be positive"));
         }
-        let sigma = match synth_wl {
+        let sigma = match modeltarget_wl {
             WlGrid::Linspace(_, _, _) => {
                 return Err(anyhow!(
                 "Fixed resolution convolution with linear wavelength dispersion is not supported"
@@ -104,8 +109,8 @@ impl FixedTargetDispersion {
         let mut kernel = na::DVector::zeros(n);
         make_gaussian(kernel.as_mut_slice(), sigma as f32);
         Ok(Self {
-            observed_wl: wavelength,
-            synth_wl,
+            wl: wavelength,
+            modeltarget_wl,
             kernel,
             n: (n - 1) / 2,
         })
@@ -114,15 +119,15 @@ impl FixedTargetDispersion {
 
 impl WavelengthDispersion for FixedTargetDispersion {
     fn wavelength(&self) -> &na::DVector<f64> {
-        &self.observed_wl
+        &self.wl
     }
 
     fn convolve(&self, flux_arr: na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>> {
-        if flux_arr.len() != self.synth_wl.n() {
+        if flux_arr.len() != self.modeltarget_wl.n() {
             return Err(anyhow!(
                 "flux_arr and wavelength grid don't match. flux_arr: {:?}, synth_wl: {:?}",
                 flux_arr.len(),
-                self.synth_wl.n()
+                self.modeltarget_wl.n()
             ));
         }
         let convolved = oa_convolve(&flux_arr, &self.kernel)?;
@@ -166,8 +171,8 @@ fn resample_observed_to_synth(
 /// The kernels are precomputed and stored in a matrix.
 #[derive(Clone, Debug)]
 pub struct VariableTargetDispersion {
-    pub observed_wl: na::DVector<f64>,
-    pub synth_wl: WlGrid,
+    pub wl: na::DVector<f64>,
+    pub modeltarget_wl: WlGrid,
     pub kernels: na::DMatrix<FluxFloat>,
     pub n: usize,
 }
@@ -179,12 +184,12 @@ impl VariableTargetDispersion {
     pub fn new(
         wavelength: na::DVector<f64>,
         dispersion: &na::DVector<FluxFloat>,
-        synth_wl: WlGrid,
+        modeltarget_wl: WlGrid,
     ) -> Result<Self> {
         // Resample observed dispersion to synthetic wavelength grid
-        let dispersion_resampled = resample_observed_to_synth(&wavelength, synth_wl, dispersion)?;
+        let dispersion_resampled = resample_observed_to_synth(&wavelength, modeltarget_wl, dispersion)?;
 
-        let larges_disp = match synth_wl {
+        let larges_disp = match modeltarget_wl {
             WlGrid::Linspace(_, step, _) => {
                 dispersion_resampled
                     .iter()
@@ -194,7 +199,7 @@ impl VariableTargetDispersion {
             }
             WlGrid::Logspace(_, step, _) => dispersion_resampled
                 .iter()
-                .zip(synth_wl.iterate())
+                .zip(modeltarget_wl.iterate())
                 .map(|(disp, wl)| disp / (step * std::f64::consts::LN_10 * wl) as FluxFloat)
                 .max_by(|a, b| a.total_cmp(b))
                 .unwrap(),
@@ -204,12 +209,12 @@ impl VariableTargetDispersion {
         let kernel_size_maybe_even = (larges_disp * 6.0).ceil() as usize;
         let kernel_size = kernel_size_maybe_even + 1 - kernel_size_maybe_even % 2;
 
-        let mut kernels = na::DMatrix::zeros(kernel_size, synth_wl.n());
+        let mut kernels = na::DMatrix::zeros(kernel_size, modeltarget_wl.n());
         for (mut kernel, (wl, disp)) in kernels
             .column_iter_mut()
-            .zip(synth_wl.iterate().zip(dispersion_resampled.iter()))
+            .zip(modeltarget_wl.iterate().zip(dispersion_resampled.iter()))
         {
-            let sigma = match synth_wl {
+            let sigma = match modeltarget_wl {
                 WlGrid::Linspace(_, step, _) => disp / step as FluxFloat,
                 WlGrid::Logspace(_, step, _) => {
                     disp / (step * std::f64::consts::LN_10 * wl) as FluxFloat
@@ -218,8 +223,8 @@ impl VariableTargetDispersion {
             make_gaussian(kernel.as_mut_slice(), sigma);
         }
         Ok(Self {
-            observed_wl: wavelength,
-            synth_wl,
+            wl: wavelength,
+            modeltarget_wl,
             kernels,
             n: (kernel_size - 1) / 2_usize,
         })
@@ -228,15 +233,15 @@ impl VariableTargetDispersion {
 
 impl WavelengthDispersion for VariableTargetDispersion {
     fn wavelength(&self) -> &na::DVector<f64> {
-        &self.observed_wl
+        &self.wl
     }
 
     fn convolve(&self, flux_arr: na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>> {
-        if flux_arr.len() != self.synth_wl.n() {
+        if flux_arr.len() != self.modeltarget_wl.n() {
             return Err(anyhow!(
                 "flux_arr and wavelength grid don't match. flux_arr: {:?}, synth_wl: {:?}",
                 flux_arr.len(),
-                self.synth_wl.n()
+                self.modeltarget_wl.n()
             ));
         }
         Ok(na::DVector::from_fn(flux_arr.len(), |i, _| {
@@ -253,8 +258,8 @@ impl WavelengthDispersion for VariableTargetDispersion {
 const FFTSIZE: usize = 2048;
 
 /// Build a kernel for rotational broadening.
-/// vsini: projected rotational velocity in km/s
-/// dvelo: pixel velocity step in km/s
+/// vsini: projected rotational velocity in km/s.
+/// dvelo: pixel velocity step in km/s.
 pub fn build_rotation_kernel(vsini: f64, dvelo: f64) -> na::DVector<FluxFloat> {
     let epsilon = 0.6;
     let vrot = vsini / 299792.0;
@@ -300,15 +305,23 @@ fn pad_with_zeros(arr: na::DVectorView<FluxFloat>, new_width: usize) -> na::DVec
     padded
 }
 
+// Convolve the input spectrum with a rotational broadening kernel.
 pub fn convolve_rotation(
-    synth_wl: &WlGrid,
-    input_array: &na::DVector<FluxFloat>,
+    input_wl: &WlGrid,
+    input_flux: &na::DVector<FluxFloat>,
     vsini: f64,
 ) -> Result<na::DVector<FluxFloat>> {
     if vsini < 0.0 {
         return Err(anyhow!("vsini must be positive"));
     }
-    let dvelo = match synth_wl {
+    if input_wl.n() != input_flux.len() {
+        return Err(anyhow!(
+            "Length of input_array and wavelength grid don't match. input_array: {:?}, synth_wl: {:?}",
+            input_flux.len(),
+            input_wl.n()
+        ));
+    }
+    let dvelo = match input_wl {
         WlGrid::Linspace(first, step, total) => {
             // Use the middle wavelength as an approximation
             let avg_wl = (first + first + step * (*total as f64)) / 2.0;
@@ -318,7 +331,7 @@ pub fn convolve_rotation(
     };
     let kernel = build_rotation_kernel(vsini, dvelo);
     if vsini == 0.0 || kernel.len() <= 2 {
-        return Ok(input_array.clone());
+        return Ok(input_flux.clone());
     }
     if kernel.len() > FFTSIZE {
         return Err(anyhow!(
@@ -328,31 +341,32 @@ pub fn convolve_rotation(
             vsini
         ));
     }
-    let convolved = oa_convolve(input_array, &kernel)?;
+    let convolved = oa_convolve(input_flux, &kernel)?;
     Ok(convolved
-        .rows(kernel.len() / 2, input_array.len())
+        .rows(kernel.len() / 2, input_flux.len())
         .into_owned())
 }
 
+/// Shift the input spectrum by rv and resample it to the target wavelength grid.
 pub fn shift_and_resample(
-    input_array: &na::DVector<FluxFloat>,
-    synth_wl: &WlGrid,
-    observed_wl: &na::DVector<f64>,
+    input_wl: &WlGrid,
+    input_flux: &na::DVector<FluxFloat>,
+    target_wl: &na::DVector<f64>,
     rv: f64,
 ) -> Result<na::DVector<FluxFloat>> {
-    if synth_wl.n() != input_array.len() {
+    if input_wl.n() != input_flux.len() {
         return Err(anyhow!(
                 "Length of input_array and wavelength grid don't match. input_array: {:?}, synth_wl: {:?}",
-                input_array.len(),
-                synth_wl.n()
+                input_flux.len(),
+                input_wl.n()
             ));
     }
 
     let shift_factor = 1.0 - rv / 299792.0;
-    let mut output = na::DVector::zeros(observed_wl.len());
+    let mut output = na::DVector::zeros(target_wl.len());
 
-    let (synth_first, synth_last) = synth_wl.get_first_and_last();
-    let first_source_wl = observed_wl[0] * shift_factor;
+    let (synth_first, synth_last) = input_wl.get_first_and_last();
+    let first_source_wl = target_wl[0] * shift_factor;
     if first_source_wl < synth_first {
         return Err(anyhow!(
             "Observed wavelength is smaller than synthetic wavelength (RV={}, {:.1} < {:.1})",
@@ -361,7 +375,7 @@ pub fn shift_and_resample(
             synth_first
         ));
     }
-    let last_source_wl = observed_wl[observed_wl.len() - 1] * shift_factor;
+    let last_source_wl = target_wl[target_wl.len() - 1] * shift_factor;
     if last_source_wl > synth_last {
         return Err(anyhow!(
             "Observed wavelength is larger than synthetic wavelength (RV={}, {:.1} > {:.1})",
@@ -371,13 +385,13 @@ pub fn shift_and_resample(
         ));
     }
 
-    for i in 0..observed_wl.len() {
-        let obs_wl = observed_wl[i];
+    for i in 0..target_wl.len() {
+        let obs_wl = target_wl[i];
         let source_wl = obs_wl * shift_factor;
-        let index = synth_wl.get_float_index_of_wl(source_wl);
+        let index = input_wl.get_float_index_of_wl(source_wl);
         let j = index.floor() as usize;
         let weight = index as FluxFloat - j as FluxFloat;
-        output[i] = (1.0 - weight) * input_array[j] + weight * input_array[j + 1];
+        output[i] = (1.0 - weight) * input_flux[j] + weight * input_flux[j + 1];
     }
     Ok(output)
 }

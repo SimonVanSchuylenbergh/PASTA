@@ -336,6 +336,11 @@ impl PyWavelengthDispersion {
         self.0.wavelength().clone().data.into()
     }
 
+    /// Convolve every model spectrum in a directory with the dispersion kernel
+    /// Filenames will be kept the same.
+    /// The wavelength grid of the models in `input_directory`` is specified by `input_wavelength`.
+    /// `includes_factor` specifies whether the max value of the spectrum is included in the file,
+    /// i.e. whether this represents a normalized or unnormalized model.
     pub fn convolve_and_resample_directory(
         &self,
         input_directory: String,
@@ -365,7 +370,7 @@ impl PyWavelengthDispersion {
                     .map(|x| (x as FluxFloat) / 65535.0 * factor);
                 let convolved = self.0.convolve(spectrum_float).unwrap();
                 let resampled =
-                    shift_and_resample(&convolved, &input_wavelength.0, self.0.wavelength(), 0.0)
+                    shift_and_resample(&input_wavelength.0, &convolved, self.0.wavelength(), 0.0)
                         .unwrap();
 
                 let max = resampled.max();
@@ -386,7 +391,7 @@ impl PyWavelengthDispersion {
                 let spectrum_float = arr.map(|x| (x as FluxFloat) / 65535.0);
                 let convolved = self.0.convolve(spectrum_float).unwrap();
                 let resampled =
-                    shift_and_resample(&convolved, &input_wavelength.0, self.0.wavelength(), 0.0)
+                    shift_and_resample(&input_wavelength.0, &convolved, self.0.wavelength(), 0.0)
                         .unwrap();
                 let resampled_u16 = resampled
                     .into_iter()
@@ -400,6 +405,10 @@ impl PyWavelengthDispersion {
     }
 }
 
+/// Create a new wavelength dispersion object for an instrument with variable resolution.
+/// `wl` is the wavelength grid of the instrument.
+/// `disp` is the resolution at each wavelength ($\lambda / \Delta \lambda$).
+/// `synth_wl` is the wavelength grid of the synthetic spectra that will be convolved for this resolution.
 #[pyfunction]
 fn VariableResolutionDispersion(
     wl: Vec<f64>,
@@ -413,6 +422,10 @@ fn VariableResolutionDispersion(
     )
 }
 
+/// Create a new wavelength dispersion object for an instrument with fixed resolution.
+/// `wl` is the wavelength grid of the instrument.
+/// `resolution` is the resolution of the instrument.
+/// `synth_wl` is the wavelength grid of the synthetic spectra that will be convolved for this resolution.
 #[pyfunction]
 fn FixedResolutionDispersion(
     wl: Vec<f64>,
@@ -426,11 +439,15 @@ fn FixedResolutionDispersion(
     )
 }
 
+/// Create a new wavelength dispersion object for models that have already been convolved to the instrument resolution.
+/// This skips the instrument resolution convolution step in the model production.
+/// `wl` is the wavelength grid of the instrument.
 #[pyfunction]
 fn NoConvolutionDispersion(wl: Vec<f64>) -> PyWavelengthDispersion {
     PyWavelengthDispersion(NoConvolutionDispersionTarget(wl.into()).into())
 }
 
+/// All available methods to fit the pseudo continuum
 #[enum_dispatch(ContinuumFitter)]
 #[derive(Clone, Debug)]
 enum ContinuumFitterWrapper {
@@ -440,10 +457,14 @@ enum ContinuumFitterWrapper {
     RsConstantContinuum,
 }
 
+/// Represents a constraint during the fitting process.
 #[pyclass(module = "pasta", frozen)]
 #[derive(Clone, Debug)]
 pub struct PyConstraintWrapper(BoundsConstraint);
 
+/// Constraint that fixes one parameter to a given value during the fitting process.
+/// `parameter` is the index of the parameter to fix.
+/// `value` is the value to fix the parameter to.
 #[pyfunction]
 fn FixConstraint(parameter: usize, value: f64) -> PyConstraintWrapper {
     PyConstraintWrapper(BoundsConstraint {
@@ -452,6 +473,10 @@ fn FixConstraint(parameter: usize, value: f64) -> PyConstraintWrapper {
     })
 }
 
+/// Constraint that bounds one parameter to a given range during the fitting process.
+/// `parameter` is the index of the parameter to bound.
+/// `lower` is the lower bound.
+/// `upper` is the upper bound.
 #[pyfunction]
 fn RangeConstraint(parameter: usize, lower: f64, upper: f64) -> PyConstraintWrapper {
     PyConstraintWrapper(BoundsConstraint {
@@ -466,27 +491,32 @@ pub struct PyContinuumFitter(ContinuumFitterWrapper);
 
 #[pymethods]
 impl PyContinuumFitter {
+    /// Fit the pseudo continuum given a model spec and an observed spec.
+    /// i.e. fit the function to `observed` / `model`.
+    /// Returns the fitted parameters of the continuum function and the chi2 value.
     fn fit_continuum(
         &self,
-        synth: Vec<FluxFloat>,
-        y: Vec<FluxFloat>,
-        yerr: Vec<FluxFloat>,
+        model: Vec<FluxFloat>,
+        observed: Vec<FluxFloat>,
+        observed_var: Vec<FluxFloat>,
     ) -> PyResult<(Vec<FluxFloat>, f64)> {
-        let observed_spectrum = ObservedSpectrum::from_vecs(y, yerr);
+        let observed_spectrum = ObservedSpectrum::from_vecs(observed, observed_var);
         let (params, ls) = self
             .0
-            .fit_continuum(&observed_spectrum, &na::DVector::from_vec(synth))
+            .fit_continuum(&observed_spectrum, &na::DVector::from_vec(model))
             .unwrap();
         Ok((params.data.into(), ls))
     }
 
+    /// Fit the pseudo continuum given a model spec and an observed spec,
+    /// and return the fitted continuum function itself instead of its parameters.
     fn fit_and_return_continuum(
         &self,
         synth: Vec<FluxFloat>,
-        y: Vec<FluxFloat>,
-        yerr: Vec<FluxFloat>,
+        observed: Vec<FluxFloat>,
+        observed_var: Vec<FluxFloat>,
     ) -> PyResult<Vec<FluxFloat>> {
-        let observed_spectrum = ObservedSpectrum::from_vecs(y, yerr);
+        let observed_spectrum = ObservedSpectrum::from_vecs(observed, observed_var);
         let result = self
             .0
             .fit_continuum_and_return_continuum(&observed_spectrum, &na::DVector::from_vec(synth))
@@ -494,13 +524,15 @@ impl PyContinuumFitter {
         Ok(result.data.into())
     }
 
+    /// Fit the pseudo continuum given a model spec and an observed spec,
+    /// and return the normalized observed spectrum.
     fn fit_continuum_and_return_normalized_spec(
         &self,
         synth: Vec<FluxFloat>,
-        y: Vec<FluxFloat>,
-        yerr: Vec<FluxFloat>,
+        observed: Vec<FluxFloat>,
+        observed_var: Vec<FluxFloat>,
     ) -> PyResult<Vec<FluxFloat>> {
-        let observed_spectrum = ObservedSpectrum::from_vecs(y, yerr);
+        let observed_spectrum = ObservedSpectrum::from_vecs(observed, observed_var);
         let continuum = self
             .0
             .fit_continuum_and_return_continuum(&observed_spectrum, &na::DVector::from_vec(synth))
@@ -509,6 +541,8 @@ impl PyContinuumFitter {
         Ok(result.data.into())
     }
 
+    /// Fit the pseudo continuum given a model spec and an observed spec,
+    /// and return the chi2 value.
     fn fit_and_return_chi2(
         &self,
         synth: Vec<FluxFloat>,
@@ -523,6 +557,7 @@ impl PyContinuumFitter {
         Ok(chi2)
     }
 
+    /// Construct the continuum function from its parameters.
     fn build_continuum(&self, params: Vec<FluxFloat>) -> PyResult<Vec<FluxFloat>> {
         Ok(self
             .0
@@ -533,6 +568,8 @@ impl PyContinuumFitter {
     }
 }
 
+/// Continuum model that divides the spectrum into `n_chunks` chunks, with `overlap` overlap (0-1),
+/// and fits a `p_order` order polynomial to each chunk.
 #[pyfunction]
 fn ChunkContinuumFitter(
     wl: Vec<f64>,
@@ -551,11 +588,13 @@ fn ChunkContinuumFitter(
     )
 }
 
+/// Continuum model that fits a linear model to the pseudo continuum.
 #[pyfunction]
 fn LinearModelContinuumFitter(design_matrix: PyArrayLike<FluxFloat, Ix2>) -> PyContinuumFitter {
     PyContinuumFitter(LinearModelFitter::new(design_matrix.as_matrix().into()).into())
 }
 
+/// Continuum model that fixes the continuum to a fixed array. Hence no fitting is done
 #[pyfunction]
 fn FixedContinuum(
     continuum: Vec<FluxFloat>,
@@ -566,6 +605,7 @@ fn FixedContinuum(
     )
 }
 
+/// Continuum model that fixes the continuum to a constant value. Hence no fitting is done
 #[pyfunction]
 fn ConstantContinuum() -> PyContinuumFitter {
     PyContinuumFitter(continuum_fitting::ConstantContinuum().into())
@@ -577,7 +617,8 @@ macro_rules! implement_methods {
     ($name: ident, $fetcher_type: ty, $PySingleFitter: ident, $PyBinaryFitter: ident, $PyRVFitter: ident) => {
         #[pymethods]
         impl $name {
-            /// Produce a model spectrum by interpolating, convolving, shifting by rv and resampling to wl array.
+            /// Produce a model spectrum by interpolating, convolving,
+            /// shifting by rv and resampling to the requested wavelength dispersion.
             pub fn produce_model<'a>(
                 &self,
                 py: Python<'a>,
@@ -596,13 +637,19 @@ macro_rules! implement_methods {
                 PyArray::from_vec_bound(py, interpolated.iter().copied().collect())
             }
 
+            /// Produce a normalized model spectrum for a binary system.
+            /// A reference to a `continuum_interpolator` that points to a grid of unnormalized models is required.
+            /// That is because the continuum information is needed to correctly add the two spectra.
+            /// The labels of the stars are given in `labels1` and `labels2`.
+            /// The `light_ratio` is the ratio of the light of the first star to the light of the second star,
+            /// taking into account the different continua.
             pub fn produce_binary_model_norm<'a>(
                 &self,
                 py: Python<'a>,
                 continuum_interpolator: &$name,
                 dispersion: PyWavelengthDispersion,
-                labels1: (f64, f64, f64, f64, f64),
-                labels2: (f64, f64, f64, f64, f64),
+                labels1: [f64; 5],
+                labels2: [f64; 5],
                 light_ratio: f64,
             ) -> Bound<'a, PyArray<FluxFloat, Ix1>> {
                 let interpolated = self
@@ -610,8 +657,12 @@ macro_rules! implement_methods {
                     .produce_binary_model_norm(
                         &continuum_interpolator.0,
                         &dispersion.0,
-                        &na::Vector5::new(labels1.0, labels1.1, labels1.2, labels1.3, labels1.4),
-                        &na::Vector5::new(labels2.0, labels2.1, labels2.2, labels2.3, labels2.4),
+                        &na::Vector5::new(
+                            labels1[0], labels1[1], labels1[2], labels1[3], labels1[4],
+                        ),
+                        &na::Vector5::new(
+                            labels2[0], labels2[1], labels2[2], labels2[3], labels2[4],
+                        ),
                         light_ratio as f32,
                     )
                     .unwrap();
@@ -640,7 +691,7 @@ macro_rules! implement_methods {
                 PyArray::from_vec2_bound(py, &v[..]).unwrap()
             }
 
-            /// Produce multiple model spectra using multithreading.
+            /// Produce multiple model spectra with multithreading.
             /// labels: Vec of (Teff, [M/H], logg, vsini, RV) tuples.
             pub fn produce_model_bulk<'a>(
                 &self,
@@ -694,6 +745,7 @@ macro_rules! implement_methods {
                 Ok(interpolated.iter().copied().collect())
             }
 
+            /// Get a `SingleFitter` object, used to fit spectra of single stars with the PSO algorithm.
             pub fn get_fitter(
                 &self,
                 dispersion: PyWavelengthDispersion,
@@ -711,6 +763,7 @@ macro_rules! implement_methods {
                 ))
             }
 
+            /// Get a `BinaryFitter` object, used to fit spectra of binary stars with the PSO algorithm.
             pub fn get_binary_fitter(
                 &self,
                 dispersion: PyWavelengthDispersion,
@@ -728,6 +781,8 @@ macro_rules! implement_methods {
                 ))
             }
 
+            /// Get a `BinaryRVFitter` object, used to fit the RV's of binary stars,
+            /// where the other labels are already known.
             pub fn get_binary_rv_fitter(
                 &self,
                 dispersion: PyWavelengthDispersion,
@@ -754,12 +809,19 @@ macro_rules! implement_methods {
                 dispersion: PyWavelengthDispersion,
                 observed_flux: Vec<FluxFloat>,
                 observed_var: Vec<FluxFloat>,
-                label: (f64, f64, f64, f64, f64),
+                label: [f64; 5],
             ) -> PyResult<Vec<FluxFloat>> {
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
                 let synth = self
                     .0
-                    .produce_model(&dispersion.0, label.0, label.1, label.2, label.2, label.4)
+                    .produce_model(
+                        &dispersion.0,
+                        label[0],
+                        label[1],
+                        label[2],
+                        label[2],
+                        label[4],
+                    )
                     .unwrap();
                 Ok(fitter
                     .0
@@ -845,7 +907,10 @@ macro_rules! implement_methods {
                     .collect())
             }
 
-            /// Clamp a single parameter to the bounds of the grid
+            /// Clamp a parameter tuple (Teff, M, logg) to the grid bounds along one dimension.
+            /// index: 0 for Teff, 1 for M, 2 for logg
+            /// It is required that a point inside the gridpoints can be found,
+            /// only by changing the parameter value in the given dimension.
             pub fn clamp_1d(&self, teff: f64, m: f64, logg: f64, index: usize) -> f64 {
                 self.0
                     .grid_bounds()
@@ -853,6 +918,10 @@ macro_rules! implement_methods {
                     .unwrap()
             }
 
+            /// Calculate the interpolation coefficients for a given set of labels:
+            /// 4x4 for teff and logg, 4 for m.
+            /// Returned in order (teff, logg, m)
+            /// (Debugging purposes)
             pub fn calculate_interpolation_coefficients_flat(
                 &self,
                 teff: f64,
@@ -864,6 +933,7 @@ macro_rules! implement_methods {
                 (x.into(), y.into(), z.into())
             }
 
+            /// Calculate the grid of interpolation coefficients for a given set of labels (debugging purposes).
             pub fn calculate_interpolation_coefficients(
                 &self,
                 teff: f64,
@@ -877,6 +947,7 @@ macro_rules! implement_methods {
                     .into()
             }
 
+            /// Get the indices of the neighbors of a given set of labels. (0, 0, 0) if outside the grid.
             pub fn get_neighbor_indices(
                 &self,
                 teff: f64,
@@ -898,18 +969,22 @@ macro_rules! implement_methods {
                     .collect()
             }
 
+            /// Get all unique teff values in the grid.
             pub fn teffs(&self) -> Vec<f64> {
                 self.0.grid().teff.values.clone()
             }
 
+            /// Get all unique M values in the grid.
             pub fn ms(&self) -> Vec<f64> {
                 self.0.grid().m.values.clone()
             }
 
+            /// Get all unique logg values in the grid.
             pub fn loggs(&self) -> Vec<f64> {
                 self.0.grid().logg.values.clone()
             }
 
+            /// Get the outer logg limits of the grid.
             pub fn logg_limits(&self) -> Vec<(usize, usize)> {
                 self.0.grid().logg_limits.clone()
             }
@@ -934,8 +1009,9 @@ macro_rules! implement_methods {
 
         #[pymethods]
         impl $PySingleFitter {
-            /// Fit the model and pseudo continuum using PSO.
-            /// Using chunk based continuum fitting.
+            /// Fit an observed spectrum of a single star with the PSO algorithm.
+            /// trace_directory is optional. If specified, the traces of the optimization process will be saved there.
+            /// If `parallelize` is true, the optimization will be parallelized over particles.
             pub fn fit(
                 &self,
                 interpolator: &$name,
@@ -957,6 +1033,8 @@ macro_rules! implement_methods {
                 Ok(result?.into())
             }
 
+            /// Fit many observed spectra, multithreading over spectra instead of particles.
+            /// A 2D matrix is expected for observed_fluxes and vars, where each row is a spectrum.
             pub fn fit_bulk(
                 &self,
                 interpolator: &$name,

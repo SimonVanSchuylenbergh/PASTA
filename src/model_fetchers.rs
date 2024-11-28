@@ -48,7 +48,7 @@ pub fn read_spectrum(
     }
 }
 
-fn labels_from_filename(filename: &str) -> Result<(f64, f64, f64)> {
+fn labels_from_filename(filename: &str) -> Result<[f64; 3]> {
     // e.g. lp0020_08000_0430.npy
     let parts: Vec<&str> = filename.split(".").next().unwrap().split('_').collect();
     if parts.len() != 3 || parts[0].len() != 6 || parts[1].len() != 5 || parts[2].len() != 4 {
@@ -62,10 +62,10 @@ fn labels_from_filename(filename: &str) -> Result<(f64, f64, f64)> {
     let m = sign * parts[0][2..].parse::<f64>()? / 100.0;
     let teff = parts[1].parse::<f64>()?;
     let logg = parts[2].parse::<f64>()? / 100.0;
-    Ok((teff, m, logg))
+    Ok([teff, m, logg])
 }
 
-fn get_model_labels_in_dir(dir: &PathBuf) -> Result<Vec<(f64, f64, f64)>> {
+fn get_model_labels_in_dir(dir: &PathBuf) -> Result<Vec<[f64; 3]>> {
     std::fs::read_dir(dir)
         .with_context(|| format!("Not found {:?}", dir))?
         .map(|entry| {

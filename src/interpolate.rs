@@ -49,22 +49,27 @@ impl<'a> CowVector<'a> {
     }
 }
 
+/// Represents the bounds of a 3D model grid.
 pub trait GridBounds: Clone {
     fn limits(&self) -> (na::SVector<f64, 3>, na::SVector<f64, 3>);
     fn is_within_bounds(&self, param: na::SVector<f64, 3>) -> bool;
     fn get_limits_at(&self, param: na::SVector<f64, 3>, index: usize) -> Result<(f64, f64)>;
 }
 
+/// Range of values in one dimension of the grid
 #[derive(Clone)]
 pub struct Range {
     pub values: Vec<f64>,
 }
 
 impl Range {
+    /// Get index of the gridpoint to the right of x, or the index of x if it is in the grid itself.
     pub fn get_right_index(&self, x: f64) -> Result<usize, usize> {
         self.values.binary_search_by(|v| v.partial_cmp(&x).unwrap())
     }
 
+    /// Find the index of the gridpoint to the left of x, or None if x is out of bounds.
+    /// If x is a gridpoint, return (index of x) - 1, unless x is the first gridpoint.
     pub fn find_left_neighbor_index(&self, x: f64, limits: (usize, usize)) -> Option<usize> {
         match self.get_right_index(x) {
             Ok(i) => {
@@ -84,21 +89,29 @@ impl Range {
         }
     }
 
+    /// Find the indices of the four neighbors of x in the grid, for cubic interpolation.
+    /// The limits argument will be used to determine whether the neighbors are within the grid.
+    /// This is needed because the limits may be different at different points in the grid,
+    /// i.e. different logg limits for different Teff values.
+    /// When x is outside the limits, Err will be returned.
+    /// When x is inside the limits, but near the bounds, the neighbors that fall outside will be set to None.
     pub fn find_neighbors(&self, x: f64, limits: (usize, usize)) -> Result<[Option<usize>; 4]> {
         let (left, right) = limits;
         match self.get_right_index(x) {
             Ok(i) => {
                 if i < left {
                     Err(anyhow!(
-                        "Index {} out of left bound, limits={:?}",
+                        "Index {} out of left bound, limits={:?}, x={}",
                         i,
-                        limits
+                        limits,
+                        x
                     ))
                 } else if i > right {
                     Err(anyhow!(
-                        "Index {} out of right bound, limits={:?}",
+                        "Index {} out of right bound, limits={:?}, x={}",
                         i,
-                        limits
+                        limits,
+                        x
                     ))
                 } else if i == left {
                     Ok([None, Some(i), Some(i + 1), Some(i + 2)])
@@ -113,15 +126,17 @@ impl Range {
             Err(i) => {
                 if i <= left {
                     Err(anyhow!(
-                        "Index {} out of left bound, limits={:?}",
+                        "Index {} out of left bound, limits={:?}, x={}",
                         i,
-                        limits
+                        limits,
+                        x
                     ))
                 } else if i > right {
                     Err(anyhow!(
-                        "Index {} out of right bound, limits={:?}",
+                        "Index {} out of right bound, limits={:?}, x={}",
                         i,
-                        limits
+                        limits,
+                        x
                     ))
                 } else if i == left + 1 {
                     Ok([None, Some(i - 1), Some(i), Some(i + 1)])
@@ -134,6 +149,7 @@ impl Range {
         }
     }
 
+    /// Return the index of x in the grid, or None if x is not a gridpoint.
     pub fn try_get_index(&self, x: f64, limits: (usize, usize)) -> Option<usize> {
         let precision = 0.001;
         let i = match self.find_left_neighbor_index(x, limits) {
@@ -150,6 +166,7 @@ impl Range {
         }
     }
 
+    /// Get the value at index i.
     pub fn get(&self, i: usize) -> Result<f64> {
         self.values
             .get(i)
@@ -157,31 +174,37 @@ impl Range {
             .copied()
     }
 
+    /// Number of gridpoints.
     pub fn n(&self) -> usize {
         self.values.len()
     }
 
+    /// Get the first and last values of the grid
     pub fn get_first_and_last(&self) -> (f64, f64) {
         (self.values[0], *self.values.last().unwrap())
     }
 }
 
+/// Represents the bounds of our 3D model grid that has the same metallicy range everywhere,
+/// but with different logg limits for different Teff values.
+/// Currently the only implementor of GridBounds.
 #[derive(Clone)]
 pub struct Grid {
     pub teff: Range,
     pub m: Range,
     pub logg: Range,
-    pub logg_limits: Vec<(usize, usize)>, // For every Teff value, the min and max logg index
-    // For every Teff value, the number of (teff, logg) pairs with lower Teff
+    pub logg_limits: Vec<(usize, usize)>, // For every Teff value, the min and max logg index.
+    // For every Teff value, the number of (teff, logg) pairs with lower Teff.
     pub cumulative_grid_size: Vec<usize>,
 }
 
 impl Grid {
-    pub fn new(model_labels: Vec<(f64, f64, f64)>) -> Result<Self> {
+    /// Create a new Grid from a list of (Teff, M, logg) tuples that are the gridpoints.
+    pub fn new(model_labels: Vec<[f64; 3]>) -> Result<Self> {
         let mut teffs = Vec::new();
         let mut ms = Vec::new();
         let mut loggs = Vec::new();
-        for (teff, m, logg) in model_labels.iter() {
+        for [teff, m, logg] in model_labels.iter() {
             if !teffs.contains(teff) {
                 let pos = teffs
                     .binary_search_by(|v| v.partial_cmp(teff).unwrap())
@@ -203,7 +226,7 @@ impl Grid {
         }
 
         let mut logg_limits = vec![(loggs.len() - 1, 0); teffs.len()];
-        for (teff, _, logg) in model_labels {
+        for [teff, _, logg] in model_labels {
             let i = teffs
                 .binary_search_by(|v| v.partial_cmp(&teff).unwrap())
                 .unwrap();
@@ -243,6 +266,7 @@ impl Grid {
         })
     }
 
+    /// List all gridpoints as Teff, m, logg tuples.
     pub fn list_gridpoints(&self) -> Vec<[f64; 3]> {
         self.teff
             .values
@@ -259,6 +283,7 @@ impl Grid {
             .collect()
     }
 
+    /// Check if the given Teff, logg pair is within the bounds of the grid.
     pub fn is_teff_logg_between_bounds(&self, teff: f64, logg: f64) -> bool {
         match self.teff.get_right_index(teff) {
             Ok(i) => {
@@ -279,10 +304,13 @@ impl Grid {
         }
     }
 
+    /// Check if the given M value is within the bounds of the grid
     pub fn is_m_between_bounds(&self, m: f64) -> bool {
         m >= self.m.values[0] && m <= *self.m.values.last().unwrap()
     }
 
+    /// Get the index limits in logg at a certain teff.
+    /// logg gridpoints exist both left and right of the teff value between the returned limits.
     pub fn get_logg_index_limits_at(&self, teff: f64) -> Result<(usize, usize)> {
         match self.teff.get_right_index(teff) {
             Ok(i) => {
@@ -305,6 +333,8 @@ impl Grid {
         }
     }
 
+    /// Get the index limits in teff at a certain logg.
+    /// teff gridpoints exist both left and right of the logg value between the returned limits.
     pub fn get_teff_index_limits_at(&self, logg: f64) -> Result<(usize, usize)> {
         let min_index = self
             .logg_limits
@@ -326,6 +356,7 @@ impl Grid {
         Ok((min_index, max_index))
     }
 
+    /// Get the grid of neighboring gridpoints for a certain Teff, M, logg.
     pub fn get_local_grid(&self, teff: f64, m: f64, logg: f64) -> Result<LocalGrid> {
         if !self.is_teff_logg_between_bounds(teff, logg) {
             bail!("Teff, logg out of bounds ({}, {})", teff, logg);
@@ -436,9 +467,13 @@ impl Grid {
         })
     }
 
-    pub fn clamp_1d(&self, param: na::SVector<f64, 3>, index: usize) -> Result<f64> {
-        let limits = self.get_limits_at(param, index)?;
-        Ok(param[index].clamp(limits.0, limits.1))
+    /// Clamp a parameter tuple (Teff, M, logg) to the grid bounds along one dimension.
+    /// index: 0 for Teff, 1 for M, 2 for logg
+    /// It is required that a point inside the gridpoints can be found,
+    /// only by changing the parameter value in the given dimension.
+    pub fn clamp_1d(&self, param: na::SVector<f64, 3>, dimension: usize) -> Result<f64> {
+        let limits = self.get_limits_at(param, dimension)?;
+        Ok(param[dimension].clamp(limits.0, limits.1))
     }
 }
 
@@ -485,11 +520,14 @@ impl GridBounds for Grid {
 
 #[derive(Clone, Copy, Debug)]
 pub enum WlGrid {
-    Linspace(f64, f64, usize), // first, step, total
-    Logspace(f64, f64, usize), // log10(first), step log10, total
+    // first, step, total
+    Linspace(f64, f64, usize),
+    // log10(first), step log10, total
+    Logspace(f64, f64, usize),
 }
 
 impl WlGrid {
+    /// Number of pixels.
     pub fn n(&self) -> usize {
         match self {
             WlGrid::Linspace(_, _, n) => *n,
@@ -497,6 +535,7 @@ impl WlGrid {
         }
     }
 
+    /// Get first and last wavelength value.
     pub fn get_first_and_last(&self) -> (f64, f64) {
         match self {
             WlGrid::Linspace(first, step, total) => (*first, *first + step * *total as f64),
@@ -507,6 +546,8 @@ impl WlGrid {
         }
     }
 
+    /// Get the index of a wavelength in the grid as a float.
+    /// i.e. the wavelength falls between indices floor(result) and ceil(result).
     pub fn get_float_index_of_wl(&self, wl: f64) -> f64 {
         match self {
             WlGrid::Linspace(first, step, _) => (wl - first) / step,
@@ -514,6 +555,7 @@ impl WlGrid {
         }
     }
 
+    /// Get an iterator over pixels.
     pub fn iterate(&self) -> Box<dyn Iterator<Item = f64> + '_> {
         match self {
             WlGrid::Linspace(first, step, total) => {
@@ -667,9 +709,11 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
     fn grid_bounds(&self) -> Self::GB {
         self.fetcher.grid().clone()
     }
+
     fn synth_wl(&self) -> WlGrid {
         self.synth_wl
     }
+
     fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<na::DVector<FluxFloat>> {
         let local_grid = self.grid().get_local_grid(teff, m, logg)?;
 
@@ -762,7 +806,7 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         let model = target_dispersion
             .convolve(convolved_for_rotation)
             .context("Error during instrument resolution convolution")?;
-        let output = shift_and_resample(&model, &self.synth_wl, target_dispersion.wavelength(), rv)
+        let output = shift_and_resample(&self.synth_wl, &model, target_dispersion.wavelength(), rv)
             .context("error during RV shifting / resampling")?;
 
         Ok(output)
@@ -812,7 +856,7 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         let model = target_dispersion
             .convolve(convolved_for_rotation)
             .context("Error during instrument resolution convolution")?;
-        let output = shift_and_resample(&model, &self.synth_wl, target_dispersion.wavelength(), rv)
+        let output = shift_and_resample(&self.synth_wl, &model, target_dispersion.wavelength(), rv)
             .context("error during RV shifting / resampling")?;
 
         Ok(output)
