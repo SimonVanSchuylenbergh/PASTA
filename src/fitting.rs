@@ -3,7 +3,7 @@ use crate::continuum_fitting::ContinuumFitter;
 use crate::convolve_rv::{shift_and_resample, WavelengthDispersion};
 use crate::interpolate::{FluxFloat, Interpolator, WlGrid};
 use crate::particleswarm::{self};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use argmin::core::observers::{Observe, ObserverMode};
 use argmin::core::{CostFunction as _, Executor, PopulationState, State, KV};
 use argmin::solver::brent::BrentRoot;
@@ -25,6 +25,9 @@ impl ObservedSpectrum {
     pub fn from_vecs(flux: Vec<FluxFloat>, var: Vec<FluxFloat>) -> Self {
         let flux = na::DVector::from_vec(flux);
         let var = na::DVector::from_vec(var);
+        if flux.len() != var.len() {
+            panic!("Flux and variance vectors must have the same length");
+        }
         Self { flux, var }
     }
 }
@@ -408,6 +411,9 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> SingleFitter<T, F> {
         trace_directory: Option<String>,
         parallelize: bool,
     ) -> Result<OptimizationResult> {
+        if observed_spectrum.flux.len() != self.target_dispersion.wavelength().len() {
+            bail!("Observed spectrum and target dispersion must have the same length");
+        }
         let cost_function = CostFunction {
             interpolator,
             target_dispersion: &self.target_dispersion,
@@ -468,6 +474,9 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> SingleFitter<T, F> {
         observed_spectrum: &ObservedSpectrum,
         labels: na::SVector<f64, 5>,
     ) -> Result<f64> {
+        if observed_spectrum.flux.len() != self.target_dispersion.wavelength().len() {
+            bail!("Observed spectrum and target dispersion must have the same length");
+        }
         let cost_function = CostFunction {
             interpolator,
             target_dispersion: &self.target_dispersion,
@@ -489,6 +498,9 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> SingleFitter<T, F> {
         label: Label<f64>,
         search_radius: Label<f64>,
     ) -> Result<Label<(Result<f64>, Result<f64>)>> {
+        if observed_spectrum.flux.len() != self.target_dispersion.wavelength().len() {
+            bail!("Observed spectrum and target dispersion must have the same length");
+        }
         let mut search_radius = search_radius.as_vector();
         let label = label.as_vector();
         search_radius[0] *= label[0];

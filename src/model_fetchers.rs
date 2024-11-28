@@ -39,6 +39,9 @@ pub fn read_spectrum(
         let bytes1 = result[0].to_le_bytes();
         let bytes2 = result[1].to_le_bytes();
         let factor = f32::from_le_bytes([bytes1[0], bytes1[1], bytes2[0], bytes2[1]]);
+        if factor < 0.0 {
+            bail!("Negative factor: {}", factor);
+        }
         Ok((
             na::DVector::from_iterator(result.len() - 2, result.into_iter().skip(2)),
             Some(factor),

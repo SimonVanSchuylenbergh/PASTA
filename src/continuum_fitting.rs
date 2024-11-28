@@ -1,9 +1,9 @@
+use crate::fitting::ObservedSpectrum;
 use crate::interpolate::FluxFloat;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use enum_dispatch::enum_dispatch;
 use nalgebra as na;
 use num_traits::Float;
-use crate::fitting::ObservedSpectrum;
 
 /// The function that is used to fit against the pseudo continuum must implement this trait
 #[enum_dispatch]
@@ -71,6 +71,13 @@ impl ContinuumFitter for LinearModelFitter {
         synthetic_spectrum: &na::DVector<FluxFloat>,
     ) -> Result<(na::DVector<FluxFloat>, f64)> {
         let epsilon = 1e-14;
+        if observed_spectrum.flux.len() != synthetic_spectrum.len() {
+            return Err(anyhow!(
+                "Length of observed and synthetic spectrum are different {:?}, {:?}",
+                observed_spectrum.flux.len(),
+                synthetic_spectrum.len()
+            ));
+        }
         let b = observed_spectrum.flux.component_div(synthetic_spectrum);
         let solution = self.solve(&b, epsilon).map_err(|err| anyhow!(err))?;
 
@@ -196,7 +203,12 @@ impl ChunkFitter {
     pub fn build_continuum_from_chunks(
         &self,
         pfits: Vec<na::DVector<FluxFloat>>,
-    ) -> na::DVector<FluxFloat> {
+    ) -> Result<na::DVector<FluxFloat>> {
+        if !(pfits.len() != self.design_matrices.len())
+            || !pfits.iter().all(|p| p.len() == self.p_order + 1)
+        {
+            bail!("Incorrect number of parameters");
+        }
         let polynomials: Vec<na::DVector<FluxFloat>> = self
             .design_matrices
             .iter()
@@ -233,17 +245,24 @@ impl ChunkFitter {
                 + p.component_mul(&fac.map(|x| 1.0 - x));
             continuum.rows_mut(start, stop - start).copy_from(&new);
         }
-        continuum
+        Ok(continuum)
     }
     pub fn fit_and_return_continuum(
         &self,
         observed_spectrum: &ObservedSpectrum,
         synthetic_spectrum: &na::DVector<FluxFloat>,
-    ) -> (Vec<na::DVector<FluxFloat>>, na::DVector<FluxFloat>) {
+    ) -> Result<(Vec<na::DVector<FluxFloat>>, na::DVector<FluxFloat>)> {
+        if !observed_spectrum.flux.len() == synthetic_spectrum.len() {
+            bail!(
+                "Length of observed and synthetic spectrum are different {:?}, {:?}",
+                observed_spectrum.flux.len(),
+                synthetic_spectrum.len()
+            );
+        }
         let y = &observed_spectrum.flux.component_div(synthetic_spectrum);
         let pfits = self._fit_chunks(y);
-        let continuum = self.build_continuum_from_chunks(pfits.clone());
-        (pfits, continuum)
+        let continuum = self.build_continuum_from_chunks(pfits.clone())?;
+        Ok((pfits, continuum))
     }
 }
 
@@ -255,7 +274,7 @@ impl ContinuumFitter for ChunkFitter {
     ) -> Result<(na::DVector<FluxFloat>, f64)> {
         let flux = &observed_spectrum.flux;
         let var = &observed_spectrum.var;
-        let (pfits, cont) = self.fit_and_return_continuum(observed_spectrum, synthetic_spectrum);
+        let (pfits, cont) = self.fit_and_return_continuum(observed_spectrum, synthetic_spectrum)?;
         let fit = synthetic_spectrum.component_mul(&cont);
         let params = na::DVector::from_iterator(
             pfits.len() * (self.p_order + 1),
@@ -271,13 +290,20 @@ impl ContinuumFitter for ChunkFitter {
     }
 
     fn build_continuum(&self, params: &na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>> {
+        if !(params.len() == self.n_chunks * (self.p_order + 1)) {
+            bail!(
+                "Incorrect number of continuum parameters: {}, expected: {}",
+                params.len(),
+                self.n_chunks * (self.p_order + 1)
+            );
+        }
         let pfits: Vec<na::DVector<FluxFloat>> = params
             .data
             .as_vec()
             .chunks(self.p_order + 1)
             .map(na::DVector::from_row_slice)
             .collect();
-        Ok(self.build_continuum_from_chunks(pfits))
+        self.build_continuum_from_chunks(pfits)
     }
 
     fn fit_continuum_and_return_continuum(
@@ -285,7 +311,7 @@ impl ContinuumFitter for ChunkFitter {
         observed_spectrum: &ObservedSpectrum,
         synthetic_spectrum: &na::DVector<FluxFloat>,
     ) -> Result<na::DVector<FluxFloat>> {
-        let (_, fit) = self.fit_and_return_continuum(observed_spectrum, synthetic_spectrum);
+        let (_, fit) = self.fit_and_return_continuum(observed_spectrum, synthetic_spectrum)?;
         Ok(fit)
     }
 }

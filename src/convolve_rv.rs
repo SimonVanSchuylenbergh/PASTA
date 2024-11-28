@@ -316,7 +316,7 @@ pub fn convolve_rotation(
     }
     if input_wl.n() != input_flux.len() {
         return Err(anyhow!(
-            "Length of input_array and wavelength grid don't match. input_array: {:?}, synth_wl: {:?}",
+            "Length of model and wavelength grid don't match. model: {:?}, synth_wl: {:?}",
             input_flux.len(),
             input_wl.n()
         ));

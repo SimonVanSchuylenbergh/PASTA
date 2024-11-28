@@ -339,7 +339,7 @@ impl PyWavelengthDispersion {
     /// Convolve every model spectrum in a directory with the dispersion kernel
     /// Filenames will be kept the same.
     /// The wavelength grid of the models in `input_directory`` is specified by `input_wavelength`.
-    /// `includes_factor` specifies whether the max value of the spectrum is included in the file,
+    /// `includes_factor` specifies whether a factor to multiply the spectrum with is included in the file,
     /// i.e. whether this represents a normalized or unnormalized model.
     pub fn convolve_and_resample_directory(
         &self,
