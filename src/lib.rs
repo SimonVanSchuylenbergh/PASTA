@@ -355,8 +355,15 @@ pub struct PyWavelengthDispersion(WavelengthDispersionWrapper);
 #[pymethods]
 impl PyWavelengthDispersion {
     /// Convolve a spectrum with the dispersion kernel.
-    pub fn convolve(&self, flux: Vec<FluxFloat>) -> PyResult<Vec<FluxFloat>> {
-        Ok(self.0.convolve(na::DVector::from_vec(flux))?.data.into())
+    pub fn convolve<'a>(
+        &self,
+        py: Python<'a>,
+        flux: Vec<FluxFloat>,
+    ) -> PyResult<Bound<'a, PyArray<FluxFloat, Ix1>>> {
+        Ok(PyArray::from_vec_bound(
+            py,
+            self.0.convolve(na::DVector::from_vec(flux))?.data.into(),
+        ))
     }
 
     /// Get the wavelength grid.
@@ -518,50 +525,53 @@ impl PyContinuumFitter {
     /// Fit the pseudo continuum given a model spec and an observed spec.
     /// i.e. fit the function to `observed` / `model`.
     /// Returns the fitted parameters of the continuum function and the chi2 value.
-    fn fit_continuum(
+    fn fit_continuum<'a>(
         &self,
+        py: Python<'a>,
         model: Vec<FluxFloat>,
         observed: Vec<FluxFloat>,
         observed_var: Vec<FluxFloat>,
-    ) -> PyResult<(Vec<FluxFloat>, f64)> {
+    ) -> PyResult<(Bound<'a, PyArray<FluxFloat, Ix1>>, f64)> {
         let observed_spectrum = ObservedSpectrum::from_vecs(observed, observed_var);
         let (params, ls) = self
             .0
             .fit_continuum(&observed_spectrum, &na::DVector::from_vec(model))?;
-        Ok((params.data.into(), ls))
+        Ok((PyArray::from_vec_bound(py, params.data.into()), ls))
     }
 
     /// Fit the pseudo continuum given a model spec and an observed spec,
     /// and return the fitted continuum function itself instead of its parameters.
-    fn fit_and_return_continuum(
+    fn fit_and_return_continuum<'a>(
         &self,
+        py: Python<'a>,
         synth: Vec<FluxFloat>,
         observed: Vec<FluxFloat>,
         observed_var: Vec<FluxFloat>,
-    ) -> PyResult<Vec<FluxFloat>> {
+    ) -> PyResult<Bound<'a, PyArray<FluxFloat, Ix1>>> {
         let observed_spectrum = ObservedSpectrum::from_vecs(observed, observed_var);
         let result = self.0.fit_continuum_and_return_continuum(
             &observed_spectrum,
             &na::DVector::from_vec(synth),
         )?;
-        Ok(result.data.into())
+        Ok(PyArray::from_vec_bound(py, result.data.into()))
     }
 
     /// Fit the pseudo continuum given a model spec and an observed spec,
     /// and return the normalized observed spectrum.
-    fn fit_continuum_and_return_normalized_spec(
+    fn fit_continuum_and_return_normalized_spec<'a>(
         &self,
+        py: Python<'a>,
         synth: Vec<FluxFloat>,
         observed: Vec<FluxFloat>,
         observed_var: Vec<FluxFloat>,
-    ) -> PyResult<Vec<FluxFloat>> {
+    ) -> PyResult<Bound<'a, PyArray<FluxFloat, Ix1>>> {
         let observed_spectrum = ObservedSpectrum::from_vecs(observed, observed_var);
         let continuum = self.0.fit_continuum_and_return_continuum(
             &observed_spectrum,
             &na::DVector::from_vec(synth),
         )?;
         let result = observed_spectrum.flux.component_div(&continuum);
-        Ok(result.data.into())
+        Ok(PyArray::from_vec_bound(py, result.data.into()))
     }
 
     /// Fit the pseudo continuum given a model spec and an observed spec,
@@ -580,12 +590,18 @@ impl PyContinuumFitter {
     }
 
     /// Construct the continuum function from its parameters.
-    fn build_continuum(&self, params: Vec<FluxFloat>) -> PyResult<Vec<FluxFloat>> {
-        Ok(self
-            .0
-            .build_continuum(&na::DVector::from_vec(params))?
-            .data
-            .into())
+    fn build_continuum<'a>(
+        &self,
+        py: Python<'a>,
+        params: Vec<FluxFloat>,
+    ) -> PyResult<Bound<'a, PyArray<FluxFloat, Ix1>>> {
+        Ok(PyArray::from_vec_bound(
+            py,
+            self.0
+                .build_continuum(&na::DVector::from_vec(params))?
+                .data
+                .into(),
+        ))
     }
 }
 
@@ -740,26 +756,36 @@ macro_rules! implement_methods {
 
             /// Produce a model directly from a grid model (without interpolating).
             /// Throws an error if (teff, m, logg) is not in the grid.
-            pub fn produce_model_on_grid(
+            pub fn produce_model_on_grid<'a>(
                 &self,
+                py: Python<'a>,
                 dispersion: PyWavelengthDispersion,
                 teff: f64,
                 mh: f64,
                 logg: f64,
                 vsini: f64,
                 rv: f64,
-            ) -> PyResult<Vec<FluxFloat>> {
+            ) -> PyResult<Bound<'a, PyArray<FluxFloat, Ix1>>> {
                 let out = self
                     .0
                     .produce_model_on_grid(&dispersion.0, teff, mh, logg, vsini, rv)?;
-                Ok(out.data.into())
+                Ok(PyArray::from_vec_bound(py, out.data.into()))
             }
 
             /// Interpolate in grid.
             /// Doesn't do convoluton, shifting and resampling.
-            pub fn interpolate(&self, teff: f64, m: f64, logg: f64) -> PyResult<Vec<FluxFloat>> {
+            pub fn interpolate<'a>(
+                &self,
+                py: Python<'a>,
+                teff: f64,
+                m: f64,
+                logg: f64,
+            ) -> PyResult<Bound<'a, PyArray<FluxFloat, Ix1>>> {
                 let interpolated = self.0.interpolate(teff, m, logg)?;
-                Ok(interpolated.iter().copied().collect())
+                Ok(PyArray::from_vec_bound(
+                    py,
+                    interpolated.iter().copied().collect(),
+                ))
             }
 
             /// Get a `SingleFitter` object, used to fit spectra of single stars with the PSO algorithm.
@@ -820,14 +846,15 @@ macro_rules! implement_methods {
             /// Fit a continuum to an observed spectrum and model,
             /// as given by the labels (Teff, [M/H], logg, vsini, RV).
             /// Return the continuum.
-            pub fn fit_continuum(
+            pub fn fit_continuum<'a>(
                 &self,
+                py: Python<'a>,
                 fitter: PyContinuumFitter,
                 dispersion: PyWavelengthDispersion,
                 observed_flux: Vec<FluxFloat>,
                 observed_var: Vec<FluxFloat>,
                 label: [f64; 5],
-            ) -> PyResult<Vec<FluxFloat>> {
+            ) -> PyResult<Bound<'a, PyArray<FluxFloat, Ix1>>> {
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
                 let synth = self.0.produce_model(
                     &dispersion.0,
@@ -837,25 +864,29 @@ macro_rules! implement_methods {
                     label[2],
                     label[4],
                 )?;
-                Ok(fitter
-                    .0
-                    .fit_continuum_and_return_continuum(&observed_spectrum, &synth)?
-                    .iter()
-                    .copied()
-                    .collect())
+                Ok(PyArray::from_vec_bound(
+                    py,
+                    fitter
+                        .0
+                        .fit_continuum_and_return_continuum(&observed_spectrum, &synth)?
+                        .iter()
+                        .copied()
+                        .collect(),
+                ))
             }
 
             /// Fit the continuum for an observed spectrum and model,
             /// as given by the labels (Teff, [M/H], logg, vsini, RV).
             /// Return the parameters of the fit function.
-            pub fn fit_continuum_and_return_model(
+            pub fn fit_continuum_and_return_model<'a>(
                 &self,
+                py: Python<'a>,
                 fitter: PyContinuumFitter,
                 dispersion: PyWavelengthDispersion,
                 observed_flux: Vec<FluxFloat>,
                 observed_var: Vec<FluxFloat>,
                 label: [f64; 5],
-            ) -> PyResult<Vec<FluxFloat>> {
+            ) -> PyResult<Bound<'a, PyArray<FluxFloat, Ix1>>> {
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
                 let synth = self.0.produce_model(
                     &dispersion.0,
@@ -865,12 +896,15 @@ macro_rules! implement_methods {
                     label[3],
                     label[4],
                 )?;
-                Ok(fitter
-                    .0
-                    .fit_continuum_and_return_fit(&observed_spectrum, &synth)?
-                    .iter()
-                    .copied()
-                    .collect())
+                Ok(PyArray::from_vec_bound(
+                    py,
+                    fitter
+                        .0
+                        .fit_continuum_and_return_fit(&observed_spectrum, &synth)?
+                        .iter()
+                        .copied()
+                        .collect(),
+                ))
             }
 
             /// Compute the chi2 value at a given set of labels for multiple spectra.
