@@ -1027,16 +1027,25 @@ macro_rules! implement_methods {
                 observed_var: PyArrayLike<FluxFloat, Ix1>,
                 trace_directory: Option<String>,
                 parallelize: Option<bool>,
+                constraints: Option<Vec<PyConstraintWrapper>>,
             ) -> PyResult<OptimizationResult> {
                 let observed_spectrum = ObservedSpectrum {
                     flux: observed_flux.as_matrix().column(0).into_owned(),
                     var: observed_var.as_matrix().column(0).into_owned(),
+                };
+                let constraints = match constraints {
+                    Some(constraints) => constraints
+                        .into_iter()
+                        .map(|constraint| constraint.0)
+                        .collect(),
+                    None => vec![],
                 };
                 let result = self.0.fit(
                     &interpolator.0,
                     &observed_spectrum.into(),
                     trace_directory,
                     parallelize.unwrap_or(true),
+                    constraints,
                 )?;
                 Ok(result.into())
             }
@@ -1048,15 +1057,27 @@ macro_rules! implement_methods {
                 interpolator: &$name,
                 observed_fluxes: Vec<Vec<FluxFloat>>,
                 observed_vars: Vec<Vec<FluxFloat>>,
+                constraints: Option<Vec<PyConstraintWrapper>>,
             ) -> PyResult<Vec<OptimizationResult>> {
+                let constraints = match constraints {
+                    Some(constraints) => constraints
+                        .into_iter()
+                        .map(|constraint| constraint.0)
+                        .collect(),
+                    None => vec![],
+                };
                 Ok(observed_fluxes
                     .into_par_iter()
                     .zip(observed_vars)
                     .map(|(flux, var)| {
                         let observed_spectrum = ObservedSpectrum::from_vecs(flux, var);
-                        let result =
-                            self.0
-                                .fit(&interpolator.0, &observed_spectrum.into(), None, false);
+                        let result = self.0.fit(
+                            &interpolator.0,
+                            &observed_spectrum.into(),
+                            None,
+                            false,
+                            constraints.clone(),
+                        );
                         result.unwrap().into()
                     })
                     .collect::<Vec<_>>())

@@ -410,6 +410,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> SingleFitter<T, F> {
         observed_spectrum: &ObservedSpectrum,
         trace_directory: Option<String>,
         parallelize: bool,
+        constraints: Vec<BoundsConstraint>,
     ) -> Result<OptimizationResult> {
         if observed_spectrum.flux.len() != self.target_dispersion.wavelength().len() {
             bail!("Observed spectrum and target dispersion must have the same length");
@@ -421,7 +422,8 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> SingleFitter<T, F> {
             continuum_fitter: &self.continuum_fitter,
             parallelize,
         };
-        let bounds = SingleBounds::new(interpolator.grid_bounds(), self.vsini_range, self.rv_range);
+        let bounds = SingleBounds::new(interpolator.grid_bounds(), self.vsini_range, self.rv_range)
+            .with_constraints(constraints);
         let solver = setup_pso(bounds, self.settings.clone());
         let fitter = Executor::new(cost_function, solver)
             .configure(|state| state.max_iters(self.settings.max_iters));
