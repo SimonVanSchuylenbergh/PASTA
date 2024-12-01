@@ -788,6 +788,24 @@ macro_rules! implement_methods {
                 ))
             }
 
+            pub fn interpolate_and_convolve<'a>(
+                &self,
+                py: Python<'a>,
+                dispersion: PyWavelengthDispersion,
+                teff: f64,
+                m: f64,
+                logg: f64,
+                vsini: f64,
+            ) -> PyResult<Bound<'a, PyArray<FluxFloat, Ix1>>> {
+                let interpolated =
+                    self.0
+                        .interpolate_and_convolve(&dispersion.0, teff, m, logg, vsini)?;
+                Ok(PyArray::from_vec_bound(
+                    py,
+                    interpolated.iter().copied().collect(),
+                ))
+            }
+
             /// Get a `SingleFitter` object, used to fit spectra of single stars with the PSO algorithm.
             pub fn get_fitter(
                 &self,
