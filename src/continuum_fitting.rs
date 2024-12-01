@@ -7,7 +7,7 @@ use num_traits::Float;
 
 /// The function that is used to fit against the pseudo continuum must implement this trait
 #[enum_dispatch]
-pub trait ContinuumFitter: Send + Sync {
+pub trait ContinuumFitter: Send + Sync + Clone {
     /// Fit the continuum and return the parameters of the continuum and the chi2 value
     fn fit_continuum(
         &self,

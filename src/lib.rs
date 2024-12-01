@@ -29,6 +29,7 @@ use nalgebra::Storage;
 use npy::to_file;
 use numpy::array::PyArray;
 use numpy::{Ix1, Ix2, PyArrayLike};
+use pyo3::exceptions::PyValueError;
 use pyo3::types::PyDict;
 use pyo3::{prelude::*, pyclass};
 use rayon::prelude::*;
@@ -847,16 +848,16 @@ macro_rules! implement_methods {
             pub fn get_binary_rv_fitter(
                 &self,
                 dispersion: PyWavelengthDispersion,
+                synth_wl: WlGrid,
                 continuum_fitter: PyContinuumFitter,
                 settings: PSOSettings,
-                vsini_range: (f64, f64),
                 rv_range: (f64, f64),
-            ) -> $PyBinaryFitter {
-                $PyBinaryFitter(BinaryFitter::new(
-                    dispersion.0,
+            ) -> $PyRVFitter {
+                $PyRVFitter(BinaryRVFitter::new(
+                    dispersion.0.wavelength().clone(),
+                    synth_wl.0,
                     continuum_fitter.0,
                     settings.into(),
-                    vsini_range,
                     rv_range,
                 ))
             }
@@ -1307,12 +1308,12 @@ macro_rules! implement_methods {
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
                 Ok(labels
                     .into_par_iter()
-                    .map(|labels| {
+                    .map(|label| {
                         let chi = self.0.chi2(
                             &interpolator.0,
                             &continuum_interpolator.0,
                             &observed_spectrum,
-                            labels.into(),
+                            label.into(),
                         );
                         match allow_nan {
                             Some(false) => chi.unwrap(),
@@ -1338,7 +1339,6 @@ macro_rules! implement_methods {
                 continuum1: Vec<FluxFloat>,
                 continuum2: Vec<FluxFloat>,
                 light_ratio: f64,
-                synth_wl: WlGrid,
                 observed_flux: Vec<FluxFloat>,
                 observed_var: Vec<FluxFloat>,
                 trace_directory: Option<String>,
@@ -1358,12 +1358,51 @@ macro_rules! implement_methods {
                     &continuum1.into(),
                     &continuum2.into(),
                     light_ratio,
-                    &synth_wl.0,
                     &observed_spectrum,
                     trace_directory,
                     constraints,
                 );
                 Ok(result?.into())
+            }
+
+            pub fn chi2(
+                &self,
+                model1: Vec<FluxFloat>,
+                model2: Vec<FluxFloat>,
+                continuum1: Vec<FluxFloat>,
+                continuum2: Vec<FluxFloat>,
+                light_ratio: f64,
+                observed_flux: Vec<FluxFloat>,
+                observed_var: Vec<FluxFloat>,
+                labels: Vec<[f64; 2]>,
+                allow_nan: Option<bool>,
+            ) -> PyResult<Vec<f64>> {
+                let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
+                let model1 = na::DVector::from_vec(model1);
+                let model2 = na::DVector::from_vec(model2);
+                let continuum1 = na::DVector::from_vec(continuum1);
+                let continuum2 = na::DVector::from_vec(continuum2);
+                Ok(labels
+                    .into_par_iter()
+                    .map(|label| {
+                        let chi = self.0.chi2(
+                            &model1,
+                            &model2,
+                            &continuum1,
+                            &continuum2,
+                            light_ratio,
+                            &observed_spectrum,
+                            label.into(),
+                        );
+                        match allow_nan {
+                            Some(false) => chi.unwrap(),
+                            _ => match chi {
+                                Ok(x) => x,
+                                Err(_) => f64::NAN,
+                            },
+                        }
+                    })
+                    .collect())
             }
         }
     };

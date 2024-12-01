@@ -734,6 +734,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
     }
 }
 
+#[derive(Clone)]
 struct RVCostFunction<'a, F: ContinuumFitter> {
     continuum_fitter: &'a F,
     observed_wl: &'a na::DVector<f64>,
@@ -773,6 +774,127 @@ impl<'a, F: ContinuumFitter> argmin::core::CostFunction for RVCostFunction<'a, F
             .continuum_fitter
             .fit_continuum(self.observed_spectrum, &synth_spec_norm)?;
         Ok(ls)
+    }
+
+    fn parallelize(&self) -> bool {
+        false
+    }
+}
+
+pub struct BinaryRVFitter<F: ContinuumFitter> {
+    observed_wl: na::DVector<f64>,
+    synth_wl: WlGrid,
+    continuum_fitter: F,
+    settings: PSOSettings,
+    rv_range: (f64, f64),
+}
+
+impl<F: ContinuumFitter> BinaryRVFitter<F> {
+    pub fn new(
+        observed_wl: na::DVector<f64>,
+        synth_wl: WlGrid,
+        continuum_fitter: F,
+        settings: PSOSettings,
+        rv_range: (f64, f64),
+    ) -> Self {
+        Self {
+            observed_wl,
+            synth_wl,
+            continuum_fitter,
+            settings,
+            rv_range,
+        }
+    }
+
+    pub fn fit(
+        &self,
+        model1: &na::DVector<FluxFloat>,
+        model2: &na::DVector<FluxFloat>,
+        continuum1: &na::DVector<FluxFloat>,
+        continuum2: &na::DVector<FluxFloat>,
+        light_ratio: f64,
+        observed_spectrum: &ObservedSpectrum,
+        trace_directory: Option<String>,
+        constraints: Vec<BoundsConstraint>,
+    ) -> Result<BinaryRVOptimizationResult> {
+        let cost_function = RVCostFunction {
+            observed_wl: &self.observed_wl,
+            observed_spectrum,
+            continuum_fitter: &self.continuum_fitter,
+            model1,
+            model2,
+            continuum1,
+            continuum2,
+            light_ratio,
+            synth_wl: &self.synth_wl,
+        };
+        let bounds = BinaryRVBounds::new(self.rv_range).with_constraints(constraints);
+        let solver = setup_pso(bounds, self.settings.clone());
+        let fitter = Executor::new(cost_function.clone(), solver)
+            .configure(|state| state.max_iters(self.settings.max_iters));
+
+        let result = if let Some(dir) = trace_directory {
+            let observer = PSObserver::new(&dir, "iteration");
+            fitter.add_observer(observer, ObserverMode::Always).run()?
+        } else {
+            fitter.run()?
+        };
+
+        let time = match result.state.time {
+            Some(t) => t.as_secs_f64(),
+            None => 0.0,
+        };
+        let best_param = result
+            .state
+            .best_individual
+            .ok_or(anyhow!("No best parameter found"))?
+            .position;
+        let chi2 = result.state.best_cost;
+        let rv1 = best_param[0];
+        let rv2 = best_param[1];
+        let chi_swapped = cost_function.cost(&na::Vector2::new(rv2, rv1))?;
+        if chi_swapped < chi2 {
+            Ok(BinaryRVOptimizationResult {
+                rv1,
+                rv2,
+                chi2: chi_swapped,
+                time,
+                iters: result.state.iter,
+            })
+        } else {
+            Ok(BinaryRVOptimizationResult {
+                rv1,
+                rv2,
+                chi2,
+                time,
+                iters: result.state.iter,
+            })
+        }
+    }
+
+    pub fn chi2(
+        &self,
+        model1: &na::DVector<FluxFloat>,
+        model2: &na::DVector<FluxFloat>,
+        continuum1: &na::DVector<FluxFloat>,
+        continuum2: &na::DVector<FluxFloat>,
+        light_ratio: f64,
+        observed_spectrum: &ObservedSpectrum,
+        labels: na::SVector<f64, 2>,
+    ) -> Result<f64> {
+        let cost_function = RVCostFunction {
+            observed_wl: &self.observed_wl,
+            observed_spectrum,
+            continuum_fitter: &self.continuum_fitter,
+            model1,
+            model2,
+            continuum1,
+            continuum2,
+            light_ratio,
+            synth_wl: &self.synth_wl,
+        };
+
+        cost_function.cost(&labels)
     }
 }
 
@@ -862,85 +984,5 @@ impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter, B: PSOBou
 
     fn parallelize(&self) -> bool {
         self.parallelize
-    }
-}
-
-pub struct BinaryRVFitter<F: ContinuumFitter> {
-    observed_wl: na::DVector<f64>,
-    continuum_fitter: F,
-    settings: PSOSettings,
-    rv_range: (f64, f64),
-}
-
-impl<F: ContinuumFitter> BinaryRVFitter<F> {
-    pub fn new(
-        observed_wl: na::DVector<f64>,
-        continuum_fitter: F,
-        settings: PSOSettings,
-        rv_range: (f64, f64),
-    ) -> Self {
-        Self {
-            observed_wl,
-            continuum_fitter,
-            settings,
-            rv_range,
-        }
-    }
-
-    pub fn fit(
-        &self,
-        model1: &na::DVector<FluxFloat>,
-        model2: &na::DVector<FluxFloat>,
-        continuum1: &na::DVector<FluxFloat>,
-        continuum2: &na::DVector<FluxFloat>,
-        light_ratio: f64,
-        synth_wl: &WlGrid,
-        observed_spectrum: &ObservedSpectrum,
-        trace_directory: Option<String>,
-        constraints: Vec<BoundsConstraint>,
-    ) -> Result<BinaryRVOptimizationResult> {
-        let cost_function = RVCostFunction {
-            observed_wl: &self.observed_wl,
-            observed_spectrum,
-            continuum_fitter: &self.continuum_fitter,
-            model1,
-            model2,
-            continuum1,
-            continuum2,
-            light_ratio,
-            synth_wl,
-        };
-        let bounds = BinaryRVBounds::new(self.rv_range).with_constraints(constraints);
-        let solver = setup_pso(bounds, self.settings.clone());
-        let fitter = Executor::new(cost_function, solver)
-            .configure(|state| state.max_iters(self.settings.max_iters));
-
-        let result = if let Some(dir) = trace_directory {
-            let observer = PSObserver::new(&dir, "iteration");
-            fitter.add_observer(observer, ObserverMode::Always).run()?
-        } else {
-            fitter.run()?
-        };
-
-        let best_param = result
-            .state
-            .best_individual
-            .ok_or(anyhow!("No best parameter found"))?
-            .position;
-
-        let rv1 = best_param[0];
-        let rv2 = best_param[1];
-
-        let time = match result.state.time {
-            Some(t) => t.as_secs_f64(),
-            None => 0.0,
-        };
-        Ok(BinaryRVOptimizationResult {
-            rv1,
-            rv2,
-            chi2: result.state.best_cost,
-            time,
-            iters: result.state.iter,
-        })
     }
 }
