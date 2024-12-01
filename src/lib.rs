@@ -950,6 +950,39 @@ macro_rules! implement_methods {
                     .collect())
             }
 
+            pub fn ccf<'a>(
+                &self,
+                py: Python<'a>,
+                vs: Vec<f64>,
+                teff: f64,
+                m: f64,
+                logg: f64,
+                dispersion: &PyWavelengthDispersion,
+                observed_flux: Vec<FluxFloat>,
+            ) -> PyResult<Bound<'a, PyArray<FluxFloat, Ix1>>> {
+                if dispersion.0.wavelength().len() != observed_flux.len() {
+                    return Err(PyValueError::new_err(
+                        "Dispersion and observed flux must have the same length.",
+                    ));
+                }
+                let flux = na::DVector::from_vec(observed_flux);
+                let model_spectrum = self.0.interpolate(teff, m, logg).unwrap();
+                Ok(PyArray::from_vec_bound(
+                    py,
+                    vs.into_par_iter()
+                        .map(|v| {
+                            let shifted = shift_and_resample(
+                                &self.0.synth_wl(),
+                                &model_spectrum,
+                                &dispersion.0.wavelength(),
+                                v,
+                            )?;
+                            Ok(shifted.dot(&flux))
+                        })
+                        .collect::<Result<_>>()?,
+                ))
+            }
+
             /// Clamp a parameter tuple (Teff, M, logg) to the grid bounds along one dimension.
             /// index: 0 for Teff, 1 for M, 2 for logg
             /// It is required that a point inside the gridpoints can be found,
