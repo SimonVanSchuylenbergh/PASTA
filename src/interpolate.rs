@@ -1,4 +1,7 @@
-use crate::convolve_rv::{convolve_rotation, shift_and_resample, WavelengthDispersion};
+use crate::convolve_rv::{
+    convolve_rotation, shift_and_resample, shift_resample_and_add_binary_components,
+    WavelengthDispersion,
+};
 use crate::cubic::{calculate_interpolation_coefficients, LocalGrid};
 use anyhow::{anyhow, bail, Context, Result};
 use itertools::Itertools;
@@ -568,6 +571,14 @@ impl WlGrid {
     }
 }
 
+pub struct BinaryComponents {
+    pub norm_model1: na::DVector<FluxFloat>,
+    pub continuum1: na::DVector<FluxFloat>,
+    pub norm_model2: na::DVector<FluxFloat>,
+    pub continuum2: na::DVector<FluxFloat>,
+    pub lr: f32,
+}
+
 pub trait Interpolator: Send + Sync {
     type GB: GridBounds;
 
@@ -604,8 +615,8 @@ pub trait Interpolator: Send + Sync {
     fn produce_binary_model(
         &self,
         target_dispersion: &impl WavelengthDispersion,
-        star1_parameters: na::SVector<f64, 5>,
-        star2_parameters: na::SVector<f64, 5>,
+        star1_parameters: &na::SVector<f64, 5>,
+        star2_parameters: &na::SVector<f64, 5>,
         light_ratio: f32,
     ) -> Result<na::DVector<FluxFloat>> {
         let model1 = self.produce_model(
@@ -627,6 +638,54 @@ pub trait Interpolator: Send + Sync {
         Ok(model1 * light_ratio + model2 * (1.0 - light_ratio))
     }
 
+    fn produce_binary_components(
+        &self,
+        continuum_interpolator: &impl Interpolator,
+        target_dispersion: &impl WavelengthDispersion,
+        star1_parameters: &na::SVector<f64, 4>,
+        star2_parameters: &na::SVector<f64, 4>,
+        light_ratio: f32,
+    ) -> Result<BinaryComponents> {
+        let norm_model1 = self.interpolate_and_convolve(
+            target_dispersion,
+            star1_parameters[0],
+            star1_parameters[1],
+            star1_parameters[2],
+            star1_parameters[3],
+        )?;
+        let continuum1 = continuum_interpolator.interpolate_and_convolve(
+            target_dispersion,
+            star1_parameters[0],
+            star1_parameters[1],
+            star1_parameters[2],
+            star1_parameters[3],
+        )?;
+
+        let norm_model2 = self.interpolate_and_convolve(
+            target_dispersion,
+            star2_parameters[0],
+            star2_parameters[1],
+            star2_parameters[2],
+            star2_parameters[3],
+        )?;
+        let continuum2 = continuum_interpolator.interpolate_and_convolve(
+            target_dispersion,
+            star2_parameters[0],
+            star2_parameters[1],
+            star2_parameters[2],
+            star2_parameters[3],
+        )?;
+
+        let lr = light_ratio * continuum2.mean() / continuum1.mean();
+        Ok(BinaryComponents {
+            norm_model1,
+            norm_model2,
+            continuum1,
+            continuum2,
+            lr,
+        })
+    }
+
     fn produce_binary_model_norm(
         &self,
         continuum_interpolator: &impl Interpolator,
@@ -635,45 +694,20 @@ pub trait Interpolator: Send + Sync {
         star2_parameters: &na::SVector<f64, 5>,
         light_ratio: f32,
     ) -> Result<na::DVector<FluxFloat>> {
-        let model1 = self.produce_model(
+        let components = self.produce_binary_components(
+            continuum_interpolator,
             target_dispersion,
-            star1_parameters[0],
-            star1_parameters[1],
-            star1_parameters[2],
-            star1_parameters[3],
-            star1_parameters[4],
-        )?;
-        let continuum1 = continuum_interpolator.produce_model(
-            target_dispersion,
-            star1_parameters[0],
-            star1_parameters[1],
-            star1_parameters[2],
-            star1_parameters[3],
-            star1_parameters[4],
+            &star1_parameters.fixed_rows::<4>(0).into_owned(), // Skip RV shift in this stage
+            &star2_parameters.fixed_rows::<4>(0).into_owned(),
+            light_ratio,
         )?;
 
-        let model2 = self.produce_model(
-            target_dispersion,
-            star2_parameters[0],
-            star2_parameters[1],
-            star2_parameters[2],
-            star2_parameters[3],
-            star2_parameters[4],
-        )?;
-        let continuum2 = continuum_interpolator.produce_model(
-            target_dispersion,
-            star2_parameters[0],
-            star2_parameters[1],
-            star2_parameters[2],
-            star2_parameters[3],
-            star2_parameters[4],
-        )?;
-
-        let lr = light_ratio * continuum2.mean() / continuum1.mean();
-
-        let flux = model1.component_mul(&continuum1) * lr + model2.component_mul(&continuum2);
-        let continuum = continuum1 * lr + continuum2;
-        Ok(flux.component_div(&continuum))
+        shift_resample_and_add_binary_components(
+            &self.synth_wl(),
+            &components,
+            target_dispersion.wavelength(),
+            [star1_parameters[4], star2_parameters[4]],
+        )
     }
 }
 

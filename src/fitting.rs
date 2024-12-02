@@ -1,12 +1,17 @@
-use crate::bounds::{BinaryBounds, BinaryRVBounds, BoundsConstraint, PSOBounds, SingleBounds};
+use crate::bounds::{
+    BinaryBounds, BinaryBoundsWithoutRV, BinaryRVBounds, BoundsConstraint, PSOBounds, SingleBounds,
+};
 use crate::continuum_fitting::ContinuumFitter;
-use crate::convolve_rv::{shift_and_resample, WavelengthDispersion};
+use crate::convolve_rv::{
+    shift_and_resample, shift_resample_and_add_binary_components, WavelengthDispersion,
+};
 use crate::interpolate::{FluxFloat, Interpolator, WlGrid};
 use crate::particleswarm::{self};
 use anyhow::{anyhow, bail, Context, Result};
 use argmin::core::observers::{Observe, ObserverMode};
 use argmin::core::{CostFunction as _, Executor, PopulationState, State, KV};
 use argmin::solver::brent::BrentRoot;
+use itertools::Itertools;
 use nalgebra as na;
 use serde::Serialize;
 use std::fs::File;
@@ -78,18 +83,37 @@ impl<S: na::Storage<f64, na::Const<5>, na::Const<1>>> From<na::Vector<f64, na::C
 }
 
 #[derive(Debug)]
-pub struct RvLessLabel {
-    pub teff: f64,
-    pub m: f64,
-    pub logg: f64,
-    pub vsini: f64,
+pub struct RvLessLabel<T> {
+    pub teff: T,
+    pub m: T,
+    pub logg: T,
+    pub vsini: T,
+}
+
+impl<T> RvLessLabel<T> {
+    pub fn as_array(self) -> [T; 4] {
+        [self.teff, self.m, self.logg, self.vsini]
+    }
+}
+
+impl<S: na::Storage<f64, na::Const<4>, na::Const<1>>> From<na::Vector<f64, na::Const<4>, S>>
+    for RvLessLabel<f64>
+{
+    fn from(value: na::Vector<f64, na::Const<4>, S>) -> Self {
+        Self {
+            teff: value[0],
+            m: value[1],
+            logg: value[2],
+            vsini: value[3],
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct OptimizationResult {
     pub label: Label<f64>,
     pub continuum_params: na::DVector<FluxFloat>,
-    pub ls: f64,
+    pub chi2: f64,
     pub iters: u64,
     pub time: f64,
 }
@@ -99,7 +123,7 @@ pub struct BinaryOptimizationResult {
     pub label2: Label<f64>,
     pub light_ratio: f64,
     pub continuum_params: na::DVector<FluxFloat>,
-    pub ls: f64,
+    pub chi2: f64,
     pub iters: u64,
     pub time: f64,
 }
@@ -113,11 +137,11 @@ pub struct BinaryRVOptimizationResult {
 }
 
 pub struct BinaryTimeseriesOptimizationResult {
-    pub label1: RvLessLabel,
-    pub label2: RvLessLabel,
+    pub label1: RvLessLabel<f64>,
+    pub label2: RvLessLabel<f64>,
     pub light_ratio: f64,
-    pub continuum_params: na::DVector<FluxFloat>,
-    pub ls: f64,
+    pub continuum_params: Vec<na::DVector<FluxFloat>>,
+    pub chis: Vec<f64>,
     pub iters: u64,
     pub time: f64,
 }
@@ -303,6 +327,59 @@ impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 2>, f64>, 
     }
 }
 
+#[derive(Serialize, Debug)]
+struct BinaryWithoutRVParticleInfo {
+    teff1: f64,
+    m1: f64,
+    logg1: f64,
+    vsini1: f64,
+    teff2: f64,
+    m2: f64,
+    logg2: f64,
+    vsini2: f64,
+    light_ratio: f64,
+    cost: f64,
+}
+
+impl From<(na::SVector<f64, 9>, f64)> for BinaryWithoutRVParticleInfo {
+    fn from(p: (na::SVector<f64, 9>, f64)) -> Self {
+        Self {
+            teff1: p.0[0],
+            m1: p.0[1],
+            logg1: p.0[2],
+            vsini1: p.0[3],
+            teff2: p.0[5],
+            m2: p.0[6],
+            logg2: p.0[7],
+            vsini2: p.0[8],
+            light_ratio: p.0[10],
+            cost: p.1,
+        }
+    }
+}
+
+impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 9>, f64>, f64>>
+    for PSObserver
+{
+    fn observe_iter(
+        &mut self,
+        state: &PopulationState<particleswarm::Particle<na::SVector<f64, 9>, f64>, f64>,
+        _kv: &KV,
+    ) -> Result<()> {
+        let iter = state.get_iter();
+        let particles = state
+            .get_population()
+            .ok_or(argmin::core::Error::msg("No particles"))?;
+        let values: Vec<BinaryWithoutRVParticleInfo> = particles
+            .iter()
+            .map(|p| (p.position, p.cost).into())
+            .collect();
+        let filename = self.dir.join(format!("{}_{}.json", self.file_prefix, iter));
+        let f = BufWriter::new(File::create(filename)?);
+        serde_json::to_writer(f, &values)?;
+        Ok(())
+    }
+}
 /// Cost function used in the PSO fitting
 struct CostFunction<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
     interpolator: &'a I,
@@ -464,7 +541,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> SingleFitter<T, F> {
                 rv,
             },
             continuum_params,
-            ls: result.state.best_cost,
+            chi2: result.state.best_cost,
             time,
             iters: result.state.iter,
         })
@@ -708,7 +785,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
             label2: best_param.fixed_rows::<5>(5).into(),
             light_ratio: best_param[10],
             continuum_params,
-            ls: result.state.best_cost,
+            chi2: result.state.best_cost,
             time,
             iters: result.state.iter,
         })
@@ -895,6 +972,173 @@ impl<F: ContinuumFitter> BinaryRVFitter<F> {
         };
 
         cost_function.cost(&labels)
+    }
+}
+
+struct BinaryTimeseriesKnownRVCostFunction<
+    'a,
+    I: Interpolator,
+    T: WavelengthDispersion,
+    F: ContinuumFitter,
+> {
+    interpolator: &'a I,
+    continuum_interpolator: &'a I,
+    target_dispersion: &'a T,
+    observed_spectra: &'a Vec<ObservedSpectrum>,
+    rvs: &'a Vec<[f64; 2]>,
+    continuum_fitter: &'a F,
+    synth_wl: &'a WlGrid,
+    parallelize: bool,
+}
+
+impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
+    for BinaryTimeseriesKnownRVCostFunction<'a, I, T, F>
+{
+    type Param = na::SVector<f64, 9>;
+    type Output = f64;
+
+    fn cost(&self, params: &Self::Param) -> Result<Self::Output> {
+        let star1_parameters = params.fixed_rows::<4>(0).into_owned();
+        let star2_parameters = params.fixed_rows::<4>(4).into_owned();
+        let light_ratio = params[8] as f32;
+
+        let components = self.interpolator.produce_binary_components(
+            self.continuum_interpolator,
+            self.target_dispersion,
+            &star1_parameters,
+            &star2_parameters,
+            light_ratio,
+        )?;
+
+        let chi2 = self
+            .observed_spectra
+            .iter()
+            .zip(self.rvs.iter())
+            .map(|(spec, rv)| {
+                let model = shift_resample_and_add_binary_components(
+                    &self.synth_wl,
+                    &components,
+                    self.target_dispersion.wavelength(),
+                    rv.clone(),
+                )?;
+                let (_, chi2) = self.continuum_fitter.fit_continuum(spec, &model)?;
+                Ok(chi2)
+            })
+            .sum::<Result<f64>>()?;
+
+        Ok(chi2)
+    }
+
+    fn parallelize(&self) -> bool {
+        self.parallelize
+    }
+}
+
+pub struct BinaryTimeriesKnownRVFitter<T: WavelengthDispersion, F: ContinuumFitter> {
+    target_dispersion: T,
+    synth_wl: WlGrid,
+    continuum_fitter: F,
+    settings: PSOSettings,
+    vsini_range: (f64, f64),
+}
+
+impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryTimeriesKnownRVFitter<T, F> {
+    pub fn new(
+        target_dispersion: T,
+        synth_wl: WlGrid,
+        continuum_fitter: F,
+        settings: PSOSettings,
+        vsini_range: (f64, f64),
+    ) -> Self {
+        Self {
+            target_dispersion,
+            synth_wl,
+            continuum_fitter,
+            settings,
+            vsini_range,
+        }
+    }
+
+    pub fn fit<I: Interpolator>(
+        &self,
+        interpolator: &I,
+        continuum_interpolator: &I,
+        observed_spectra: &Vec<ObservedSpectrum>,
+        rvs: &Vec<[f64; 2]>,
+        trace_directory: Option<String>,
+        parallelize: bool,
+        constraints: Vec<BoundsConstraint>,
+    ) -> Result<BinaryTimeseriesOptimizationResult> {
+        let cost_function = BinaryTimeseriesKnownRVCostFunction {
+            interpolator,
+            continuum_interpolator,
+            target_dispersion: &self.target_dispersion,
+            observed_spectra,
+            rvs,
+            synth_wl: &self.synth_wl,
+            continuum_fitter: &self.continuum_fitter,
+            parallelize,
+        };
+        let bounds =
+            BinaryBoundsWithoutRV::new(interpolator.grid_bounds(), (0.0, 1.0), self.vsini_range)
+                .with_constraints(constraints);
+        let solver = setup_pso(bounds, self.settings.clone());
+        let fitter = Executor::new(cost_function, solver)
+            .configure(|state| state.max_iters(self.settings.max_iters));
+
+        let result = if let Some(dir) = trace_directory {
+            let observer = PSObserver::new(&dir, "iteration");
+            fitter.add_observer(observer, ObserverMode::Always).run()?
+        } else {
+            fitter.run()?
+        };
+
+        let best_param = result
+            .state
+            .best_individual
+            .ok_or(anyhow!("No best parameter found"))?
+            .position;
+
+        let star1_parameters = best_param.fixed_rows::<4>(0).into_owned();
+        let star2_parameters = best_param.fixed_rows::<4>(4).into_owned();
+        let light_ratio = best_param[8];
+
+        let components = interpolator.produce_binary_components(
+            continuum_interpolator,
+            &self.target_dispersion,
+            &star1_parameters,
+            &star2_parameters,
+            light_ratio as f32,
+        )?;
+
+        let (continuum_params, chis) = observed_spectra
+            .iter()
+            .zip(rvs.iter())
+            .map(|(spec, rv)| {
+                let model = shift_resample_and_add_binary_components(
+                    &self.synth_wl,
+                    &components,
+                    self.target_dispersion.wavelength(),
+                    rv.clone(),
+                )?;
+                self.continuum_fitter.fit_continuum(spec, &model)
+            })
+            .into_iter()
+            .process_results(|iter| iter.unzip())?;
+
+        let time = match result.state.time {
+            Some(t) => t.as_secs_f64(),
+            None => 0.0,
+        };
+        Ok(BinaryTimeseriesOptimizationResult {
+            label1: star1_parameters.into(),
+            label2: star2_parameters.into(),
+            light_ratio: best_param[10],
+            continuum_params,
+            chis,
+            time,
+            iters: result.state.iter,
+        })
     }
 }
 

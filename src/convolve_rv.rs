@@ -1,4 +1,4 @@
-use crate::interpolate::{FluxFloat, WlGrid};
+use crate::interpolate::{BinaryComponents, FluxFloat, WlGrid};
 use anyhow::{anyhow, Result};
 use enum_dispatch::enum_dispatch;
 use nalgebra as na;
@@ -368,7 +368,6 @@ pub fn shift_and_resample(
     }
 
     let shift_factor = 1.0 - rv / 299792.0;
-    let mut output = na::DVector::zeros(target_wl.len());
 
     let (synth_first, synth_last) = input_wl.get_first_and_last();
     let first_source_wl = target_wl[0] * shift_factor;
@@ -390,13 +389,83 @@ pub fn shift_and_resample(
         ));
     }
 
-    for i in 0..target_wl.len() {
-        let obs_wl = target_wl[i];
-        let source_wl = obs_wl * shift_factor;
-        let index = input_wl.get_float_index_of_wl(source_wl);
-        let j = index.floor() as usize;
-        let weight = index as FluxFloat - j as FluxFloat;
-        output[i] = (1.0 - weight) * input_flux[j] + weight * input_flux[j + 1];
+    Ok(na::DVector::from_iterator(
+        target_wl.len(),
+        target_wl.iter().map(|obs_wl| {
+            let source_wl = obs_wl * shift_factor;
+            let index = input_wl.get_float_index_of_wl(source_wl);
+            let j = index.floor() as usize;
+            let weight = index as FluxFloat - j as FluxFloat;
+            (1.0 - weight) * input_flux[j] + weight * input_flux[j + 1]
+        }),
+    ))
+}
+
+pub fn shift_resample_and_add_binary_components(
+    input_wl: &WlGrid,
+    components: &BinaryComponents,
+    target_wl: &na::DVector<f64>,
+    rvs: [f64; 2],
+) -> Result<na::DVector<FluxFloat>> {
+    let BinaryComponents {
+        norm_model1,
+        norm_model2,
+        continuum1,
+        continuum2,
+        lr: light_ratio,
+    } = components;
+    let [rv1, rv2] = rvs;
+
+    if input_wl.n() != components.norm_model1.len() {
+        return Err(anyhow!(
+                "Length of input_array and wavelength grid don't match. input_array: {:?}, synth_wl: {:?}",
+                components.norm_model1.len(),
+                input_wl.n()
+            ));
     }
-    Ok(output)
+
+    let shift_factor1 = 1.0 - rv1 / 299792.0;
+    let shift_factor2 = 1.0 - rv2 / 299792.0;
+
+    let (synth_first, synth_last) = input_wl.get_first_and_last();
+    let first_source_wl = target_wl[0] * shift_factor1.min(shift_factor2);
+    if first_source_wl < synth_first {
+        return Err(anyhow!(
+            "Observed wavelength is smaller than synthetic wavelength (RV={}, {:.1} < {:.1})",
+            rv1.max(rv2),
+            first_source_wl,
+            synth_first
+        ));
+    }
+    let last_source_wl = target_wl[target_wl.len() - 1] * shift_factor1.max(shift_factor2);
+    if last_source_wl > synth_last {
+        return Err(anyhow!(
+            "Observed wavelength is larger than synthetic wavelength (RV={}, {:.1} > {:.1})",
+            rv1.min(rv2),
+            last_source_wl,
+            synth_last
+        ));
+    }
+
+    Ok(na::DVector::from_iterator(
+        target_wl.len(),
+        target_wl.iter().map(|obs_wl| {
+            let source_wl = obs_wl * shift_factor1;
+            let index = input_wl.get_float_index_of_wl(source_wl);
+            let j = index.floor() as usize;
+            let weight = index as FluxFloat - j as FluxFloat;
+            let n1 = (1.0 - weight) * norm_model1[j] + weight * norm_model1[j + 1];
+            let c1 = (1.0 - weight) * continuum1[j] + weight * continuum1[j + 1];
+
+            let source_wl = obs_wl * shift_factor2;
+            let index = input_wl.get_float_index_of_wl(source_wl);
+            let j = index.floor() as usize;
+            let weight = index as FluxFloat - j as FluxFloat;
+            let n2 = (1.0 - weight) * norm_model2[j] + weight * norm_model2[j + 1];
+            let c2 = (1.0 - weight) * continuum2[j] + weight * continuum2[j + 1];
+
+            // Weighted sum of fluxes divided by weighted sum of continua
+            (light_ratio * n1 * c1 + n2 * c2) / (light_ratio * c1 + c2)
+        }),
+    ))
 }

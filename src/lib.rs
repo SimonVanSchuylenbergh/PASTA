@@ -20,7 +20,9 @@ use convolve_rv::{
 };
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
 use enum_dispatch::enum_dispatch;
-use fitting::{BinaryFitter, BinaryRVFitter, ObservedSpectrum, SingleFitter};
+use fitting::{
+    BinaryFitter, BinaryRVFitter, BinaryTimeriesKnownRVFitter, ObservedSpectrum, SingleFitter,
+};
 use indicatif::ProgressBar;
 use interpolate::{FluxFloat, GridInterpolator, Interpolator};
 use model_fetchers::{read_npy_file, CachedFetcher, InMemFetcher, OnDiskFetcher};
@@ -203,7 +205,7 @@ impl From<fitting::OptimizationResult> for OptimizationResult {
         OptimizationResult {
             label: result.label.into(),
             continuum_params: result.continuum_params.data.into(),
-            chi2: result.ls,
+            chi2: result.chi2,
             iterations: result.iters,
             time: result.time,
         }
@@ -261,7 +263,7 @@ impl From<fitting::BinaryOptimizationResult> for BinaryOptimizationResult {
             label2: result.label2.into(),
             light_ratio: result.light_ratio,
             continuum_params: result.continuum_params.data.into(),
-            chi2: result.ls,
+            chi2: result.chi2,
             iterations: result.iters,
             time: result.time,
         }
@@ -316,6 +318,67 @@ impl From<fitting::BinaryRVOptimizationResult> for RVOptimizationResult {
             rv2: result.rv2,
             chi2: result.chi2,
             iterations: result.iters,
+            time: result.time,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[pyclass(module = "pasta", frozen)]
+pub struct RvLessLabel {
+    #[pyo3(get)]
+    teff: f64,
+    #[pyo3(get)]
+    m: f64,
+    #[pyo3(get)]
+    logg: f64,
+    #[pyo3(get)]
+    vsini: f64,
+}
+
+impl From<fitting::RvLessLabel<f64>> for RvLessLabel {
+    fn from(value: fitting::RvLessLabel<f64>) -> Self {
+        Self {
+            teff: value.teff,
+            m: value.m,
+            logg: value.logg,
+            vsini: value.vsini,
+        }
+    }
+}
+
+impl From<RvLessLabel> for fitting::RvLessLabel<f64> {
+    fn from(val: RvLessLabel) -> Self {
+        fitting::RvLessLabel {
+            teff: val.teff,
+            m: val.m,
+            logg: val.logg,
+            vsini: val.vsini,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[pyclass(module = "pasta", frozen)]
+pub struct BinaryTimeseriesOptimizationResult {
+    pub label1: RvLessLabel,
+    pub label2: RvLessLabel,
+    pub light_ratio: f64,
+    pub continuum_params: Vec<Vec<FluxFloat>>,
+    pub chis: Vec<f64>,
+    pub iters: u64,
+    pub time: f64,
+}
+
+impl From<fitting::BinaryTimeseriesOptimizationResult> for BinaryTimeseriesOptimizationResult {
+    fn from(result: fitting::BinaryTimeseriesOptimizationResult) -> Self {
+        BinaryTimeseriesOptimizationResult {
+            label1: result.label1.into(),
+            label2: result.label2.into(),
+            light_ratio: result.light_ratio,
+            continuum_params: result.continuum_params.into_iter().map(|x| x.data.into()).collect(),
+            chis: result.chis,
+            iters: result.iters,
             time: result.time,
         }
     }
@@ -652,7 +715,7 @@ fn ConstantContinuum() -> PyContinuumFitter {
 /// Implement methods for all the interpolator classes.
 /// We can't use traits with pyo3, so we have to use macros.
 macro_rules! implement_methods {
-    ($name: ident, $fetcher_type: ty, $PySingleFitter: ident, $PyBinaryFitter: ident, $PyRVFitter: ident) => {
+    ($name: ident, $fetcher_type: ty, $PySingleFitter: ident, $PyBinaryFitter: ident, $PyRVFitter: ident, $PyTSRVFitter: ident) => {
         #[pymethods]
         impl $name {
             /// Produce a model spectrum by interpolating, convolving,
@@ -861,6 +924,23 @@ macro_rules! implement_methods {
                     rv_range,
                 ))
             }
+
+            // pub fn get_timeseries_known_rv_fitter(
+            //     &self,
+            //     dispersion: PyWavelengthDispersion,
+            //     synth_wl: WlGrid,
+            //     continuum_fitter: PyContinuumFitter,
+            //     settings: PSOSettings,
+            //     vsini_range: (f64, f64),
+            // ) -> $PyTSRVFitter {
+            //     $PyTSRVFitter(BinaryTimeriesKnownRVFitter::new(
+            //         dispersion.0.wavelength().clone(),
+            //         synth_wl.0,
+            //         continuum_fitter.0,
+            //         settings.into(),
+            //         vsini_range,
+            //     ))
+            // }
 
             /// Fit a continuum to an observed spectrum and model,
             /// as given by the labels (Teff, [M/H], logg, vsini, RV).
@@ -1405,6 +1485,49 @@ macro_rules! implement_methods {
                     .collect())
             }
         }
+
+        #[pyclass]
+        pub struct $PyTSRVFitter(
+            BinaryTimeriesKnownRVFitter<WavelengthDispersionWrapper, ContinuumFitterWrapper>,
+        );
+
+        #[pymethods]
+        impl $PyTSRVFitter {
+            pub fn fit(
+                &self,
+                interpolator: &$name,
+                continuum_interpolator: &$name,
+                observed_fluxes: Vec<Vec<FluxFloat>>,
+                observed_vars: Vec<Vec<FluxFloat>>,
+                rvs: Vec<[f64; 2]>,
+                trace_directory: Option<String>,
+                parallelize: Option<bool>,
+                constraints: Option<Vec<PyConstraintWrapper>>,
+            ) -> PyResult<BinaryTimeseriesOptimizationResult> {
+                let constraints = match constraints {
+                    Some(constraints) => constraints
+                        .into_iter()
+                        .map(|constraint| constraint.0)
+                        .collect(),
+                    None => vec![],
+                };
+                let observed_spectra = observed_fluxes
+                    .into_iter()
+                    .zip(observed_vars)
+                    .map(|(flux, var)| ObservedSpectrum::from_vecs(flux, var))
+                    .collect();
+                let result = self.0.fit(
+                    &interpolator.0,
+                    &continuum_interpolator.0,
+                    &observed_spectra,
+                    &rvs,
+                    trace_directory,
+                    parallelize.unwrap_or(true),
+                    constraints,
+                );
+                Ok(result?.into())
+            }
+        }
     };
 }
 
@@ -1474,21 +1597,24 @@ implement_methods!(
     OnDiskFetcher,
     OnDiskSingleFitter,
     OnDiskBinaryFitter,
-    OnDiskRVFitter
+    OnDiskRVFitter,
+    OnDiskTSKnownRVFitter
 );
 implement_methods!(
     InMemInterpolator,
     InMemFetcher,
     InMemSingleFitter,
     InMemBinaryFitter,
-    InMemRVFitter
+    InMemRVFitter,
+    InMemTSKnownRVFitter
 );
 implement_methods!(
     CachedInterpolator,
     CachedFetcher,
     CachedSingleFitter,
     CachedBinaryFitter,
-    CachedRVFitter
+    CachedRVFitter,
+    CachedTSKnownRVFitter
 );
 
 #[pyfunction]

@@ -282,7 +282,7 @@ pub struct BinaryBoundsWithoutRV<B: GridBounds> {
 }
 
 impl<B: GridBounds> BinaryBoundsWithoutRV<B> {
-    fn new(grid: B, light_ratio: (f64, f64), vsini_range: (f64, f64)) -> Self {
+    pub fn new(grid: B, light_ratio: (f64, f64), vsini_range: (f64, f64)) -> Self {
         Self {
             grid,
             light_ratio,
