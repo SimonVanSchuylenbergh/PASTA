@@ -511,7 +511,7 @@ impl GridBounds for Grid {
                     .context(anyhow!("Cannot clamp logg at Teff={}", param[0]))?;
                 (self.logg.get(left_index)?, self.logg.get(right_index)?)
             }
-            _ => panic!("Index out of bounds"),
+            _ => panic!("Index out of bounds {}", index),
         })
     }
 

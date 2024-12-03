@@ -318,9 +318,10 @@ impl<B: GridBounds> PSOBounds<9> for BinaryBoundsWithoutRV<B> {
         match index {
             3 => Ok(self.vsini_range),
             7 => Ok(self.vsini_range),
+            9 => Ok(self.light_ratio),
             i => self
                 .grid
-                .get_limits_at(param.fixed_rows::<3>(0).into_owned(), i),
+                .get_limits_at(param.fixed_rows::<3>(0).into_owned(), i % 4),
         }
     }
 

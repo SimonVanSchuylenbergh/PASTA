@@ -925,22 +925,22 @@ macro_rules! implement_methods {
                 ))
             }
 
-            // pub fn get_timeseries_known_rv_fitter(
-            //     &self,
-            //     dispersion: PyWavelengthDispersion,
-            //     synth_wl: WlGrid,
-            //     continuum_fitter: PyContinuumFitter,
-            //     settings: PSOSettings,
-            //     vsini_range: (f64, f64),
-            // ) -> $PyTSRVFitter {
-            //     $PyTSRVFitter(BinaryTimeriesKnownRVFitter::new(
-            //         dispersion.0.wavelength().clone(),
-            //         synth_wl.0,
-            //         continuum_fitter.0,
-            //         settings.into(),
-            //         vsini_range,
-            //     ))
-            // }
+            pub fn get_timeseries_known_rv_fitter(
+                &self,
+                dispersion: PyWavelengthDispersion,
+                synth_wl: WlGrid,
+                continuum_fitter: PyContinuumFitter,
+                settings: PSOSettings,
+                vsini_range: (f64, f64),
+            ) -> $PyTSRVFitter {
+                $PyTSRVFitter(BinaryTimeriesKnownRVFitter::new(
+                    dispersion.0,
+                    synth_wl.0,
+                    continuum_fitter.0,
+                    settings.into(),
+                    vsini_range,
+                ))
+            }
 
             /// Fit a continuum to an observed spectrum and model,
             /// as given by the labels (Teff, [M/H], logg, vsini, RV).

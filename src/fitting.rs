@@ -389,8 +389,8 @@ struct CostFunction<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFi
     parallelize: bool,
 }
 
-impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
-    for CostFunction<'a, I, T, F>
+impl<I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
+    for CostFunction<'_, I, T, F>
 {
     type Param = na::SVector<f64, 5>;
     type Output = f64;
@@ -426,8 +426,8 @@ struct UncertaintyCostFunction<'a, I: Interpolator, T: WavelengthDispersion, F: 
     search_radius: f64,
 }
 
-impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
-    for UncertaintyCostFunction<'a, I, T, F>
+impl<I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
+    for UncertaintyCostFunction<'_, I, T, F>
 {
     type Param = f64;
     type Output = f64;
@@ -667,8 +667,8 @@ struct BinaryCostFunction<'a, I: Interpolator, T: WavelengthDispersion, F: Conti
     parallelize: bool,
 }
 
-impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
-    for BinaryCostFunction<'a, I, T, F>
+impl<I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
+    for BinaryCostFunction<'_, I, T, F>
 {
     type Param = na::SVector<f64, 11>;
     type Output = f64;
@@ -824,7 +824,7 @@ struct RVCostFunction<'a, F: ContinuumFitter> {
     light_ratio: f64,
 }
 
-impl<'a, F: ContinuumFitter> argmin::core::CostFunction for RVCostFunction<'a, F> {
+impl<F: ContinuumFitter> argmin::core::CostFunction for RVCostFunction<'_, F> {
     type Param = na::SVector<f64, 2>;
     type Output = f64;
 
@@ -991,8 +991,8 @@ struct BinaryTimeseriesKnownRVCostFunction<
     parallelize: bool,
 }
 
-impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
-    for BinaryTimeseriesKnownRVCostFunction<'a, I, T, F>
+impl<I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core::CostFunction
+    for BinaryTimeseriesKnownRVCostFunction<'_, I, T, F>
 {
     type Param = na::SVector<f64, 9>;
     type Output = f64;
@@ -1016,10 +1016,10 @@ impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::c
             .zip(self.rvs.iter())
             .map(|(spec, rv)| {
                 let model = shift_resample_and_add_binary_components(
-                    &self.synth_wl,
+                    self.synth_wl,
                     &components,
                     self.target_dispersion.wavelength(),
-                    rv.clone(),
+                    *rv,
                 )?;
                 let (_, chi2) = self.continuum_fitter.fit_continuum(spec, &model)?;
                 Ok(chi2)
@@ -1119,11 +1119,10 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryTimeriesKnownRVFitter<T,
                     &self.synth_wl,
                     &components,
                     self.target_dispersion.wavelength(),
-                    rv.clone(),
+                    *rv,
                 )?;
                 self.continuum_fitter.fit_continuum(spec, &model)
             })
-            .into_iter()
             .process_results(|iter| iter.unzip())?;
 
         let time = match result.state.time {
@@ -1160,8 +1159,8 @@ struct BinaryTimeseriesCostFunction<
     parallelize: bool,
 }
 
-impl<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter, B: PSOBounds<2>>
-    argmin::core::CostFunction for BinaryTimeseriesCostFunction<'a, I, T, F, B>
+impl<I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter, B: PSOBounds<2>>
+    argmin::core::CostFunction for BinaryTimeseriesCostFunction<'_, I, T, F, B>
 {
     type Param = na::SVector<f64, 9>;
     type Output = f64;
