@@ -482,15 +482,60 @@ impl From<RvLessLabel> for fitting::RvLessLabel<f64> {
     }
 }
 
+#[pymethods]
+impl RvLessLabel {
+    fn to_dict<'a>(&self, py: Python<'a>) -> Bound<'a, PyDict> {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("teff", self.teff).unwrap();
+        dict.set_item("m", self.m).unwrap();
+        dict.set_item("logg", self.logg).unwrap();
+        dict.set_item("vsini", self.vsini).unwrap();
+        dict
+    }
+
+    #[staticmethod]
+    fn from_dict<'a>(py: Python<'a>, dict: &PyDict) -> PyResult<Self> {
+        Ok(Self {
+            teff: dict
+                .get_item("teff")?
+                .unwrap()
+                .downcast::<PyFloat>()?
+                .extract()?,
+            m: dict
+                .get_item("m")?
+                .unwrap()
+                .downcast::<PyFloat>()?
+                .extract()?,
+            logg: dict
+                .get_item("logg")?
+                .unwrap()
+                .downcast::<PyFloat>()?
+                .extract()?,
+            vsini: dict
+                .get_item("vsini")?
+                .unwrap()
+                .downcast::<PyFloat>()?
+                .extract()?,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[pyclass(module = "pasta", frozen)]
 pub struct BinaryTimeseriesOptimizationResult {
+    #[pyo3(get)]
     pub label1: RvLessLabel,
+    #[pyo3(get)]
     pub label2: RvLessLabel,
+    #[pyo3(get)]
     pub light_ratio: f64,
+    #[pyo3(get)]
     pub continuum_params: Vec<Vec<FluxFloat>>,
+    #[pyo3(get)]
     pub chis: Vec<f64>,
+    #[pyo3(get)]
     pub iters: u64,
+    #[pyo3(get)]
     pub time: f64,
 }
 
@@ -509,6 +554,75 @@ impl From<fitting::BinaryTimeseriesOptimizationResult> for BinaryTimeseriesOptim
             iters: result.iters,
             time: result.time,
         }
+    }
+}
+
+#[pymethods]
+impl BinaryTimeseriesOptimizationResult {
+    fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap()
+    }
+
+    fn to_dict<'a>(&self, py: Python<'a>) -> Bound<'a, PyDict> {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("label1", self.label1.to_dict(py)).unwrap();
+        dict.set_item("label2", self.label2.to_dict(py)).unwrap();
+        dict.set_item("light_ratio", self.light_ratio).unwrap();
+        dict.set_item("continuum_params", self.continuum_params.clone())
+            .unwrap();
+        dict.set_item("chis", self.chis.clone()).unwrap();
+        dict.set_item("iters", self.iters).unwrap();
+        dict.set_item("time", self.time).unwrap();
+        dict
+    }
+
+    #[staticmethod]
+    fn from_dict<'a>(py: Python<'a>, dict: &PyDict) -> PyResult<Self> {
+        Ok(Self {
+            label1: RvLessLabel::from_dict(
+                py,
+                dict.get_item("label1")
+                    .unwrap()
+                    .unwrap()
+                    .downcast()
+                    .unwrap(),
+            )
+            .unwrap(),
+            label2: RvLessLabel::from_dict(
+                py,
+                dict.get_item("label2")
+                    .unwrap()
+                    .unwrap()
+                    .downcast()
+                    .unwrap(),
+            )
+            .unwrap(),
+            light_ratio: dict
+                .get_item("light_ratio")?
+                .unwrap()
+                .downcast::<PyFloat>()?
+                .extract()?,
+            continuum_params: dict
+                .get_item("continuum_params")?
+                .unwrap()
+                .downcast::<PyList>()?
+                .extract()?,
+            chis: dict
+                .get_item("chis")?
+                .unwrap()
+                .downcast::<PyList>()?
+                .extract()?,
+            iters: dict
+                .get_item("iters")?
+                .unwrap()
+                .downcast::<PyInt>()?
+                .extract()?,
+            time: dict
+                .get_item("time")?
+                .unwrap()
+                .downcast::<PyFloat>()?
+                .extract()?,
+        })
     }
 }
 
@@ -1762,8 +1876,9 @@ fn pasta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WlGrid>()?;
     m.add_class::<PSOSettings>()?;
     m.add_class::<Label>()?;
-    m.add_class::<BinaryOptimizationResult>()?;
     m.add_class::<OptimizationResult>()?;
+    m.add_class::<BinaryOptimizationResult>()?;
+    m.add_class::<BinaryTimeseriesOptimizationResult>()?;
     m.add_function(wrap_pyfunction!(NoConvolutionDispersion, m)?)?;
     m.add_function(wrap_pyfunction!(FixedResolutionDispersion, m)?)?;
     m.add_function(wrap_pyfunction!(VariableResolutionDispersion, m)?)?;
