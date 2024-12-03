@@ -32,7 +32,7 @@ use npy::to_file;
 use numpy::array::PyArray;
 use numpy::{Ix1, Ix2, PyArrayLike};
 use pyo3::exceptions::PyValueError;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyFloat, PyInt, PyList};
 use pyo3::{prelude::*, pyclass};
 use rayon::prelude::*;
 use serde::Serialize;
@@ -131,6 +131,37 @@ impl Label {
         dict.set_item("rv", self.rv).unwrap();
         dict
     }
+
+    #[staticmethod]
+    fn from_dict<'a>(py: Python<'a>, dict: &PyDict) -> PyResult<Self> {
+        Ok(Self {
+            teff: dict
+                .get_item("teff")?
+                .unwrap()
+                .downcast::<PyFloat>()?
+                .extract()?,
+            m: dict
+                .get_item("m")?
+                .unwrap()
+                .downcast::<PyFloat>()?
+                .extract()?,
+            logg: dict
+                .get_item("logg")?
+                .unwrap()
+                .downcast::<PyFloat>()?
+                .extract()?,
+            vsini: dict
+                .get_item("vsini")?
+                .unwrap()
+                .downcast::<PyFloat>()?
+                .extract()?,
+            rv: dict
+                .get_item("rv")?
+                .unwrap()
+                .downcast::<PyFloat>()?
+                .extract()?,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -228,6 +259,37 @@ impl OptimizationResult {
         dict.set_item("time", self.time).unwrap();
         dict
     }
+
+    #[staticmethod]
+    fn from_dict<'a>(py: Python<'a>, dict: &PyDict) -> PyResult<Self> {
+        Ok(Self {
+            label: Label::from_dict(
+                py,
+                dict.get_item("label").unwrap().unwrap().downcast().unwrap(),
+            )
+            .unwrap(),
+            continuum_params: dict
+                .get_item("continuum_params")?
+                .unwrap()
+                .downcast::<PyList>()?
+                .extract()?,
+            chi2: dict
+                .get_item("chi2")?
+                .unwrap()
+                .downcast::<PyFloat>()?
+                .extract()?,
+            iterations: dict
+                .get_item("iterations")?
+                .unwrap()
+                .downcast::<PyInt>()?
+                .extract()?,
+            time: dict
+                .get_item("time")?
+                .unwrap()
+                .downcast::<PyFloat>()?
+                .extract()?,
+        })
+    }
 }
 
 /// Output of the PSO binary fitting algorithm.
@@ -274,6 +336,68 @@ impl From<fitting::BinaryOptimizationResult> for BinaryOptimizationResult {
 impl BinaryOptimizationResult {
     fn to_json(&self) -> PyResult<String> {
         Ok(serde_json::to_string(self).unwrap())
+    }
+
+    fn to_dict<'a>(&self, py: Python<'a>) -> Bound<'a, PyDict> {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("label1", self.label1.to_dict(py)).unwrap();
+        dict.set_item("label2", self.label2.to_dict(py)).unwrap();
+        dict.set_item("light_ratio", self.light_ratio).unwrap();
+        dict.set_item("continuum_params", self.continuum_params.clone())
+            .unwrap();
+        dict.set_item("chi2", self.chi2).unwrap();
+        dict.set_item("iterations", self.iterations).unwrap();
+        dict.set_item("time", self.time).unwrap();
+        dict
+    }
+
+    #[staticmethod]
+    fn from_dict<'a>(py: Python<'a>, dict: &PyDict) -> PyResult<Self> {
+        Ok(Self {
+            label1: Label::from_dict(
+                py,
+                dict.get_item("label1")
+                    .unwrap()
+                    .unwrap()
+                    .downcast()
+                    .unwrap(),
+            )
+            .unwrap(),
+            label2: Label::from_dict(
+                py,
+                dict.get_item("label2")
+                    .unwrap()
+                    .unwrap()
+                    .downcast()
+                    .unwrap(),
+            )
+            .unwrap(),
+            light_ratio: dict
+                .get_item("light_ratio")?
+                .unwrap()
+                .downcast::<PyFloat>()?
+                .extract()?,
+            continuum_params: dict
+                .get_item("continuum_params")?
+                .unwrap()
+                .downcast::<PyList>()?
+                .extract()?,
+            chi2: dict
+                .get_item("chi2")?
+                .unwrap()
+                .downcast::<PyFloat>()?
+                .extract()?,
+            iterations: dict
+                .get_item("iterations")?
+                .unwrap()
+                .downcast::<PyInt>()?
+                .extract()?,
+            time: dict
+                .get_item("time")?
+                .unwrap()
+                .downcast::<PyFloat>()?
+                .extract()?,
+        })
     }
 
     fn label_list(&self) -> [f64; 11] {
@@ -376,7 +500,11 @@ impl From<fitting::BinaryTimeseriesOptimizationResult> for BinaryTimeseriesOptim
             label1: result.label1.into(),
             label2: result.label2.into(),
             light_ratio: result.light_ratio,
-            continuum_params: result.continuum_params.into_iter().map(|x| x.data.into()).collect(),
+            continuum_params: result
+                .continuum_params
+                .into_iter()
+                .map(|x| x.data.into())
+                .collect(),
             chis: result.chis,
             iters: result.iters,
             time: result.time,
@@ -1633,6 +1761,9 @@ fn pasta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CachedInterpolator>()?;
     m.add_class::<WlGrid>()?;
     m.add_class::<PSOSettings>()?;
+    m.add_class::<Label>()?;
+    m.add_class::<BinaryOptimizationResult>()?;
+    m.add_class::<OptimizationResult>()?;
     m.add_function(wrap_pyfunction!(NoConvolutionDispersion, m)?)?;
     m.add_function(wrap_pyfunction!(FixedResolutionDispersion, m)?)?;
     m.add_function(wrap_pyfunction!(VariableResolutionDispersion, m)?)?;
