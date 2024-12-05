@@ -1769,6 +1769,42 @@ macro_rules! implement_methods {
                 );
                 Ok(result?.into())
             }
+
+            pub fn chi2(
+                &self,
+                interpolator: &$name,
+                continuum_interpolator: &$name,
+                observed_fluxes: Vec<Vec<FluxFloat>>,
+                observed_vars: Vec<Vec<FluxFloat>>,
+                rvs: Vec<[f64; 2]>,
+                labels: Vec<[f64; 9]>,
+                allow_nan: Option<bool>,
+            ) -> PyResult<Vec<f64>> {
+                let observed_spectra = observed_fluxes
+                    .into_iter()
+                    .zip(observed_vars)
+                    .map(|(flux, var)| ObservedSpectrum::from_vecs(flux, var))
+                    .collect();
+                Ok(labels
+                    .into_par_iter()
+                    .map(|label| {
+                        let chi = self.0.chi2(
+                            &interpolator.0,
+                            &continuum_interpolator.0,
+                            &observed_spectra,
+                            &rvs,
+                            label.into(),
+                        );
+                        match allow_nan {
+                            Some(false) => chi.unwrap(),
+                            _ => match chi {
+                                Ok(x) => x,
+                                Err(_) => f64::NAN,
+                            },
+                        }
+                    })
+                    .collect())
+            }
         }
     };
 }

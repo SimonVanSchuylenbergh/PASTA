@@ -551,7 +551,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> SingleFitter<T, F> {
         &self,
         interpolator: &impl Interpolator,
         observed_spectrum: &ObservedSpectrum,
-        labels: na::SVector<f64, 5>,
+        label: na::SVector<f64, 5>,
     ) -> Result<f64> {
         if observed_spectrum.flux.len() != self.target_dispersion.wavelength().len() {
             bail!("Observed spectrum and target dispersion must have the same length");
@@ -564,7 +564,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> SingleFitter<T, F> {
             parallelize: false,
         };
 
-        cost_function.cost(&labels)
+        cost_function.cost(&label)
     }
 
     /// Compute uncertainty in every label
@@ -796,7 +796,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
         interpolator: &I,
         continuum_interpolator: &I,
         observed_spectrum: &ObservedSpectrum,
-        labels: na::SVector<f64, 11>,
+        label: na::SVector<f64, 11>,
     ) -> Result<f64> {
         let cost_function = BinaryCostFunction {
             interpolator,
@@ -807,7 +807,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
             parallelize: false,
         };
 
-        cost_function.cost(&labels)
+        cost_function.cost(&label)
     }
 }
 
@@ -957,7 +957,7 @@ impl<F: ContinuumFitter> BinaryRVFitter<F> {
         continuum2: &na::DVector<FluxFloat>,
         light_ratio: f64,
         observed_spectrum: &ObservedSpectrum,
-        labels: na::SVector<f64, 2>,
+        label: na::SVector<f64, 2>,
     ) -> Result<f64> {
         let cost_function = RVCostFunction {
             observed_wl: &self.observed_wl,
@@ -971,7 +971,7 @@ impl<F: ContinuumFitter> BinaryRVFitter<F> {
             synth_wl: &self.synth_wl,
         };
 
-        cost_function.cost(&labels)
+        cost_function.cost(&label)
     }
 }
 
@@ -1138,6 +1138,27 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryTimeriesKnownRVFitter<T,
             time,
             iters: result.state.iter,
         })
+    }
+
+    pub fn chi2<I: Interpolator>(
+        &self,
+        interpolator: &I,
+        continuum_interpolator: &I,
+        observed_spectra: &Vec<ObservedSpectrum>,
+        rvs: &Vec<[f64; 2]>,
+        label: na::SVector<f64, 9>,
+    ) -> Result<f64> {
+        let cost_function = BinaryTimeseriesKnownRVCostFunction {
+            interpolator,
+            continuum_interpolator,
+            target_dispersion: &self.target_dispersion,
+            observed_spectra,
+            rvs,
+            synth_wl: &self.synth_wl,
+            continuum_fitter: &self.continuum_fitter,
+            parallelize: false,
+        };
+        cost_function.cost(&label)
     }
 }
 
