@@ -106,7 +106,7 @@ impl FixedTargetDispersion {
                 "Fixed resolution convolution with linear wavelength dispersion is not supported"
             ))
             }
-            WlGrid::Logspace(_, step, _) => 1.0 / (std::f64::consts::LN_10 * resolution * step),
+            WlGrid::Logspace(_, step, _) => 1.0 / (std::f64::consts::LN_10 * 2.355 * resolution * step),
         };
         let n_maybe_even = (6.0 * sigma).ceil() as usize;
         let n = n_maybe_even + 1 - n_maybe_even % 2;
@@ -183,7 +183,7 @@ pub struct VariableTargetDispersion {
 
 impl VariableTargetDispersion {
     /// Create a new VariableTargetDispersion object.
-    /// dispersion: per-pixel spectral resolution in angstrom (1 sigma)
+    /// dispersion: per-pixel spectral resolution in angstrom (FWHM)
     /// The observed wavelength and resolution array are resampled to the synthetic wavelength grid.
     pub fn new(
         wavelength: na::DVector<f64>,
@@ -200,12 +200,12 @@ impl VariableTargetDispersion {
                     .iter()
                     .max_by(|a, b| a.total_cmp(b))
                     .unwrap()
-                    / step as FluxFloat
+                    / (step * 2.355) as FluxFloat
             }
             WlGrid::Logspace(_, step, _) => dispersion_resampled
                 .iter()
                 .zip(modeltarget_wl.iterate())
-                .map(|(disp, wl)| disp / (step * std::f64::consts::LN_10 * wl) as FluxFloat)
+                .map(|(disp, wl)| disp / (step * 2.355 * std::f64::consts::LN_10 * wl) as FluxFloat)
                 .max_by(|a, b| a.total_cmp(b))
                 .unwrap(),
         };
