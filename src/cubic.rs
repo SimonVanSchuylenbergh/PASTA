@@ -3,6 +3,12 @@ use anyhow::{anyhow, Context, Result};
 use itertools::Itertools;
 use nalgebra as na;
 
+fn calculate_factors_linear(x: f64, x0: f64, x1: f64) -> [f64; 2] {
+    let f0 = (x - x1) / (x0 - x1);
+    let f1 = (x - x0) / (x1 - x0);
+    [f0, f1]
+}
+
 fn calculate_factors_quadratic(x: f64, x0: f64, x1: f64, x2: f64, start: bool) -> [f64; 4] {
     let xsq = x * x;
 
@@ -106,12 +112,32 @@ fn map_rows<const R: usize, const C: usize>(
     Ok(result)
 }
 
+// Represent the 4x4x4 grid of neighbors between which will be interpolated
 pub struct LocalGrid {
+    // Teff value to be interpolated to, and Teff value of the 4 neighbors
+    // Values can be None if the point is outside of the grid.
+    // The interpolator will fall back to quadratic interpolation in that case.
     pub teff: (f64, [Option<f64>; 4]),
+    // logg value to be interpolated to, and logg value of the 4 neighbors
     pub logg: (f64, [Option<f64>; 4]),
+    // 4x4 matrix of the indices of the teff and logg neighbors.
     pub teff_logg_indices: na::SMatrix<Option<(usize, usize)>, 4, 4>,
+    // M value to be interpolated to, and M value of the 4 neighbors
     pub m: (f64, [Option<f64>; 4]),
+    // Indices of the M neighbors
     pub m_indices: na::SVector<Option<usize>, 4>,
+}
+
+// Represent the 2x2x2 grid of neighbors used for linear interpolation
+// Similar to LocalGrid, but with only 2 neighbors in each dimension
+// In this case all neighbors need to exist, so there are no Option fields
+pub struct LocalGridLinear {
+    pub teff: (f64, [f64; 2]),
+    pub teff_indices: na::SVector<usize, 2>,
+    pub logg: (f64, [f64; 2]),
+    pub logg_indices: na::SVector<usize, 2>,
+    pub m: (f64, [f64; 2]),
+    pub m_indices: na::SVector<usize, 2>,
 }
 
 fn coefficients_from_neighbors(x: f64, neighbors: [Option<f64>; 4]) -> Result<na::SVector<f64, 4>> {
@@ -202,16 +228,42 @@ pub fn calculate_interpolation_coefficients_flat(
     Ok((factors_teff, factors_logg, factors_m))
 }
 
+// Calculate the weights of the 64 neighbors in the cubic interpolation. 
 pub fn calculate_interpolation_coefficients(
     local_grid: &LocalGrid,
 ) -> Result<na::DVector<FluxFloat>> {
     let (factors_teff, factors_logg, factors_m) =
-        calculate_interpolation_coefficients_flat(local_grid)?;
+    calculate_interpolation_coefficients_flat(local_grid)?;
     Ok(na::DVector::from_iterator(
         64,
         (factors_teff.component_mul(&factors_logg))
+        .iter()
+        .cartesian_product(factors_m.iter())
+        .map(|(a, b)| (a * b) as f32),
+    ))
+}
+
+
+// Calculate the weights of the 8 neighbors in the linear interpolation. 
+pub fn calculate_interpolation_coefficients_linear(
+    local_grid: &LocalGridLinear,
+) -> Result<na::DVector<FluxFloat>> {
+    let LocalGridLinear {
+        teff: (teff, teff_neighbors),
+        logg: (logg, logg_neighbors),
+        m: (m, m_neighbors),
+        ..
+    } = local_grid;
+
+    let factors_teff = calculate_factors_linear(*teff, teff_neighbors[0], teff_neighbors[1]);
+    let factors_logg = calculate_factors_linear(*logg, logg_neighbors[0], logg_neighbors[1]);
+    let factors_m = calculate_factors_linear(*m, m_neighbors[0], m_neighbors[1]);
+    Ok(na::DVector::from_iterator(
+        8,
+        factors_teff
             .iter()
+            .cartesian_product(factors_logg.iter())
             .cartesian_product(factors_m.iter())
-            .map(|(a, b)| (a * b) as f32),
+            .map(|((a, b), c)| (a * b * c) as FluxFloat),
     ))
 }

@@ -1093,6 +1093,22 @@ macro_rules! implement_methods {
                     interpolated.iter().copied().collect(),
                 ))
             }
+            
+            /// Interpolate in grid with linear instead of cubic interpolation.
+            /// Doesn't do convoluton, shifting and resampling.
+            pub fn interpolate_linear<'a>(
+                &self,
+                py: Python<'a>,
+                teff: f64,
+                m: f64,
+                logg: f64,
+            ) -> PyResult<Bound<'a, PyArray<FluxFloat, Ix1>>> {
+                let interpolated = self.0.interpolate_linear(teff, m, logg)?;
+                Ok(PyArray::from_vec_bound(
+                    py,
+                    interpolated.iter().copied().collect(),
+                ))
+            }
 
             pub fn interpolate_and_convolve<'a>(
                 &self,

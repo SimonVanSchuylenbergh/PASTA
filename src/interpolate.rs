@@ -2,7 +2,10 @@ use crate::convolve_rv::{
     convolve_rotation, shift_and_resample, shift_resample_and_add_binary_components,
     WavelengthDispersion,
 };
-use crate::cubic::{calculate_interpolation_coefficients, LocalGrid};
+use crate::cubic::{
+    calculate_interpolation_coefficients, calculate_interpolation_coefficients_linear, LocalGrid,
+    LocalGridLinear,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use itertools::Itertools;
 use nalgebra::{self as na};
@@ -98,9 +101,11 @@ impl Range {
     /// i.e. different logg limits for different Teff values.
     /// When x is outside the limits, Err will be returned.
     /// When x is inside the limits, but near the bounds, the neighbors that fall outside will be set to None.
+    /// In that case the interpolation will fall back to quadratic
     pub fn find_neighbors(&self, x: f64, limits: (usize, usize)) -> Result<[Option<usize>; 4]> {
         let (left, right) = limits;
         match self.get_right_index(x) {
+            // In case the value matches a grid point exactly
             Ok(i) => {
                 if i < left {
                     Err(anyhow!(
@@ -126,6 +131,7 @@ impl Range {
                     Ok([Some(i - 1), Some(i), Some(i + 1), Some(i + 2)])
                 }
             }
+            // In case the value is between two grid points
             Err(i) => {
                 if i <= left {
                     Err(anyhow!(
@@ -147,6 +153,61 @@ impl Range {
                     Ok([Some(i - 2), Some(i - 1), Some(i), None])
                 } else {
                     Ok([Some(i - 2), Some(i - 1), Some(i), Some(i + 1)])
+                }
+            }
+        }
+    }
+
+    /// Find the indices of the two neighbors of x in the grid, for linear interpolation.
+    /// The limits argument will be used to determine whether the neighbors are within the grid.
+    /// This is needed because the limits may be different at different points in the grid,
+    /// i.e. different logg limits for different Teff values.
+    /// `limits` contains the first and last index that is available.
+    /// When x is outside the limits, Err will be returned.
+    /// Unlike for cubic interpolation, the neighbors will always be within the grid.
+    pub fn find_neighbors_linear(&self, x: f64, limits: (usize, usize)) -> Result<[usize; 2]> {
+        let (left, right) = limits;
+        match self.get_right_index(x) {
+            // In case the value matches a grid point exactly
+            Ok(i) => {
+                if i < left {
+                    Err(anyhow!(
+                        "Index {} out of left bound, limits={:?}, x={}",
+                        i,
+                        limits,
+                        x
+                    ))
+                } else if i > right {
+                    Err(anyhow!(
+                        "Index {} out of right bound, limits={:?}, x={}",
+                        i,
+                        limits,
+                        x
+                    ))
+                } else if i == right {
+                    Ok([i - 1, i])
+                } else {
+                    Ok([i, i + 1])
+                }
+            }
+            // In case the value is between two grid points
+            Err(i) => {
+                if i <= left {
+                    Err(anyhow!(
+                        "Index {} out of left bound, limits={:?}, x={}",
+                        i,
+                        limits,
+                        x
+                    ))
+                } else if i > right {
+                    Err(anyhow!(
+                        "Index {} out of right bound, limits={:?}, x={}",
+                        i,
+                        limits,
+                        x
+                    ))
+                } else {
+                    Ok([i - 1, i])
                 }
             }
         }
@@ -359,7 +420,7 @@ impl Grid {
         Ok((min_index, max_index))
     }
 
-    /// Get the grid of neighboring gridpoints for a certain Teff, M, logg.
+    /// Get the grid of 64 neighboring gridpoints for a certain Teff, M, logg.
     pub fn get_local_grid(&self, teff: f64, m: f64, logg: f64) -> Result<LocalGrid> {
         if !self.is_teff_logg_between_bounds(teff, logg) {
             bail!("Teff, logg out of bounds ({}, {})", teff, logg);
@@ -371,36 +432,36 @@ impl Grid {
         let m_limits = (0, self.m.n() - 1);
         let logg_limits = self.get_logg_index_limits_at(teff)?;
 
-        let teff_neighbors = self
-            .teff
-            .find_neighbors(teff, teff_limits)
-            .with_context(|| {
-                format!(
-                    "failed getting neighbors for teff: {}, {:?}",
-                    teff, teff_limits
-                )
-            })?;
-        let m_neighbors = self.m.find_neighbors(m, m_limits).with_context(|| {
+        let teff_neighbor_indices =
+            self.teff
+                .find_neighbors(teff, teff_limits)
+                .with_context(|| {
+                    format!(
+                        "failed getting neighbors for teff: {}, {:?}",
+                        teff, teff_limits
+                    )
+                })?;
+        let m_neighbor_indices = self.m.find_neighbors(m, m_limits).with_context(|| {
             format!(
                 "failed getting neighbors for m: {}, {:?}",
                 logg, logg_limits
             )
         })?;
-        let logg_neighbors = self
-            .logg
-            .find_neighbors(logg, logg_limits)
-            .with_context(|| {
-                format!(
-                    "failed getting neighbors for logg: {}, {:?}",
-                    logg, logg_limits
-                )
-            })?;
+        let logg_neighbor_indices =
+            self.logg
+                .find_neighbors(logg, logg_limits)
+                .with_context(|| {
+                    format!(
+                        "failed getting neighbors for logg: {}, {:?}",
+                        logg, logg_limits
+                    )
+                })?;
 
-        let teff_logg_indices =
-            na::SMatrix::from_columns(&teff_neighbors.map(|teff_neighbor| match teff_neighbor {
+        let teff_logg_indices = na::SMatrix::from_columns(&teff_neighbor_indices.map(
+            |teff_neighbor| match teff_neighbor {
                 Some(i) => {
                     let (left, right) = self.logg_limits[i];
-                    logg_neighbors
+                    logg_neighbor_indices
                         .map(|k| match k {
                             Some(k) => {
                                 if k >= left && k <= right {
@@ -414,19 +475,20 @@ impl Grid {
                         .into()
                 }
                 None => [None; 4].into(),
-            }));
+            },
+        ));
 
         Ok(LocalGrid {
             teff: (
                 teff,
-                teff_neighbors.map(|x| {
+                teff_neighbor_indices.map(|x| {
                     x.map(|x| {
                         self.teff
                             .get(x)
                             .with_context(|| {
                                 format!(
                                     "teff={}, neighbors: {:?}, limits: {:?}",
-                                    teff, teff_neighbors, teff_limits
+                                    teff, teff_neighbor_indices, teff_limits
                                 )
                             })
                             .unwrap()
@@ -435,14 +497,14 @@ impl Grid {
             ),
             logg: (
                 logg,
-                logg_neighbors.map(|x| {
+                logg_neighbor_indices.map(|x| {
                     x.map(|x| {
                         self.logg
                             .get(x)
                             .with_context(|| {
                                 format!(
                                     "logg={}, neighbors: {:?}, limits: {:?}",
-                                    logg, logg_neighbors, logg_limits
+                                    logg, logg_neighbor_indices, logg_limits
                                 )
                             })
                             .unwrap()
@@ -452,21 +514,107 @@ impl Grid {
             teff_logg_indices,
             m: (
                 m,
-                m_neighbors.map(|x| {
+                m_neighbor_indices.map(|x| {
                     x.map(|x| {
                         self.m
                             .get(x)
                             .with_context(|| {
                                 format!(
                                     "m={}, neighbors: {:?}, limits: {:?}",
-                                    m, m_neighbors, m_limits
+                                    m, m_neighbor_indices, m_limits
                                 )
                             })
                             .unwrap()
                     })
                 }),
             ),
-            m_indices: m_neighbors.into(),
+            m_indices: m_neighbor_indices.into(),
+        })
+    }
+
+    /// Get the grid of 8 neighboring gridpoints for linear interpolation, for a certain Teff, M, logg.
+    pub fn get_local_grid_linear(&self, teff: f64, m: f64, logg: f64) -> Result<LocalGridLinear> {
+        if !self.is_teff_logg_between_bounds(teff, logg) {
+            bail!("Teff, logg out of bounds ({}, {})", teff, logg);
+        }
+        if !self.is_m_between_bounds(m) {
+            bail!("M out of bounds ({})", m);
+        }
+        let teff_limits = self.get_teff_index_limits_at(logg)?;
+        let m_limits = (0, self.m.n() - 1);
+        let logg_limits = self.get_logg_index_limits_at(teff)?;
+
+        let teff_neighbor_indices = self
+            .teff
+            .find_neighbors_linear(teff, teff_limits)
+            .with_context(|| {
+                format!(
+                    "failed getting neighbors for teff: {}, {:?}",
+                    teff, teff_limits
+                )
+            })?;
+        let m_neighbor_indices = self.m.find_neighbors_linear(m, m_limits).with_context(|| {
+            format!(
+                "failed getting neighbors for m: {}, {:?}",
+                logg, logg_limits
+            )
+        })?;
+        let logg_neighbor_indices = self
+            .logg
+            .find_neighbors_linear(logg, logg_limits)
+            .with_context(|| {
+                format!(
+                    "failed getting neighbors for logg: {}, {:?}",
+                    logg, logg_limits
+                )
+            })?;
+
+        Ok(LocalGridLinear {
+            teff: (
+                teff,
+                teff_neighbor_indices.map(|x| {
+                    self.teff
+                        .get(x)
+                        .with_context(|| {
+                            format!(
+                                "teff={}, neighbors: {:?}, limits: {:?}",
+                                teff, teff_neighbor_indices, teff_limits
+                            )
+                        })
+                        .unwrap()
+                }),
+            ),
+            teff_indices: teff_neighbor_indices.into(),
+            logg: (
+                logg,
+                logg_neighbor_indices.map(|x| {
+                    self.logg
+                        .get(x)
+                        .with_context(|| {
+                            format!(
+                                "logg={}, neighbors: {:?}, limits: {:?}",
+                                logg, logg_neighbor_indices, logg_limits
+                            )
+                        })
+                        .unwrap()
+                }),
+            ),
+            logg_indices: logg_neighbor_indices.into(),
+            m: (
+                m,
+                m_neighbor_indices.map(|x| {
+                    self.m
+                        .get(x)
+                        .with_context(|| {
+                            format!(
+                                "m={}, neighbors: {:?}, limits: {:?}",
+                                m, m_neighbor_indices, m_limits
+                            )
+                        })
+                        .unwrap()
+                }),
+            ),
+            m_indices: m_neighbor_indices.into(),
         })
     }
 
@@ -585,6 +733,7 @@ pub trait Interpolator: Send + Sync {
     fn synth_wl(&self) -> WlGrid;
     fn grid_bounds(&self) -> Self::GB;
     fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<na::DVector<FluxFloat>>;
+    fn interpolate_linear(&self, teff: f64, m: f64, logg: f64) -> Result<na::DVector<FluxFloat>>;
     fn interpolate_and_convolve(
         &self,
         target_dispersion: &impl WavelengthDispersion,
@@ -790,6 +939,53 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         let remaining = model_length - start;
         let mut mat = na::Matrix::<FluxFloat, na::Dyn, na::Const<64>, _>::zeros(remaining);
         for j in 0..64 {
+            let (column, factor) = &neighbors[j];
+            mat.set_column(
+                j,
+                &column
+                    .rows(start, remaining)
+                    .map(|x| (x as FluxFloat) / 65535.0 * factor),
+            );
+        }
+        mat.mul_to(&factors_s, &mut interpolated.rows_mut(start, remaining));
+        Ok(interpolated)
+    }
+
+    fn interpolate_linear(&self, teff: f64, m: f64, logg: f64) -> Result<na::DVector<FluxFloat>> {
+        let local_grid = self.grid().get_local_grid_linear(teff, m, logg)?;
+
+        let factors = calculate_interpolation_coefficients_linear(&local_grid)?;
+        let neighbors = local_grid
+            .teff_indices
+            .iter()
+            .cartesian_product(local_grid.logg_indices.iter())
+            .cartesian_product(local_grid.m_indices.iter())
+            .map(|((i, j), k)| self.fetcher.find_spectrum(*i, *k, *j))
+            .collect::<Result<Vec<(CowVector, f32)>>>()?;
+
+        let model_length = neighbors[0].0.len();
+        let factors_s =
+            na::SVector::<FluxFloat, 8>::from_iterator(factors.iter().map(|x| *x as FluxFloat));
+        let mut interpolated: na::DVector<FluxFloat> = na::DVector::zeros(model_length);
+        let mut mat = na::SMatrix::<FluxFloat, BATCH_SIZE, 8>::zeros();
+        for i in 0..(model_length / BATCH_SIZE) {
+            let start = i * BATCH_SIZE;
+            for j in 0..8 {
+                let (column, factor) = &neighbors[j];
+                mat.set_column(
+                    j,
+                    &column
+                        .fixed_rows::<BATCH_SIZE>(start)
+                        .map(|x| (x as FluxFloat) / 65535.0 * factor),
+                );
+            }
+            mat.mul_to(&factors_s, &mut interpolated.rows_mut(start, BATCH_SIZE));
+        }
+        // Add remaining part
+        let start = (model_length / BATCH_SIZE) * BATCH_SIZE;
+        let remaining = model_length - start;
+        let mut mat = na::Matrix::<FluxFloat, na::Dyn, na::Const<8>, _>::zeros(remaining);
+        for j in 0..8 {
             let (column, factor) = &neighbors[j];
             mat.set_column(
                 j,
