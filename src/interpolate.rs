@@ -742,6 +742,14 @@ pub trait Interpolator: Send + Sync {
         logg: f64,
         vsini: f64,
     ) -> Result<na::DVector<FluxFloat>>;
+    fn interpolate_linear_and_convolve(
+        &self,
+        target_dispersion: &impl WavelengthDispersion,
+        teff: f64,
+        m: f64,
+        logg: f64,
+        vsini: f64,
+    ) -> Result<na::DVector<FluxFloat>>;
     fn produce_model(
         &self,
         target_dispersion: &impl WavelengthDispersion,
@@ -802,7 +810,7 @@ pub trait Interpolator: Send + Sync {
             star1_parameters[2],
             star1_parameters[3],
         )?;
-        let continuum1 = continuum_interpolator.interpolate_and_convolve(
+        let continuum1 = continuum_interpolator.interpolate_linear_and_convolve(
             target_dispersion,
             star1_parameters[0],
             star1_parameters[1],
@@ -817,7 +825,7 @@ pub trait Interpolator: Send + Sync {
             star2_parameters[2],
             star2_parameters[3],
         )?;
-        let continuum2 = continuum_interpolator.interpolate_and_convolve(
+        let continuum2 = continuum_interpolator.interpolate_linear_and_convolve(
             target_dispersion,
             star2_parameters[0],
             star2_parameters[1],
@@ -1008,6 +1016,26 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
     ) -> Result<na::DVector<FluxFloat>> {
         let interpolated = self
             .interpolate(teff, m, logg)
+            .with_context(|| format!("Error while interpolating at ({}, {}, {})", teff, m, logg))?;
+
+        let convolved_for_rotation = convolve_rotation(&self.synth_wl, &interpolated, vsini)
+            .with_context(|| format!("Error during rotational broadening, vsini={}", vsini))?;
+        let model = target_dispersion
+            .convolve(convolved_for_rotation)
+            .context("Error during instrument resolution convolution")?;
+        Ok(model)
+    }
+
+    fn interpolate_linear_and_convolve(
+        &self,
+        target_dispersion: &impl WavelengthDispersion,
+        teff: f64,
+        m: f64,
+        logg: f64,
+        vsini: f64,
+    ) -> Result<na::DVector<FluxFloat>> {
+        let interpolated = self
+            .interpolate_linear(teff, m, logg)
             .with_context(|| format!("Error while interpolating at ({}, {}, {})", teff, m, logg))?;
 
         let convolved_for_rotation = convolve_rotation(&self.synth_wl, &interpolated, vsini)

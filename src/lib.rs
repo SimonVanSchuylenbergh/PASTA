@@ -1093,7 +1093,7 @@ macro_rules! implement_methods {
                     interpolated.iter().copied().collect(),
                 ))
             }
-            
+
             /// Interpolate in grid with linear instead of cubic interpolation.
             /// Doesn't do convoluton, shifting and resampling.
             pub fn interpolate_linear<'a>(
