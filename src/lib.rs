@@ -1375,8 +1375,9 @@ macro_rules! implement_methods {
             ) -> PyResult<Vec<FluxFloat>> {
                 let local_grid = self.0.grid().get_local_grid(teff, m, logg)?;
                 Ok(calculate_interpolation_coefficients(&local_grid)?
-                    .data
-                    .into())
+                    .into_iter()
+                    .cloned()
+                    .collect())
             }
 
             /// Get the indices of the neighbors of a given set of labels. (0, 0, 0) if outside the grid.

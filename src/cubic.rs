@@ -231,11 +231,10 @@ pub fn calculate_interpolation_coefficients_flat(
 // Calculate the weights of the 64 neighbors in the cubic interpolation. 
 pub fn calculate_interpolation_coefficients(
     local_grid: &LocalGrid,
-) -> Result<na::DVector<FluxFloat>> {
+) -> Result<na::SVector<FluxFloat, 64>> {
     let (factors_teff, factors_logg, factors_m) =
     calculate_interpolation_coefficients_flat(local_grid)?;
-    Ok(na::DVector::from_iterator(
-        64,
+    Ok(na::SVector::from_iterator(
         (factors_teff.component_mul(&factors_logg))
         .iter()
         .cartesian_product(factors_m.iter())
@@ -247,7 +246,7 @@ pub fn calculate_interpolation_coefficients(
 // Calculate the weights of the 8 neighbors in the linear interpolation. 
 pub fn calculate_interpolation_coefficients_linear(
     local_grid: &LocalGridLinear,
-) -> Result<na::DVector<FluxFloat>> {
+) -> Result<na::SVector<FluxFloat, 8>> {
     let LocalGridLinear {
         teff: (teff, teff_neighbors),
         logg: (logg, logg_neighbors),
@@ -258,8 +257,7 @@ pub fn calculate_interpolation_coefficients_linear(
     let factors_teff = calculate_factors_linear(*teff, teff_neighbors[0], teff_neighbors[1]);
     let factors_logg = calculate_factors_linear(*logg, logg_neighbors[0], logg_neighbors[1]);
     let factors_m = calculate_factors_linear(*m, m_neighbors[0], m_neighbors[1]);
-    Ok(na::DVector::from_iterator(
-        8,
+    Ok(na::SVector::from_iterator(
         factors_teff
             .iter()
             .cartesian_product(factors_logg.iter())

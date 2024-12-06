@@ -924,8 +924,6 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
             .collect::<Result<Vec<(CowVector, f32)>>>()?;
 
         let model_length = neighbors[0].0.len();
-        let factors_s =
-            na::SVector::<FluxFloat, 64>::from_iterator(factors.iter().map(|x| *x as FluxFloat));
         let mut interpolated: na::DVector<FluxFloat> = na::DVector::zeros(model_length);
         let mut mat = na::SMatrix::<FluxFloat, BATCH_SIZE, 64>::zeros();
         for i in 0..(model_length / BATCH_SIZE) {
@@ -940,7 +938,7 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
                 );
             }
 
-            mat.mul_to(&factors_s, &mut interpolated.rows_mut(start, BATCH_SIZE));
+            mat.mul_to(&factors, &mut interpolated.rows_mut(start, BATCH_SIZE));
         }
         // Add remaining part
         let start = (model_length / BATCH_SIZE) * BATCH_SIZE;
@@ -955,7 +953,7 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
                     .map(|x| (x as FluxFloat) / 65535.0 * factor),
             );
         }
-        mat.mul_to(&factors_s, &mut interpolated.rows_mut(start, remaining));
+        mat.mul_to(&factors, &mut interpolated.rows_mut(start, remaining));
         Ok(interpolated)
     }
 
@@ -972,8 +970,6 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
             .collect::<Result<Vec<(CowVector, f32)>>>()?;
 
         let model_length = neighbors[0].0.len();
-        let factors_s =
-            na::SVector::<FluxFloat, 8>::from_iterator(factors.iter().map(|x| *x as FluxFloat));
         let mut interpolated: na::DVector<FluxFloat> = na::DVector::zeros(model_length);
         let mut mat = na::SMatrix::<FluxFloat, BATCH_SIZE, 8>::zeros();
         for i in 0..(model_length / BATCH_SIZE) {
@@ -987,7 +983,7 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
                         .map(|x| (x as FluxFloat) / 65535.0 * factor),
                 );
             }
-            mat.mul_to(&factors_s, &mut interpolated.rows_mut(start, BATCH_SIZE));
+            mat.mul_to(&factors, &mut interpolated.rows_mut(start, BATCH_SIZE));
         }
         // Add remaining part
         let start = (model_length / BATCH_SIZE) * BATCH_SIZE;
@@ -1002,7 +998,7 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
                     .map(|x| (x as FluxFloat) / 65535.0 * factor),
             );
         }
-        mat.mul_to(&factors_s, &mut interpolated.rows_mut(start, remaining));
+        mat.mul_to(&factors, &mut interpolated.rows_mut(start, remaining));
         Ok(interpolated)
     }
 
