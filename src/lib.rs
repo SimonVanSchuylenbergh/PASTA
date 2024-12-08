@@ -15,8 +15,8 @@ use continuum_fitting::{
     FixedContinuum as RsFixedContinuum, LinearModelFitter,
 };
 use convolve_rv::{
-    shift_and_resample, FixedTargetDispersion, NoConvolutionDispersionTarget,
-    VariableTargetDispersion, WavelengthDispersion,
+    shift_and_resample, FixedTargetDispersionLogSpace, FixedTargetDispersionNonLog,
+    NoConvolutionDispersionTarget, VariableTargetDispersion, WavelengthDispersion,
 };
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
 use enum_dispatch::enum_dispatch;
@@ -641,6 +641,11 @@ impl WlGrid {
         }
     }
 
+    #[staticmethod]
+    pub fn non_uniform(wl: Vec<f64>) -> Self {
+        WlGrid(interpolate::WlGrid::NonUniform(wl.into()))
+    }
+
     pub fn get_array(&self) -> Vec<f64> {
         self.0.iterate().collect()
     }
@@ -650,7 +655,8 @@ impl WlGrid {
 #[derive(Clone, Debug)]
 enum WavelengthDispersionWrapper {
     NoConvolutionDispersionTarget,
-    FixedTargetDispersion,
+    FixedTargetDispersionLogSpace,
+    FixedTargetDispersionNonLog,
     VariableTargetDispersion,
 }
 
@@ -771,9 +777,12 @@ fn FixedResolutionDispersion(
     resolution: f64,
     synth_wl: WlGrid,
 ) -> PyResult<PyWavelengthDispersion> {
-    Ok(PyWavelengthDispersion(
-        FixedTargetDispersion::new(wl.into(), resolution, synth_wl.0)?.into(),
-    ))
+    Ok(PyWavelengthDispersion(match synth_wl.0 {
+        interpolate::WlGrid::Logspace(_, step, _) => {
+            FixedTargetDispersionLogSpace::new(wl.into(), resolution, step)?.into()
+        }
+        _ => FixedTargetDispersionNonLog::new(wl.into(), resolution, synth_wl.0)?.into(),
+    }))
 }
 
 /// Create a new wavelength dispersion object for models that have already been convolved to the instrument resolution.
@@ -1915,8 +1924,8 @@ implement_methods!(
 #[pyfunction]
 pub fn get_vsini_kernel(vsini: f64, synth_wl: WlGrid) -> Vec<FluxFloat> {
     let dvelo = match synth_wl.0 {
-        interpolate::WlGrid::Linspace(_, _, _) => panic!("Only logspace is supported"),
         interpolate::WlGrid::Logspace(_, step, _) => std::f64::consts::LN_10 * step,
+        _ => panic!("Only logspace is supported"),
     };
     convolve_rv::build_rotation_kernel(vsini, dvelo).data.into()
 }

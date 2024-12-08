@@ -1,8 +1,10 @@
 use crate::interpolate::{BinaryComponents, FluxFloat, WlGrid};
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use enum_dispatch::enum_dispatch;
+use itertools::Itertools;
 use nalgebra as na;
 use realfft::RealFftPlanner;
+use std::iter::once;
 use std::ops::AddAssign;
 
 /// Trait for wavelength dispersion of the instrument. It provides the wavelength grid and
@@ -83,59 +85,121 @@ pub fn oa_convolve(
 
 /// For spectra with constant spectral resolution.
 #[derive(Clone, Debug)]
-
-pub struct FixedTargetDispersion {
-    pub wl: na::DVector<f64>,
-    pub modeltarget_wl: WlGrid,
-    pub kernel: na::DVector<FluxFloat>,
-    pub n: usize,
+pub struct FixedTargetDispersionLogSpace {
+    wl: na::DVector<f64>,
+    kernel: na::DVector<FluxFloat>,
+    n: usize,
 }
 
-impl FixedTargetDispersion {
-    pub fn new(
-        wavelength: na::DVector<f64>,
-        resolution: f64,
-        modeltarget_wl: WlGrid,
-    ) -> Result<Self> {
+impl FixedTargetDispersionLogSpace {
+    pub fn new(wavelength: na::DVector<f64>, resolution: f64, log_step: f64) -> Result<Self> {
         if resolution <= 0.0 {
             return Err(anyhow!("Resolution must be positive"));
         }
-        let sigma = match modeltarget_wl {
-            WlGrid::Linspace(_, _, _) => {
-                return Err(anyhow!(
-                "Fixed resolution convolution with linear wavelength dispersion is not supported"
-            ))
-            }
-            WlGrid::Logspace(_, step, _) => 1.0 / (std::f64::consts::LN_10 * 2.355 * resolution * step),
-        };
+        let sigma = 1.0 / (std::f64::consts::LN_10 * 2.355 * resolution * log_step);
+
         let n_maybe_even = (6.0 * sigma).ceil() as usize;
         let n = n_maybe_even + 1 - n_maybe_even % 2;
         let mut kernel = na::DVector::zeros(n);
         make_gaussian(kernel.as_mut_slice(), sigma as f32);
         Ok(Self {
             wl: wavelength,
-            modeltarget_wl,
             kernel,
             n: (n - 1) / 2,
         })
     }
 }
 
-impl WavelengthDispersion for FixedTargetDispersion {
+impl WavelengthDispersion for FixedTargetDispersionLogSpace {
     fn wavelength(&self) -> &na::DVector<f64> {
         &self.wl
     }
 
     fn convolve(&self, flux_arr: na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>> {
-        if flux_arr.len() != self.modeltarget_wl.n() {
-            return Err(anyhow!(
-                "flux_arr and wavelength grid don't match. flux_arr: {:?}, synth_wl: {:?}",
-                flux_arr.len(),
-                self.modeltarget_wl.n()
-            ));
-        }
         let convolved = oa_convolve(&flux_arr, &self.kernel)?;
         Ok(convolved.rows(self.n, flux_arr.len()).into_owned())
+    }
+}
+
+fn convolve_per_pixel(
+    flux_arr: na::DVector<FluxFloat>,
+    kernels: &na::DMatrix<FluxFloat>,
+) -> Result<na::DVector<FluxFloat>> {
+    if flux_arr.len() != kernels.ncols() {
+        return Err(anyhow!(
+            "flux_arr and wavelength grid don't match. flux_arr: {:?}, synth_wl: {:?}",
+            flux_arr.len(),
+            kernels.ncols()
+        ));
+    }
+    let n = (kernels.nrows() - 1) / 2_usize;
+    Ok(na::DVector::from_fn(flux_arr.len(), |i, _| {
+        let kernel = kernels.column(i);
+        if (i < n) || (i >= kernels.ncols() - n) {
+            return flux_arr[i];
+        }
+        let fluxs = flux_arr.rows(i - n, 2 * n + 1);
+        kernel.dot(&fluxs)
+    }))
+}
+
+#[derive(Clone, Debug)]
+pub struct FixedTargetDispersionNonLog {
+    pub wl: na::DVector<f64>,
+    pub modeltarget_wl: WlGrid,
+    pub kernels: na::DMatrix<FluxFloat>,
+    pub n: usize,
+}
+
+impl FixedTargetDispersionNonLog {
+    pub fn new(
+        wavelength: na::DVector<f64>,
+        resolution: f64,
+        modeltarget_wl: WlGrid,
+    ) -> Result<Self> {
+        let sigmas: Vec<FluxFloat> = match &modeltarget_wl {
+            WlGrid::Logspace(_, _, _) => {
+                bail!("Use FixedTargetDispersionLogSpace for logspaced grids")
+            }
+            WlGrid::Linspace(_, step, _) => modeltarget_wl
+                .iterate()
+                .map(|wl| (wl / (resolution * step * 2.355)) as FluxFloat)
+                .collect(),
+            WlGrid::NonUniform(v) => once(2.0)
+                .chain(v.iter().tuple_windows().map(|(left, middle, right)| {
+                    let step = (right - left) / 2.0;
+                    (middle / (resolution * step * 2.355)) as FluxFloat
+                }))
+                .chain(once(2.0))
+                .collect(),
+        };
+
+        let largest_sigma = sigmas.iter().max_by(|a, b| a.total_cmp(b)).unwrap();
+
+        // Kernel size must be made uneven
+        let kernel_size_maybe_even = (largest_sigma * 6.0).ceil() as usize;
+        let kernel_size = kernel_size_maybe_even + 1 - kernel_size_maybe_even % 2;
+
+        let mut kernels = na::DMatrix::zeros(kernel_size, modeltarget_wl.n());
+        for (mut kernel, sigma) in kernels.column_iter_mut().zip(sigmas.into_iter()) {
+            make_gaussian(kernel.as_mut_slice(), sigma);
+        }
+        Ok(Self {
+            wl: wavelength,
+            modeltarget_wl,
+            kernels,
+            n: (kernel_size - 1) / 2_usize,
+        })
+    }
+}
+
+impl WavelengthDispersion for FixedTargetDispersionNonLog {
+    fn wavelength(&self) -> &nalgebra::DVector<f64> {
+        &self.wl
+    }
+
+    fn convolve(&self, flux: nalgebra::DVector<FluxFloat>) -> Result<nalgebra::DVector<FluxFloat>> {
+        convolve_per_pixel(flux, &self.kernels)
     }
 }
 
@@ -192,39 +256,40 @@ impl VariableTargetDispersion {
     ) -> Result<Self> {
         // Resample observed dispersion to synthetic wavelength grid
         let dispersion_resampled =
-            resample_observed_to_synth(&wavelength, modeltarget_wl, dispersion)?;
+            resample_observed_to_synth(&wavelength, modeltarget_wl.clone(), dispersion)?;
 
-        let larges_disp = match modeltarget_wl {
-            WlGrid::Linspace(_, step, _) => {
-                dispersion_resampled
-                    .iter()
-                    .max_by(|a, b| a.total_cmp(b))
-                    .unwrap()
-                    / (step * 2.355) as FluxFloat
-            }
-            WlGrid::Logspace(_, step, _) => dispersion_resampled
+        let sigmas: Vec<f32> = match &modeltarget_wl {
+            WlGrid::Logspace(_, step, _) => modeltarget_wl
+                .iterate()
+                .zip(dispersion_resampled.iter())
+                .map(|(wl, disp)| disp / (step * std::f64::consts::LN_10 * wl) as FluxFloat)
+                .collect(),
+            WlGrid::Linspace(_, step, _) => dispersion_resampled
                 .iter()
-                .zip(modeltarget_wl.iterate())
-                .map(|(disp, wl)| disp / (step * 2.355 * std::f64::consts::LN_10 * wl) as FluxFloat)
-                .max_by(|a, b| a.total_cmp(b))
-                .unwrap(),
+                .map(|disp| disp / *step as FluxFloat)
+                .collect(),
+            WlGrid::NonUniform(v) => once(2.0)
+                .chain(
+                    v.iter()
+                        .tuple_windows()
+                        .zip(dispersion_resampled.iter().skip(1))
+                        .map(|((left, _, right), disp)| {
+                            let step = (right - left) / 2.0;
+                            disp / step as FluxFloat
+                        }),
+                )
+                .chain(once(2.0))
+                .collect(),
         };
 
+        let largest_sigma = sigmas.iter().max_by(|a, b| a.total_cmp(b)).unwrap();
+
         // Kernel size must be made uneven
-        let kernel_size_maybe_even = (larges_disp * 6.0).ceil() as usize;
+        let kernel_size_maybe_even = (largest_sigma * 6.0).ceil() as usize;
         let kernel_size = kernel_size_maybe_even + 1 - kernel_size_maybe_even % 2;
 
         let mut kernels = na::DMatrix::zeros(kernel_size, modeltarget_wl.n());
-        for (mut kernel, (wl, disp)) in kernels
-            .column_iter_mut()
-            .zip(modeltarget_wl.iterate().zip(dispersion_resampled.iter()))
-        {
-            let sigma = match modeltarget_wl {
-                WlGrid::Linspace(_, step, _) => disp / step as FluxFloat,
-                WlGrid::Logspace(_, step, _) => {
-                    disp / (step * std::f64::consts::LN_10 * wl) as FluxFloat
-                }
-            };
+        for (mut kernel, sigma) in kernels.column_iter_mut().zip(sigmas.into_iter()) {
             make_gaussian(kernel.as_mut_slice(), sigma);
         }
         Ok(Self {
@@ -333,6 +398,7 @@ pub fn convolve_rotation(
             step / avg_wl
         }
         WlGrid::Logspace(_, step, _) => std::f64::consts::LN_10 * step,
+        WlGrid::NonUniform(_) => bail!("Non-equidistant wavelength grid not supported"),
     };
     let kernel = build_rotation_kernel(vsini, dvelo);
     if vsini == 0.0 || kernel.len() <= 2 {

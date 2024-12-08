@@ -669,12 +669,13 @@ impl GridBounds for Grid {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum WlGrid {
     // first, step, total
     Linspace(f64, f64, usize),
     // log10(first), step log10, total
     Logspace(f64, f64, usize),
+    NonUniform(na::DVector<f64>),
 }
 
 impl WlGrid {
@@ -683,6 +684,7 @@ impl WlGrid {
         match self {
             WlGrid::Linspace(_, _, n) => *n,
             WlGrid::Logspace(_, _, n) => *n,
+            WlGrid::NonUniform(v) => v.len(),
         }
     }
 
@@ -694,6 +696,7 @@ impl WlGrid {
                 10_f64.powf(*first),
                 10_f64.powf(*first + step * *total as f64),
             ),
+            WlGrid::NonUniform(v) => (v[0], v[v.len() - 1]),
         }
     }
 
@@ -703,6 +706,26 @@ impl WlGrid {
         match self {
             WlGrid::Linspace(first, step, _) => (wl - first) / step,
             WlGrid::Logspace(first, step, _) => (wl.log10() - first) / step,
+            WlGrid::NonUniform(v) => {
+                let i = v
+                    .data
+                    .as_vec()
+                    .binary_search_by(|x| x.partial_cmp(&wl).unwrap());
+                match i {
+                    Ok(i) => i as f64,
+                    Err(i) => {
+                        if i == 0 {
+                            0.0
+                        } else if i == v.len() {
+                            v.len() as f64 - 1.0
+                        } else {
+                            let left = v[i - 1];
+                            let right = v[i];
+                            (wl - left) / (right - left) + i as f64 - 1.0
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -715,6 +738,7 @@ impl WlGrid {
             WlGrid::Logspace(first, step, total) => {
                 Box::new((0..*total).map(move |i| 10_f64.powf(first + step * i as f64)))
             }
+            WlGrid::NonUniform(v) => Box::new(v.iter().copied()),
         }
     }
 }
@@ -902,7 +926,7 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
     }
 
     fn synth_wl(&self) -> WlGrid {
-        self.synth_wl
+        self.synth_wl.clone()
     }
 
     fn interpolate(&self, teff: f64, m: f64, logg: f64) -> Result<na::DVector<FluxFloat>> {
