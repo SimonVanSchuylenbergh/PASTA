@@ -277,28 +277,6 @@ impl ChunkFitter {
         Ok(continuum)
     }
 
-    pub fn compute_chi2_old(
-        &self,
-        pfits: Vec<na::DVector<FluxFloat>>,
-        observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<FluxFloat>,
-    ) -> Result<f64> {
-        let flux = &observed_spectrum.flux;
-        let var = &observed_spectrum.var;
-        let cont = self.build_continuum_from_chunks(pfits.clone())?;
-        let fit = synthetic_spectrum.component_mul(&cont);
-        let params = na::DVector::from_iterator(
-            pfits.len() * (self.p_order + 1),
-            pfits.iter().flat_map(|x| x.iter()).cloned(),
-        );
-        let residuals = flux - fit;
-        // Throw away the first and last 20 pixels in chi2 calculation
-        let var_cut = var.rows(50, var.len() - 100);
-        let residuals_cut = residuals.rows(50, flux.len() - 100);
-        let chi2 = residuals_cut.component_div(&var_cut).dot(&residuals_cut) as f64
-            / residuals_cut.len() as f64;
-        Ok(chi2)
-    }
     pub fn compute_chi2_from_chunks(
         &self,
         pfits: Vec<na::DVector<FluxFloat>>,
@@ -398,18 +376,6 @@ impl ChunkFitter {
         let continuum = self.build_continuum_from_chunks(pfits.clone())?;
         Ok((pfits, continuum))
     }
-
-    pub fn fit_continuum_and_compute_chi2(
-        &self,
-        observed_spectrum: &ObservedSpectrum,
-        synthetic_spectrum: &na::DVector<FluxFloat>,
-    ) -> Result<(Vec<na::DVector<FluxFloat>>, f64)> {
-        let y = &observed_spectrum.flux.component_div(synthetic_spectrum);
-        let pfits = self._fit_chunks(y);
-        let chi2 =
-            self.compute_chi2_from_chunks(pfits.clone(), observed_spectrum, synthetic_spectrum)?;
-        Ok((pfits, chi2))
-    }
 }
 
 impl ContinuumFitter for ChunkFitter {
@@ -418,20 +384,14 @@ impl ContinuumFitter for ChunkFitter {
         observed_spectrum: &ObservedSpectrum,
         synthetic_spectrum: &na::DVector<FluxFloat>,
     ) -> Result<(na::DVector<FluxFloat>, f64)> {
-        let flux = &observed_spectrum.flux;
-        let var = &observed_spectrum.var;
-        let (pfits, cont) = self.fit_and_return_continuum(observed_spectrum, synthetic_spectrum)?;
-        let fit = synthetic_spectrum.component_mul(&cont);
+        let y = &observed_spectrum.flux.component_div(synthetic_spectrum);
+        let pfits = self._fit_chunks(y);
         let params = na::DVector::from_iterator(
             pfits.len() * (self.p_order + 1),
             pfits.iter().flat_map(|x| x.iter()).cloned(),
         );
-        let residuals = flux - fit;
-        // Throw away the first and last 20 pixels in chi2 calculation
-        let var_cut = var.rows(50, var.len() - 100);
-        let residuals_cut = residuals.rows(50, flux.len() - 100);
-        let chi2 = residuals_cut.component_div(&var_cut).dot(&residuals_cut) as f64
-            / residuals_cut.len() as f64;
+        let chi2 =
+            self.compute_chi2_from_chunks(pfits.clone(), observed_spectrum, synthetic_spectrum)?;
         Ok((params, chi2))
     }
 
