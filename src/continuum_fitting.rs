@@ -293,10 +293,8 @@ impl ChunkFitter {
         );
         let residuals = flux - fit;
         // Throw away the first and last 20 pixels in chi2 calculation
-        // let var_cut = var.rows(50, var.len() - 100);
-        let var_cut = var;
-        // let residuals_cut = residuals.rows(50, flux.len() - 100);
-        let residuals_cut = residuals;
+        let var_cut = var.rows(50, var.len() - 100);
+        let residuals_cut = residuals.rows(50, flux.len() - 100);
         let chi2 = residuals_cut.component_div(&var_cut).dot(&residuals_cut) as f64
             / residuals_cut.len() as f64;
         Ok(chi2)
@@ -324,11 +322,11 @@ impl ChunkFitter {
         // First chunk
         let start_next = self.chunks_startstop[(1, 0)];
         total_chi2 += izip!(
-            flux.rows(0, start_next).iter(),
-            var.rows(0, start_next).iter(),
-            synthetic_spectrum.rows(0, start_next).iter(),
+            flux.rows(50, start_next - 50).iter(), // Skip the first 50 pixels
+            var.rows(50, start_next - 50).iter(),
+            synthetic_spectrum.rows(50, start_next - 50).iter(),
             self.design_matrices_tp[0]
-                .columns(0, start_next)
+                .columns(50, start_next - 50)
                 .column_iter(),
         )
         .map(|(f, v, m, dm)| ((f - dm.dot(&pfits[0]) * m).powi(2) / v))
@@ -340,11 +338,12 @@ impl ChunkFitter {
             let stop_prev = self.chunks_startstop[(c - 1, 1)];
             let start_prev = self.chunks_startstop[(c - 1, 0)];
             let start_next = if c == pfits.len() - 1 {
-                self.wl.len()
+                self.wl.len() - 50 // Skip the last 50 pixels
             } else {
                 self.chunks_startstop[(c + 1, 0)]
             };
 
+            // Overlap part
             total_chi2 += izip!(
                 flux.rows(start, stop_prev - start).iter(),
                 var.rows(start, stop_prev - start).iter(),
@@ -365,6 +364,7 @@ impl ChunkFitter {
             })
             .sum::<f32>();
 
+            // Non-overlap part
             total_chi2 += izip!(
                 flux.rows(stop_prev, start_next - stop_prev).iter(),
                 var.rows(stop_prev, start_next - stop_prev).iter(),
@@ -378,7 +378,7 @@ impl ChunkFitter {
             .map(|(f, v, m, dm)| ((f - dm.dot(&pfits[c]) * m).powi(2) / v))
             .sum::<f32>();
         }
-        Ok(total_chi2 as f64 / flux.len() as f64)
+        Ok(total_chi2 as f64 / (flux.len() - 100) as f64)
     }
 
     pub fn fit_and_return_continuum(
@@ -428,10 +428,8 @@ impl ContinuumFitter for ChunkFitter {
         );
         let residuals = flux - fit;
         // Throw away the first and last 20 pixels in chi2 calculation
-        // let var_cut = var.rows(50, var.len() - 100);
-        let var_cut = var;
-        // let residuals_cut = residuals.rows(50, flux.len() - 100);
-        let residuals_cut = residuals;
+        let var_cut = var.rows(50, var.len() - 100);
+        let residuals_cut = residuals.rows(50, flux.len() - 100);
         let chi2 = residuals_cut.component_div(&var_cut).dot(&residuals_cut) as f64
             / residuals_cut.len() as f64;
         Ok((params, chi2))
