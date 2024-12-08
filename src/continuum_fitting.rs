@@ -2,6 +2,7 @@ use crate::fitting::ObservedSpectrum;
 use crate::interpolate::FluxFloat;
 use anyhow::{anyhow, bail, Result};
 use enum_dispatch::enum_dispatch;
+use itertools::izip;
 use nalgebra as na;
 use num_traits::Float;
 
@@ -129,7 +130,9 @@ pub struct ChunkFitter {
     wl: na::DVector<f64>,
     chunks_startstop: na::DMatrix<usize>,
     design_matrices: Vec<na::DMatrix<FluxFloat>>,
+    design_matrices_tp: Vec<na::DMatrix<FluxFloat>>,
     svds: Vec<na::linalg::SVD<FluxFloat, na::Dyn, na::Dyn>>,
+    factor_arrays: Vec<na::DVector<f32>>,
 }
 
 impl ChunkFitter {
@@ -178,13 +181,35 @@ impl ChunkFitter {
             svds.push(na::linalg::SVD::new(a, true, true));
         }
 
+        let factor_arrays = (0..n_chunks - 1)
+            .map(|c| {
+                let start = chunks_startstop[(c, 0)];
+                let stop = chunks_startstop[(c, 1)];
+                let start_next = chunks_startstop[(c + 1, 0)];
+                wl.rows(start_next, stop - start_next).map(|x| {
+                    poly_blend(map_range(
+                        x as FluxFloat,
+                        wl[start_next] as FluxFloat,
+                        wl[stop - 1] as FluxFloat,
+                        1.0,
+                        0.0,
+                        false,
+                    ))
+                })
+            })
+            .collect();
+
+        // dms.iter().for_each(|dm| println!("{:?}", dm.shape()));
+
         Self {
             n_chunks,
             p_order,
             wl,
             chunks_startstop,
+            design_matrices_tp: dms.iter().map(|dm| dm.transpose()).collect(),
             design_matrices: dms,
             svds,
+            factor_arrays,
         }
     }
 
@@ -252,6 +277,30 @@ impl ChunkFitter {
         Ok(continuum)
     }
 
+    pub fn compute_chi2_old(
+        &self,
+        pfits: Vec<na::DVector<FluxFloat>>,
+        observed_spectrum: &ObservedSpectrum,
+        synthetic_spectrum: &na::DVector<FluxFloat>,
+    ) -> Result<f64> {
+        let flux = &observed_spectrum.flux;
+        let var = &observed_spectrum.var;
+        let cont = self.build_continuum_from_chunks(pfits.clone())?;
+        let fit = synthetic_spectrum.component_mul(&cont);
+        let params = na::DVector::from_iterator(
+            pfits.len() * (self.p_order + 1),
+            pfits.iter().flat_map(|x| x.iter()).cloned(),
+        );
+        let residuals = flux - fit;
+        // Throw away the first and last 20 pixels in chi2 calculation
+        // let var_cut = var.rows(50, var.len() - 100);
+        let var_cut = var;
+        // let residuals_cut = residuals.rows(50, flux.len() - 100);
+        let residuals_cut = residuals;
+        let chi2 = residuals_cut.component_div(&var_cut).dot(&residuals_cut) as f64
+            / residuals_cut.len() as f64;
+        Ok(chi2)
+    }
     pub fn compute_chi2_from_chunks(
         &self,
         pfits: Vec<na::DVector<FluxFloat>>,
@@ -269,109 +318,67 @@ impl ChunkFitter {
         }
 
         let ObservedSpectrum { flux, var } = observed_spec;
-        let y = flux.component_div(&synthetic_spectrum);
-        let chi_weights = synthetic_spectrum.map(|x| x * x).component_div(&var);
 
         let mut total_chi2 = 0.0;
 
         // First chunk
-        let p = pfits.first().unwrap();
-        let dm = self.design_matrices.first().unwrap();
-        let polynomial = dm * p;
-        let stop = self.chunks_startstop[(0, 1)];
         let start_next = self.chunks_startstop[(1, 0)];
-        // Non overlapping piece:
-        let piece_resid = y.rows(0, start_next) - polynomial.rows(0, start_next);
-        let piece_weights = chi_weights.rows(0, start_next);
-        total_chi2 += piece_weights.dot(&piece_resid.component_mul(&piece_resid)) as f64;
+        total_chi2 += izip!(
+            flux.rows(0, start_next).iter(),
+            var.rows(0, start_next).iter(),
+            synthetic_spectrum.rows(0, start_next).iter(),
+            self.design_matrices_tp[0]
+                .columns(0, start_next)
+                .column_iter(),
+        )
+        .map(|(f, v, m, dm)| ((f - dm.dot(&pfits[0]) * m).powi(2) / v))
+        .sum::<f32>();
 
-        // Prepare next overlap region
-        let mut factor = self.wl.rows(start_next, stop - start_next).map(|x| {
-            poly_blend(map_range(
-                x as FluxFloat,
-                self.wl[start_next] as FluxFloat,
-                self.wl[stop - 1] as FluxFloat,
-                1.0,
-                0.0,
-                false,
-            ))
-        });
-        let mut overlap = polynomial
-            .rows(start_next, stop - start_next)
-            .component_mul(&factor);
-        println!("{}", overlap.len());
-        for (c, (p, dm)) in pfits
-            .iter()
-            .zip(self.design_matrices.iter())
-            .enumerate()
-            .skip(1)
-            .take(pfits.len() - 2)
-        {
-            let polynomial = dm * p;
+        for c in 1..pfits.len() {
             let start = self.chunks_startstop[(c, 0)];
             let stop = self.chunks_startstop[(c, 1)];
             let stop_prev = self.chunks_startstop[(c - 1, 1)];
-            let start_next = self.chunks_startstop[(c + 1, 0)];
+            let start_prev = self.chunks_startstop[(c - 1, 0)];
+            let start_next = if c == pfits.len() - 1 {
+                self.wl.len()
+            } else {
+                self.chunks_startstop[(c + 1, 0)]
+            };
 
-            // Overlap with previous chunk
-            let piece_poly = overlap.zip_zip_map(
-                &factor,
-                &polynomial.rows(0, stop_prev - start),
-                |o, f, p| o + p * (1.0 - f),
-            );
-            let piece_resid = y.rows(start, stop_prev - start) - piece_poly;
-            let piece_weights = chi_weights.rows(start, stop_prev - start);
-            total_chi2 += piece_weights.dot(&piece_resid.component_mul(&piece_resid)) as f64;
+            total_chi2 += izip!(
+                flux.rows(start, stop_prev - start).iter(),
+                var.rows(start, stop_prev - start).iter(),
+                synthetic_spectrum.rows(start, stop_prev - start).iter(),
+                self.factor_arrays[c - 1].iter(),
+                self.design_matrices_tp[c]
+                    .columns(0, stop_prev - start)
+                    .column_iter(),
+                self.design_matrices_tp[c - 1]
+                    .columns(start - start_prev, stop_prev - start)
+                    .column_iter()
+            )
+            .map(|(f, v, m, fac, dm, dm_prev)| {
+                let previous = dm_prev.dot(&pfits[c - 1]);
+                let current = dm.dot(&pfits[c]);
+                let p = previous * fac + current * (1.0 - fac);
+                ((f - p * m).powi(2) / v)
+            })
+            .sum::<f32>();
 
-            // Non overlapping piece:
-            let piece_resid = y.rows(stop_prev, start_next - stop_prev)
-                - polynomial.rows(stop_prev - start, start_next - stop_prev);
-            let piece_weights = chi_weights.rows(stop_prev, start_next - stop_prev);
-            total_chi2 += piece_weights.dot(&piece_resid.component_mul(&piece_resid)) as f64;
-
-            // Prepare next overlap region
-            factor = self.wl.rows(start_next, stop - start_next).map(|x| {
-                poly_blend(map_range(
-                    x as FluxFloat,
-                    self.wl[start_next] as FluxFloat,
-                    self.wl[stop - 1] as FluxFloat,
-                    1.0,
-                    0.0,
-                    false,
-                ))
-            });
-            overlap = polynomial
-                .rows(start_next - start, stop - start_next)
-                .component_mul(&factor);
-            println!("{}", overlap.len());
+            total_chi2 += izip!(
+                flux.rows(stop_prev, start_next - stop_prev).iter(),
+                var.rows(stop_prev, start_next - stop_prev).iter(),
+                synthetic_spectrum
+                    .rows(stop_prev, start_next - stop_prev)
+                    .iter(),
+                self.design_matrices_tp[c]
+                    .columns(stop_prev - start, start_next - stop_prev)
+                    .column_iter(),
+            )
+            .map(|(f, v, m, dm)| ((f - dm.dot(&pfits[c]) * m).powi(2) / v))
+            .sum::<f32>();
         }
-        // Last piece
-        let p = pfits.last().unwrap();
-        let dm = self.design_matrices.last().unwrap();
-        let c = self.n_chunks - 1;
-
-        let polynomial = dm * p;
-        let start = self.chunks_startstop[(c, 0)];
-        let stop = self.chunks_startstop[(c, 1)];
-        let stop_prev = self.chunks_startstop[(c - 1, 1)];
-
-        // Overlap with second to last chunk
-        let piece_poly = overlap.zip_zip_map(
-            &factor,
-            &polynomial.rows(0, stop_prev - start),
-            |o, f, p| o + p * (1.0 - f),
-        );
-        let piece_resid = y.rows(start, stop_prev - start) - piece_poly;
-        let piece_weights = chi_weights.rows(start, stop_prev - start);
-        total_chi2 += piece_weights.dot(&piece_resid.component_mul(&piece_resid)) as f64;
-
-        // Last non overlapping piece
-        let piece_resid = y.rows(stop_prev, stop - stop_prev)
-            - polynomial.rows(stop_prev - start, stop - stop_prev);
-        let piece_weights = chi_weights.rows(stop_prev, stop - stop_prev);
-        total_chi2 += piece_weights.dot(&piece_resid.component_mul(&piece_resid)) as f64;
-
-        Ok(total_chi2 / y.len() as f64)
+        Ok(total_chi2 as f64 / flux.len() as f64)
     }
 
     pub fn fit_and_return_continuum(
