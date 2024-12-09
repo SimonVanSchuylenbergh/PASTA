@@ -812,9 +812,9 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
 }
 
 #[derive(Clone)]
-struct RVCostFunction<'a, F: ContinuumFitter> {
+struct RVCostFunction<'a, F: ContinuumFitter, D: WavelengthDispersion> {
     continuum_fitter: &'a F,
-    observed_wl: &'a na::DVector<f64>,
+    observed_dispersion: &'a D,
     observed_spectrum: &'a ObservedSpectrum,
     synth_wl: &'a WlGrid,
     model1: &'a na::DVector<FluxFloat>,
@@ -824,7 +824,9 @@ struct RVCostFunction<'a, F: ContinuumFitter> {
     light_ratio: f64,
 }
 
-impl<F: ContinuumFitter> argmin::core::CostFunction for RVCostFunction<'_, F> {
+impl<F: ContinuumFitter, D: WavelengthDispersion> argmin::core::CostFunction
+    for RVCostFunction<'_, F, D>
+{
     type Param = na::SVector<f64, 2>;
     type Output = f64;
 
@@ -832,12 +834,22 @@ impl<F: ContinuumFitter> argmin::core::CostFunction for RVCostFunction<'_, F> {
         let rv1 = param[0];
         let rv2 = param[1];
 
-        let shifted_synth1 = shift_and_resample(self.synth_wl, self.model1, self.observed_wl, rv1)?;
-        let shifted_synth2 = shift_and_resample(self.synth_wl, self.model2, self.observed_wl, rv2)?;
-        let shifted_continuum1 =
-            shift_and_resample(self.synth_wl, self.continuum1, self.observed_wl, rv1)?;
-        let shifted_continuum2 =
-            shift_and_resample(self.synth_wl, self.continuum2, self.observed_wl, rv2)?;
+        let shifted_synth1 =
+            shift_and_resample(self.synth_wl, self.model1, self.observed_dispersion, rv1)?;
+        let shifted_synth2 =
+            shift_and_resample(self.synth_wl, self.model2, self.observed_dispersion, rv2)?;
+        let shifted_continuum1 = shift_and_resample(
+            self.synth_wl,
+            self.continuum1,
+            self.observed_dispersion,
+            rv1,
+        )?;
+        let shifted_continuum2 = shift_and_resample(
+            self.synth_wl,
+            self.continuum2,
+            self.observed_dispersion,
+            rv2,
+        )?;
 
         let lr =
             self.light_ratio as FluxFloat * shifted_continuum2.mean() / shifted_continuum1.mean();
@@ -858,24 +870,24 @@ impl<F: ContinuumFitter> argmin::core::CostFunction for RVCostFunction<'_, F> {
     }
 }
 
-pub struct BinaryRVFitter<F: ContinuumFitter> {
-    observed_wl: na::DVector<f64>,
+pub struct BinaryRVFitter<F: ContinuumFitter, D: WavelengthDispersion> {
+    observed_dispersion: D,
     synth_wl: WlGrid,
     continuum_fitter: F,
     settings: PSOSettings,
     rv_range: (f64, f64),
 }
 
-impl<F: ContinuumFitter> BinaryRVFitter<F> {
+impl<F: ContinuumFitter, D: WavelengthDispersion> BinaryRVFitter<F, D> {
     pub fn new(
-        observed_wl: na::DVector<f64>,
+        observed_dispersion: D,
         synth_wl: WlGrid,
         continuum_fitter: F,
         settings: PSOSettings,
         rv_range: (f64, f64),
     ) -> Self {
         Self {
-            observed_wl,
+            observed_dispersion,
             synth_wl,
             continuum_fitter,
             settings,
@@ -895,7 +907,7 @@ impl<F: ContinuumFitter> BinaryRVFitter<F> {
         constraints: Vec<BoundsConstraint>,
     ) -> Result<BinaryRVOptimizationResult> {
         let cost_function = RVCostFunction {
-            observed_wl: &self.observed_wl,
+            observed_dispersion: &self.observed_dispersion,
             observed_spectrum,
             continuum_fitter: &self.continuum_fitter,
             model1,
@@ -960,7 +972,7 @@ impl<F: ContinuumFitter> BinaryRVFitter<F> {
         label: na::SVector<f64, 2>,
     ) -> Result<f64> {
         let cost_function = RVCostFunction {
-            observed_wl: &self.observed_wl,
+            observed_dispersion: &self.observed_dispersion,
             observed_spectrum,
             continuum_fitter: &self.continuum_fitter,
             model1,
@@ -1018,7 +1030,7 @@ impl<I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> argmin::core:
                 let model = shift_resample_and_add_binary_components(
                     self.synth_wl,
                     &components,
-                    self.target_dispersion.wavelength(),
+                    self.target_dispersion,
                     *rv,
                 )?;
                 let (_, chi2) = self.continuum_fitter.fit_continuum(spec, &model)?;
@@ -1118,7 +1130,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryTimeriesKnownRVFitter<T,
                 let model = shift_resample_and_add_binary_components(
                     &self.synth_wl,
                     &components,
-                    self.target_dispersion.wavelength(),
+                    &self.target_dispersion,
                     *rv,
                 )?;
                 self.continuum_fitter.fit_continuum(spec, &model)
@@ -1226,7 +1238,7 @@ impl<I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter, B: PSOBounds<
             .map(|observed_spectrum| {
                 let inner_cost_function = RVCostFunction {
                     continuum_fitter: self.continuum_fitter,
-                    observed_wl: self.target_dispersion.wavelength(),
+                    observed_dispersion: self.target_dispersion,
                     observed_spectrum,
                     synth_wl: self.synth_wl,
                     model1: &synth_spec1,

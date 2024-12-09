@@ -886,7 +886,7 @@ pub trait Interpolator: Send + Sync {
         shift_resample_and_add_binary_components(
             &self.synth_wl(),
             &components,
-            target_dispersion.wavelength(),
+            target_dispersion,
             [star1_parameters[4], star2_parameters[4]],
         )
     }
@@ -1084,7 +1084,7 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         let model = target_dispersion
             .convolve(convolved_for_rotation)
             .context("Error during instrument resolution convolution")?;
-        let output = shift_and_resample(&self.synth_wl, &model, target_dispersion.wavelength(), rv)
+        let output = shift_and_resample(&self.synth_wl, &model, target_dispersion, rv)
             .context("error during RV shifting / resampling")?;
 
         Ok(output)
@@ -1134,7 +1134,7 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         let model = target_dispersion
             .convolve(convolved_for_rotation)
             .context("Error during instrument resolution convolution")?;
-        let output = shift_and_resample(&self.synth_wl, &model, target_dispersion.wavelength(), rv)
+        let output = shift_and_resample(&self.synth_wl, &model, target_dispersion, rv)
             .context("error during RV shifting / resampling")?;
 
         Ok(output)

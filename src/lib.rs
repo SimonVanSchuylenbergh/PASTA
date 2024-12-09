@@ -717,8 +717,7 @@ impl PyWavelengthDispersion {
                     .map(|x| (x as FluxFloat) / 65535.0 * factor);
                 let convolved = self.0.convolve(spectrum_float).unwrap();
                 let resampled =
-                    shift_and_resample(&input_wavelength.0, &convolved, self.0.wavelength(), 0.0)
-                        .unwrap();
+                    shift_and_resample(&input_wavelength.0, &convolved, &self.0, 0.0).unwrap();
 
                 let max = resampled.max();
                 let max_bytes = max.to_le_bytes();
@@ -738,8 +737,7 @@ impl PyWavelengthDispersion {
                 let spectrum_float = arr.map(|x| (x as FluxFloat) / 65535.0);
                 let convolved = self.0.convolve(spectrum_float).unwrap();
                 let resampled =
-                    shift_and_resample(&input_wavelength.0, &convolved, self.0.wavelength(), 0.0)
-                        .unwrap();
+                    shift_and_resample(&input_wavelength.0, &convolved, &self.0, 0.0).unwrap();
                 let resampled_u16 = resampled
                     .into_iter()
                     .map(|x| (x.clamp(0.0, 1.0) * 65535.0) as u16)
@@ -778,8 +776,8 @@ fn FixedResolutionDispersion(
     synth_wl: WlGrid,
 ) -> PyResult<PyWavelengthDispersion> {
     Ok(PyWavelengthDispersion(match synth_wl.0 {
-        interpolate::WlGrid::Logspace(_, step, _) => {
-            FixedTargetDispersionLogSpace::new(wl.into(), resolution, step)?.into()
+        interpolate::WlGrid::Logspace(_, _, _) => {
+            FixedTargetDispersionLogSpace::new(wl.into(), resolution, &synth_wl.0)?.into()
         }
         _ => FixedTargetDispersionNonLog::new(wl.into(), resolution, synth_wl.0)?.into(),
     }))
@@ -789,8 +787,8 @@ fn FixedResolutionDispersion(
 /// This skips the instrument resolution convolution step in the model production.
 /// `wl` is the wavelength grid of the instrument.
 #[pyfunction]
-fn NoConvolutionDispersion(wl: Vec<f64>) -> PyWavelengthDispersion {
-    PyWavelengthDispersion(NoConvolutionDispersionTarget(wl.into()).into())
+fn NoConvolutionDispersion(wl: Vec<f64>, wl_grid: WlGrid) -> PyWavelengthDispersion {
+    PyWavelengthDispersion(NoConvolutionDispersionTarget::new(wl.into(), &wl_grid.0).into())
 }
 
 /// All available methods to fit the pseudo continuum
@@ -1184,7 +1182,7 @@ macro_rules! implement_methods {
                 rv_range: (f64, f64),
             ) -> $PyRVFitter {
                 $PyRVFitter(BinaryRVFitter::new(
-                    dispersion.0.wavelength().clone(),
+                    dispersion.0.clone(),
                     synth_wl.0,
                     continuum_fitter.0,
                     settings.into(),
@@ -1297,7 +1295,8 @@ macro_rules! implement_methods {
                     .map(|((([teff, m, logg, vsini, rv], wl), flux), var)| {
                         progress_bar.inc(1);
                         let obs = ObservedSpectrum::from_vecs(flux, var);
-                        let target_dispersion = NoConvolutionDispersionTarget(wl.into());
+                        let target_dispersion =
+                            NoConvolutionDispersionTarget::new(wl.into(), &self.0.synth_wl());
                         let synth_model_result =
                             self.0
                                 .produce_model(&target_dispersion, teff, m, logg, vsini, rv);
@@ -1309,7 +1308,8 @@ macro_rules! implement_methods {
                             _ => synth_model_result.unwrap(),
                         };
                         // let synth_model = synth_model_result.unwrap();
-                        let fitter = ChunkFitter::new(target_dispersion.0.clone(), 5, 8, 0.2);
+                        let fitter =
+                            ChunkFitter::new(target_dispersion.wavelength().clone(), 5, 8, 0.2);
                         let (_, chi2) = fitter.fit_continuum(&obs, &synth_model).unwrap();
                         chi2
                     })
@@ -1340,7 +1340,7 @@ macro_rules! implement_methods {
                             let shifted = shift_and_resample(
                                 &self.0.synth_wl(),
                                 &model_spectrum,
-                                &dispersion.0.wavelength(),
+                                &dispersion.0,
                                 v,
                             )?;
                             Ok(shifted.dot(&flux))
@@ -1676,7 +1676,7 @@ macro_rules! implement_methods {
         }
 
         #[pyclass]
-        pub struct $PyRVFitter(BinaryRVFitter<ContinuumFitterWrapper>);
+        pub struct $PyRVFitter(BinaryRVFitter<ContinuumFitterWrapper, WavelengthDispersionWrapper>);
 
         #[pymethods]
         impl $PyRVFitter {

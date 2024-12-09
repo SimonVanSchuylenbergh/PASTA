@@ -10,19 +10,38 @@ use std::ops::AddAssign;
 /// Trait for wavelength dispersion of the instrument. It provides the wavelength grid and
 /// spectral resolution.
 #[enum_dispatch]
-pub trait WavelengthDispersion: Sync + Send {
+pub trait WavelengthDispersion: Sync + Send + Clone {
     fn wavelength(&self) -> &na::DVector<f64>;
+    fn float_indices_in_synth_grid(&self) -> &na::DVector<f64>;
     fn convolve(&self, flux: na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>>;
 }
 
 /// Used when the models are already convolved with the instrument resolution.
 /// The input flux is returned as is.
 #[derive(Clone, Debug)]
-pub struct NoConvolutionDispersionTarget(pub na::DVector<f64>);
+pub struct NoConvolutionDispersionTarget {
+    wavelength: na::DVector<f64>,
+    float_indices_in_synth_grid: na::DVector<f64>,
+}
+
+impl NoConvolutionDispersionTarget {
+    pub fn new(wavelength: na::DVector<f64>, modeltarget_wl: &WlGrid) -> Self {
+        let float_indices_in_synth_grid =
+            wavelength.map(|wl| modeltarget_wl.get_float_index_of_wl(wl));
+        Self {
+            wavelength,
+            float_indices_in_synth_grid,
+        }
+    }
+}
 
 impl WavelengthDispersion for NoConvolutionDispersionTarget {
     fn wavelength(&self) -> &na::DVector<f64> {
-        &self.0
+        &self.wavelength
+    }
+
+    fn float_indices_in_synth_grid(&self) -> &na::DVector<f64> {
+        &self.float_indices_in_synth_grid
     }
 
     /// Convolve the input flux with the instrument resolution dispersion kernel.
@@ -89,23 +108,35 @@ pub struct FixedTargetDispersionLogSpace {
     wl: na::DVector<f64>,
     kernel: na::DVector<FluxFloat>,
     n: usize,
+    float_indices_in_synth_grid: na::DVector<f64>,
 }
 
 impl FixedTargetDispersionLogSpace {
-    pub fn new(wavelength: na::DVector<f64>, resolution: f64, log_step: f64) -> Result<Self> {
+    pub fn new(
+        wavelength: na::DVector<f64>,
+        resolution: f64,
+        modeltarget_wl: &WlGrid,
+    ) -> Result<Self> {
         if resolution <= 0.0 {
             return Err(anyhow!("Resolution must be positive"));
         }
+        let log_step = match modeltarget_wl {
+            WlGrid::Logspace(_, step, _) => step,
+            _ => bail!("Use FixedTargetDispersionNonLog for non-logspaced grids"),
+        };
         let sigma = 1.0 / (std::f64::consts::LN_10 * 2.355 * resolution * log_step);
 
         let n_maybe_even = (6.0 * sigma).ceil() as usize;
         let n = n_maybe_even + 1 - n_maybe_even % 2;
         let mut kernel = na::DVector::zeros(n);
         make_gaussian(kernel.as_mut_slice(), sigma as f32);
+        let float_indices_in_synth_grid =
+            wavelength.map(|wl| modeltarget_wl.get_float_index_of_wl(wl));
         Ok(Self {
             wl: wavelength,
             kernel,
             n: (n - 1) / 2,
+            float_indices_in_synth_grid,
         })
     }
 }
@@ -113,6 +144,10 @@ impl FixedTargetDispersionLogSpace {
 impl WavelengthDispersion for FixedTargetDispersionLogSpace {
     fn wavelength(&self) -> &na::DVector<f64> {
         &self.wl
+    }
+
+    fn float_indices_in_synth_grid(&self) -> &na::DVector<f64> {
+        &self.float_indices_in_synth_grid
     }
 
     fn convolve(&self, flux_arr: na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>> {
@@ -149,6 +184,7 @@ pub struct FixedTargetDispersionNonLog {
     pub modeltarget_wl: WlGrid,
     pub kernels: na::DMatrix<FluxFloat>,
     pub n: usize,
+    pub float_indices_in_synth_grid: na::DVector<f64>,
 }
 
 impl FixedTargetDispersionNonLog {
@@ -184,11 +220,14 @@ impl FixedTargetDispersionNonLog {
         for (mut kernel, sigma) in kernels.column_iter_mut().zip(sigmas.into_iter()) {
             make_gaussian(kernel.as_mut_slice(), sigma);
         }
+        let float_indices_in_synth_grid =
+            wavelength.map(|wl| modeltarget_wl.get_float_index_of_wl(wl));
         Ok(Self {
             wl: wavelength,
             modeltarget_wl,
             kernels,
             n: (kernel_size - 1) / 2_usize,
+            float_indices_in_synth_grid,
         })
     }
 }
@@ -196,6 +235,10 @@ impl FixedTargetDispersionNonLog {
 impl WavelengthDispersion for FixedTargetDispersionNonLog {
     fn wavelength(&self) -> &nalgebra::DVector<f64> {
         &self.wl
+    }
+
+    fn float_indices_in_synth_grid(&self) -> &nalgebra::DVector<f64> {
+        &self.float_indices_in_synth_grid
     }
 
     fn convolve(&self, flux: nalgebra::DVector<FluxFloat>) -> Result<nalgebra::DVector<FluxFloat>> {
@@ -243,6 +286,7 @@ pub struct VariableTargetDispersion {
     pub modeltarget_wl: WlGrid,
     pub kernels: na::DMatrix<FluxFloat>,
     pub n: usize,
+    pub float_indices_in_synth_grid: na::DVector<f64>,
 }
 
 impl VariableTargetDispersion {
@@ -292,11 +336,14 @@ impl VariableTargetDispersion {
         for (mut kernel, sigma) in kernels.column_iter_mut().zip(sigmas.into_iter()) {
             make_gaussian(kernel.as_mut_slice(), sigma);
         }
+        let float_indices_in_synth_grid =
+            wavelength.map(|wl| modeltarget_wl.get_float_index_of_wl(wl));
         Ok(Self {
             wl: wavelength,
             modeltarget_wl,
             kernels,
             n: (kernel_size - 1) / 2_usize,
+            float_indices_in_synth_grid,
         })
     }
 }
@@ -304,6 +351,10 @@ impl VariableTargetDispersion {
 impl WavelengthDispersion for VariableTargetDispersion {
     fn wavelength(&self) -> &na::DVector<f64> {
         &self.wl
+    }
+
+    fn float_indices_in_synth_grid(&self) -> &na::DVector<f64> {
+        &self.float_indices_in_synth_grid
     }
 
     fn convolve(&self, flux_arr: na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>> {
@@ -422,9 +473,10 @@ pub fn convolve_rotation(
 pub fn shift_and_resample(
     input_wl: &WlGrid,
     input_flux: &na::DVector<FluxFloat>,
-    target_wl: &na::DVector<f64>,
+    target_dispersion: &impl WavelengthDispersion,
     rv: f64,
 ) -> Result<na::DVector<FluxFloat>> {
+    let target_wl = target_dispersion.wavelength();
     if input_wl.n() != input_flux.len() {
         return Err(anyhow!(
                 "Length of input_array and wavelength grid don't match. input_array: {:?}, synth_wl: {:?}",
@@ -455,22 +507,44 @@ pub fn shift_and_resample(
         ));
     }
 
-    Ok(na::DVector::from_iterator(
-        target_wl.len(),
-        target_wl.iter().map(|obs_wl| {
-            let source_wl = obs_wl * shift_factor;
-            let index = input_wl.get_float_index_of_wl(source_wl);
-            let j = index.floor() as usize;
-            let weight = index as FluxFloat - j as FluxFloat;
-            (1.0 - weight) * input_flux[j] + weight * input_flux[j + 1]
-        }),
-    ))
+    let resampler = |index: f64| {
+        let j = index.floor() as usize;
+        let weight = index as FluxFloat - j as FluxFloat;
+        (1.0 - weight) * input_flux[j] + weight * input_flux[j + 1]
+    };
+
+    Ok(match input_wl {
+        WlGrid::Linspace(start, step, _) => {
+            let offset = (start / step) * (shift_factor - 1.0);
+            na::DVector::from_iterator(
+                target_wl.len(),
+                target_dispersion
+                    .float_indices_in_synth_grid()
+                    .iter()
+                    .map(|x| resampler(shift_factor * x + offset)),
+            )
+        }
+        WlGrid::Logspace(_, _, _) => na::DVector::from_iterator(
+            target_wl.len(),
+            target_dispersion
+                .float_indices_in_synth_grid()
+                .iter()
+                .map(|x| resampler(x + shift_factor)),
+        ),
+        WlGrid::NonUniform(target_wl) => na::DVector::from_iterator(
+            target_wl.len(),
+            target_wl.iter().map(|wl| {
+                let index = input_wl.get_float_index_of_wl(wl * shift_factor);
+                resampler(index)
+            }),
+        ),
+    })
 }
 
 pub fn shift_resample_and_add_binary_components(
     input_wl: &WlGrid,
     components: &BinaryComponents,
-    target_wl: &na::DVector<f64>,
+    target_dispersion: &impl WavelengthDispersion,
     rvs: [f64; 2],
 ) -> Result<na::DVector<FluxFloat>> {
     let BinaryComponents {
@@ -481,6 +555,7 @@ pub fn shift_resample_and_add_binary_components(
         lr: light_ratio,
     } = components;
     let [rv1, rv2] = rvs;
+    let target_wl = target_dispersion.wavelength();
 
     if input_wl.n() != components.norm_model1.len() {
         return Err(anyhow!(
@@ -513,25 +588,47 @@ pub fn shift_resample_and_add_binary_components(
         ));
     }
 
-    Ok(na::DVector::from_iterator(
-        target_wl.len(),
-        target_wl.iter().map(|obs_wl| {
-            let source_wl = obs_wl * shift_factor1;
-            let index = input_wl.get_float_index_of_wl(source_wl);
-            let j = index.floor() as usize;
-            let weight = index as FluxFloat - j as FluxFloat;
-            let n1 = (1.0 - weight) * norm_model1[j] + weight * norm_model1[j + 1];
-            let c1 = (1.0 - weight) * continuum1[j] + weight * continuum1[j + 1];
+    let resampler = |index1: f64, index2: f64| {
+        let j = index1.floor() as usize;
+        let weight = index1 as FluxFloat - j as FluxFloat;
+        let n1 = (1.0 - weight) * norm_model1[j] + weight * norm_model1[j + 1];
+        let c1 = (1.0 - weight) * continuum1[j] + weight * continuum1[j + 1];
 
-            let source_wl = obs_wl * shift_factor2;
-            let index = input_wl.get_float_index_of_wl(source_wl);
-            let j = index.floor() as usize;
-            let weight = index as FluxFloat - j as FluxFloat;
-            let n2 = (1.0 - weight) * norm_model2[j] + weight * norm_model2[j + 1];
-            let c2 = (1.0 - weight) * continuum2[j] + weight * continuum2[j + 1];
+        let j = index2.floor() as usize;
+        let weight = index2 as FluxFloat - j as FluxFloat;
+        let n2 = (1.0 - weight) * norm_model2[j] + weight * norm_model2[j + 1];
+        let c2 = (1.0 - weight) * continuum2[j] + weight * continuum2[j + 1];
 
-            // Weighted sum of fluxes divided by weighted sum of continua
-            (light_ratio * n1 * c1 + n2 * c2) / (light_ratio * c1 + c2)
-        }),
-    ))
+        // Weighted sum of fluxes divided by weighted sum of continua
+        (light_ratio * n1 * c1 + n2 * c2) / (light_ratio * c1 + c2)
+    };
+
+    Ok(match input_wl {
+        WlGrid::Linspace(start, step, _) => {
+            let offset1 = (start / step) * (shift_factor1 - 1.0);
+            let offset2 = (start / step) * (shift_factor2 - 1.0);
+            na::DVector::from_iterator(
+                target_wl.len(),
+                target_dispersion
+                    .float_indices_in_synth_grid()
+                    .iter()
+                    .map(|x| resampler(shift_factor1 * x + offset1, shift_factor2 * x + offset2)),
+            )
+        }
+        WlGrid::Logspace(_, _, _) => na::DVector::from_iterator(
+            target_wl.len(),
+            target_dispersion
+                .float_indices_in_synth_grid()
+                .iter()
+                .map(|x| resampler(x + shift_factor1, x + shift_factor2)),
+        ),
+        WlGrid::NonUniform(target_wl) => na::DVector::from_iterator(
+            target_wl.len(),
+            target_wl.iter().map(|wl| {
+                let index1 = input_wl.get_float_index_of_wl(wl * shift_factor1);
+                let index2 = input_wl.get_float_index_of_wl(wl * shift_factor2);
+                resampler(index1, index2)
+            }),
+        ),
+    })
 }

@@ -338,7 +338,7 @@ impl ChunkFitter {
                 let previous = dm_prev.dot(&pfits[c - 1]);
                 let current = dm.dot(&pfits[c]);
                 let p = previous * fac + current * (1.0 - fac);
-                ((f - p * m).powi(2) / v)
+                (f - p * m).powi(2) / v
             })
             .sum::<f32>();
 
