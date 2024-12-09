@@ -279,7 +279,7 @@ This dispersion class is used when the models have already been convolved to the
 It skips the convolution step during model generation.
 Only the wavelength array of the observed spectra is required.
 ```
-NoConvolutionDispersion(wl: list[float])
+NoConvolutionDispersion(wl: list[float], synth_wl: WlGrid)
 ```
 
 ### [ChunkContinuumFitter](https://simonvanschuylenbergh.github.io/PASTA/pasta/fn.ChunkContinuumFitter.html)

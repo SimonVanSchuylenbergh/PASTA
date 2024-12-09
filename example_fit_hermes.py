@@ -115,7 +115,7 @@ flux_files = sorted(
 wl, _, _ = read_and_prepare_spectrum(flux_files[0])
 
 # For the preconvolved grid, we don't need to convolve the models anymore
-dispersion = NoConvolutionDispersion(wl)
+dispersion = NoConvolutionDispersion(wl, wl_grid)
 # Otherwise specify the spectral resolution here
 # dispersion = FixedResolutionDispersion(wl, 86000, wl_grid)
 

@@ -83,7 +83,7 @@ number_of_chunks = 5
 polynomial_degree = 8
 blending_length = 0.2
 fitter = ChunkContinuumFitter(wl, number_of_chunks, polynomial_degree, blending_length)
-dispersion = NoConvolutionDispersion(wl)
+dispersion = NoConvolutionDispersion(wl, wl_grid)
 
 normalized_model = interpolator.produce_model(
     dispersion,
