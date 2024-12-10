@@ -834,12 +834,12 @@ pub trait Interpolator: Send + Sync {
             star1_parameters[2],
             star1_parameters[3],
         )?;
-        let continuum1 = continuum_interpolator.interpolate_linear_and_convolve(
-            target_dispersion,
+        // For the continuum we can take some shortcuts:
+        // use linear interpolation and skip rotation and resolution broadening
+        let continuum1 = continuum_interpolator.interpolate_linear(
             star1_parameters[0],
             star1_parameters[1],
             star1_parameters[2],
-            star1_parameters[3],
         )?;
 
         let norm_model2 = self.interpolate_and_convolve(
@@ -849,12 +849,10 @@ pub trait Interpolator: Send + Sync {
             star2_parameters[2],
             star2_parameters[3],
         )?;
-        let continuum2 = continuum_interpolator.interpolate_linear_and_convolve(
-            target_dispersion,
+        let continuum2 = continuum_interpolator.interpolate_linear(
             star2_parameters[0],
             star2_parameters[1],
             star2_parameters[2],
-            star2_parameters[3],
         )?;
 
         let lr = light_ratio * continuum2.mean() / continuum1.mean();
