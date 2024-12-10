@@ -524,13 +524,16 @@ pub fn shift_and_resample(
                     .map(|x| resampler(shift_factor * x + offset)),
             )
         }
-        WlGrid::Logspace(_, _, _) => na::DVector::from_iterator(
-            target_wl.len(),
-            target_dispersion
-                .float_indices_in_synth_grid()
-                .iter()
-                .map(|x| resampler(x + shift_factor)),
-        ),
+        WlGrid::Logspace(_, step, _) => {
+            let shift_log = shift_factor.log10() / step;
+            na::DVector::from_iterator(
+                target_wl.len(),
+                target_dispersion
+                    .float_indices_in_synth_grid()
+                    .iter()
+                    .map(|x| resampler(x + shift_log)),
+            )
+        }
         WlGrid::NonUniform(target_wl) => na::DVector::from_iterator(
             target_wl.len(),
             target_wl.iter().map(|wl| {
@@ -615,13 +618,17 @@ pub fn shift_resample_and_add_binary_components(
                     .map(|x| resampler(shift_factor1 * x + offset1, shift_factor2 * x + offset2)),
             )
         }
-        WlGrid::Logspace(_, _, _) => na::DVector::from_iterator(
-            target_wl.len(),
-            target_dispersion
-                .float_indices_in_synth_grid()
-                .iter()
-                .map(|x| resampler(x + shift_factor1, x + shift_factor2)),
-        ),
+        WlGrid::Logspace(_, step, _) => {
+            let shift_log1 = shift_factor1.log10() / step;
+            let shift_log2 = shift_factor2.log10() / step;
+            na::DVector::from_iterator(
+                target_wl.len(),
+                target_dispersion
+                    .float_indices_in_synth_grid()
+                    .iter()
+                    .map(|x| resampler(x + shift_log1, x + shift_log2)),
+            )
+        }
         WlGrid::NonUniform(target_wl) => na::DVector::from_iterator(
             target_wl.len(),
             target_wl.iter().map(|wl| {
