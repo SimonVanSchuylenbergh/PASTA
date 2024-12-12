@@ -21,7 +21,8 @@ use convolve_rv::{
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
 use enum_dispatch::enum_dispatch;
 use fitting::{
-    BinaryFitter, BinaryRVFitter, BinaryTimeriesKnownRVFitter, ObservedSpectrum, SingleFitter,
+    BestParticleObserver, BinaryFitter, BinaryRVFitter, BinaryTimeriesKnownRVFitter, DummyObserver,
+    ObservedSpectrum, Observer, PSOobserver, SingleFitter,
 };
 use indicatif::ProgressBar;
 use interpolate::{FluxFloat, GridInterpolator, Interpolator};
@@ -829,6 +830,22 @@ fn RangeConstraint(parameter: usize, lower: f64, upper: f64) -> PyConstraintWrap
     })
 }
 
+fn get_observer<const N: usize>(
+    trace_directory: Option<String>,
+    best_particle_file: Option<String>,
+) -> Box<dyn Observer<N>> {
+    match (trace_directory, best_particle_file) {
+        (Some(trace_directory), None) => Box::new(PSOobserver::new(&trace_directory, "it")),
+        (None, Some(best_particle_file)) => {
+            Box::new(BestParticleObserver::new(best_particle_file.into()))
+        }
+        (Some(_), Some(_)) => {
+            panic!("Cannot specify both trace_directory and best_particle_file")
+        }
+        _ => Box::new(DummyObserver()),
+    }
+}
+
 #[derive(Clone, Debug)]
 #[pyclass(module = "pasta", frozen)]
 pub struct PyContinuumFitter(ContinuumFitterWrapper);
@@ -1460,6 +1477,7 @@ macro_rules! implement_methods {
                 observed_flux: PyArrayLike<FluxFloat, Ix1>,
                 observed_var: PyArrayLike<FluxFloat, Ix1>,
                 trace_directory: Option<String>,
+                best_particle_file: Option<String>,
                 parallelize: Option<bool>,
                 constraints: Option<Vec<PyConstraintWrapper>>,
             ) -> PyResult<OptimizationResult> {
@@ -1477,7 +1495,7 @@ macro_rules! implement_methods {
                 let result = self.0.fit(
                     &interpolator.0,
                     &observed_spectrum.into(),
-                    trace_directory,
+                    get_observer(trace_directory, best_particle_file),
                     parallelize.unwrap_or(true),
                     constraints,
                 )?;
@@ -1508,7 +1526,7 @@ macro_rules! implement_methods {
                         let result = self.0.fit(
                             &interpolator.0,
                             &observed_spectrum.into(),
-                            None,
+                            DummyObserver(),
                             false,
                             constraints.clone(),
                         );
@@ -1619,6 +1637,7 @@ macro_rules! implement_methods {
                 observed_flux: PyArrayLike<FluxFloat, Ix1>,
                 observed_var: PyArrayLike<FluxFloat, Ix1>,
                 trace_directory: Option<String>,
+                best_particle_file: Option<String>,
                 parallelize: Option<bool>,
                 constraints: Option<Vec<PyConstraintWrapper>>,
             ) -> PyResult<BinaryOptimizationResult> {
@@ -1637,7 +1656,7 @@ macro_rules! implement_methods {
                     &interpolator.0,
                     &continuum_interpolator.0,
                     &observed_spectrum.into(),
-                    trace_directory,
+                    get_observer(trace_directory, best_particle_file),
                     parallelize.unwrap_or(true),
                     constraints,
                 );
@@ -1690,6 +1709,7 @@ macro_rules! implement_methods {
                 observed_flux: Vec<FluxFloat>,
                 observed_var: Vec<FluxFloat>,
                 trace_directory: Option<String>,
+                best_particle_file: Option<String>,
                 constraints: Option<Vec<PyConstraintWrapper>>,
             ) -> PyResult<RVOptimizationResult> {
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
@@ -1707,7 +1727,7 @@ macro_rules! implement_methods {
                     &continuum2.into(),
                     light_ratio,
                     &observed_spectrum,
-                    trace_directory,
+                    get_observer(trace_directory, best_particle_file),
                     constraints,
                 );
                 Ok(result?.into())
@@ -1769,6 +1789,7 @@ macro_rules! implement_methods {
                 observed_vars: Vec<Vec<FluxFloat>>,
                 rvs: Vec<[f64; 2]>,
                 trace_directory: Option<String>,
+                best_particle_file: Option<String>,
                 parallelize: Option<bool>,
                 constraints: Option<Vec<PyConstraintWrapper>>,
             ) -> PyResult<BinaryTimeseriesOptimizationResult> {
@@ -1789,7 +1810,7 @@ macro_rules! implement_methods {
                     &continuum_interpolator.0,
                     &observed_spectra,
                     &rvs,
-                    trace_directory,
+                    get_observer(trace_directory, best_particle_file),
                     parallelize.unwrap_or(true),
                     constraints,
                 );

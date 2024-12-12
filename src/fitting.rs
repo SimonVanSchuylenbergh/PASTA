@@ -12,11 +12,11 @@ use argmin::core::observers::{Observe, ObserverMode};
 use argmin::core::{CostFunction as _, Executor, PopulationState, State, KV};
 use argmin::solver::brent::BrentRoot;
 use itertools::Itertools;
-use nalgebra as na;
-use serde::Serialize;
+use nalgebra::{self as na, Storage};
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Observed specrum with flux and variance
 #[derive(Clone, Debug)]
@@ -171,57 +171,76 @@ fn setup_pso<const N: usize, B: PSOBounds<N>>(
         .unwrap()
 }
 
-struct PSObserver {
+pub trait Observer<const N: usize>:
+    Observe<PopulationState<particleswarm::Particle<na::SVector<f64, N>, f64>, f64>> + 'static
+{
+}
+
+impl<const N: usize>
+    Observe<PopulationState<particleswarm::Particle<na::SVector<f64, N>, f64>, f64>>
+    for Box<dyn Observer<N>>
+{
+}
+
+impl<const N: usize> Observer<N> for Box<dyn Observer<N>> {}
+
+pub struct DummyObserver<const N: usize>();
+
+impl<const N: usize>
+    Observe<PopulationState<particleswarm::Particle<na::SVector<f64, N>, f64>, f64>>
+    for DummyObserver<N>
+{
+    fn observe_iter(
+        &mut self,
+        _state: &PopulationState<particleswarm::Particle<na::SVector<f64, N>, f64>, f64>,
+        _kv: &KV,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl<const N: usize> Observer<N> for DummyObserver<N> {}
+
+#[derive(Serialize)]
+struct ParticleInfo {
+    position: Vec<f64>,
+    cost: f64,
+}
+
+pub struct PSOobserver {
     dir: PathBuf,
     file_prefix: String,
 }
-impl PSObserver {
-    fn new(directory: &str, file_prefix: &str) -> Self {
+
+impl PSOobserver {
+    pub fn new(directory: &str, file_prefix: &str) -> Self {
         Self {
             dir: PathBuf::from(directory),
             file_prefix: file_prefix.to_string(),
         }
     }
 }
-#[derive(Serialize)]
-struct ParticleInfo {
-    teff: f64,
-    m: f64,
-    logg: f64,
-    vsini: f64,
-    rv: f64,
-    cost: f64,
-}
 
-impl From<(na::SVector<f64, 5>, f64)> for ParticleInfo {
-    fn from(p: (na::SVector<f64, 5>, f64)) -> Self {
-        Self {
-            teff: p.0[0],
-            m: p.0[1],
-            logg: p.0[2],
-            vsini: p.0[3],
-            rv: p.0[4],
-            cost: p.1,
-        }
-    }
-}
-
-impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 5>, f64>, f64>>
-    for PSObserver
+impl<const N: usize>
+    Observe<PopulationState<particleswarm::Particle<na::SVector<f64, N>, f64>, f64>>
+    for PSOobserver
 {
     fn observe_iter(
         &mut self,
-        state: &PopulationState<particleswarm::Particle<na::SVector<f64, 5>, f64>, f64>,
+        state: &PopulationState<particleswarm::Particle<na::SVector<f64, N>, f64>, f64>,
         _kv: &KV,
     ) -> Result<()> {
         let iter = state.get_iter();
         let particles = state
             .get_population()
             .ok_or(argmin::core::Error::msg("No particles"))?;
-        let values: Vec<ParticleInfo> = particles
+        let values = particles
             .iter()
-            .map(|p| (p.position, p.cost).into())
-            .collect();
+            .map(|p| ParticleInfo {
+                position: p.position.data.as_slice().to_owned(),
+                cost: p.cost,
+            })
+            .collect::<Vec<_>>();
         let filename = self.dir.join(format!("{}_{}.json", self.file_prefix, iter));
         let f = BufWriter::new(File::create(filename)?);
         serde_json::to_writer(f, &values)?;
@@ -229,157 +248,46 @@ impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 5>, f64>, 
     }
 }
 
-#[derive(Serialize, Debug)]
-struct BinaryParticleInfo {
-    teff1: f64,
-    m1: f64,
-    logg1: f64,
-    vsini1: f64,
-    rv1: f64,
-    teff2: f64,
-    m2: f64,
-    logg2: f64,
-    vsini2: f64,
-    rv2: f64,
-    light_ratio: f64,
-    cost: f64,
+impl<const N: usize> Observer<N> for PSOobserver {}
+
+pub struct BestParticleObserver<const N: usize> {
+    file: PathBuf,
+    best_particles: Vec<ParticleInfo>,
 }
 
-impl From<(na::SVector<f64, 11>, f64)> for BinaryParticleInfo {
-    fn from(p: (na::SVector<f64, 11>, f64)) -> Self {
+impl<const N: usize> BestParticleObserver<N> {
+    pub fn new(file: PathBuf) -> Self {
         Self {
-            teff1: p.0[0],
-            m1: p.0[1],
-            logg1: p.0[2],
-            vsini1: p.0[3],
-            rv1: p.0[4],
-            teff2: p.0[5],
-            m2: p.0[6],
-            logg2: p.0[7],
-            vsini2: p.0[8],
-            rv2: p.0[9],
-            light_ratio: p.0[10],
-            cost: p.1,
+            file,
+            best_particles: Vec::new(),
         }
     }
 }
 
-impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 11>, f64>, f64>>
-    for PSObserver
+impl<const N: usize>
+    Observe<PopulationState<particleswarm::Particle<na::SVector<f64, N>, f64>, f64>>
+    for BestParticleObserver<N>
 {
     fn observe_iter(
         &mut self,
-        state: &PopulationState<particleswarm::Particle<na::SVector<f64, 11>, f64>, f64>,
+        state: &PopulationState<particleswarm::Particle<na::SVector<f64, N>, f64>, f64>,
         _kv: &KV,
     ) -> Result<()> {
-        let iter = state.get_iter();
-        let particles = state
-            .get_population()
-            .ok_or(argmin::core::Error::msg("No particles"))?;
-        let values: Vec<BinaryParticleInfo> = particles
-            .iter()
-            .map(|p| (p.position, p.cost).into())
-            .collect();
-        let filename = self.dir.join(format!("{}_{}.json", self.file_prefix, iter));
-        let f = BufWriter::new(File::create(filename)?);
-        serde_json::to_writer(f, &values)?;
+        let best_particle = state
+            .get_best_param()
+            .ok_or(argmin::core::Error::msg("No best particle"))?;
+        let particle_info = ParticleInfo {
+            position: best_particle.position.data.as_slice().to_owned(),
+            cost: best_particle.cost,
+        };
+        self.best_particles.push(particle_info);
+        serde_json::to_writer(&File::create(&self.file)?, &self.best_particles)?;
         Ok(())
     }
 }
 
-#[derive(Serialize, Debug)]
-struct RVParticleInfo {
-    rv1: f64,
-    rv2: f64,
-    cost: f64,
-}
+impl<const N: usize> Observer<N> for BestParticleObserver<N> {}
 
-impl From<(na::SVector<f64, 2>, f64)> for RVParticleInfo {
-    fn from(p: (na::SVector<f64, 2>, f64)) -> Self {
-        Self {
-            rv1: p.0[0],
-            rv2: p.0[1],
-            cost: p.1,
-        }
-    }
-}
-
-impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 2>, f64>, f64>>
-    for PSObserver
-{
-    fn observe_iter(
-        &mut self,
-        state: &PopulationState<particleswarm::Particle<na::SVector<f64, 2>, f64>, f64>,
-        _kv: &KV,
-    ) -> Result<()> {
-        let iter = state.get_iter();
-        let particles = state
-            .get_population()
-            .ok_or(argmin::core::Error::msg("No particles"))?;
-        let values: Vec<RVParticleInfo> = particles
-            .iter()
-            .map(|p| (p.position, p.cost).into())
-            .collect();
-        let filename = self.dir.join(format!("{}_{}.json", self.file_prefix, iter));
-        let f = BufWriter::new(File::create(filename)?);
-        serde_json::to_writer(f, &values)?;
-        Ok(())
-    }
-}
-
-#[derive(Serialize, Debug)]
-struct BinaryWithoutRVParticleInfo {
-    teff1: f64,
-    m1: f64,
-    logg1: f64,
-    vsini1: f64,
-    teff2: f64,
-    m2: f64,
-    logg2: f64,
-    vsini2: f64,
-    light_ratio: f64,
-    cost: f64,
-}
-
-impl From<(na::SVector<f64, 9>, f64)> for BinaryWithoutRVParticleInfo {
-    fn from(p: (na::SVector<f64, 9>, f64)) -> Self {
-        Self {
-            teff1: p.0[0],
-            m1: p.0[1],
-            logg1: p.0[2],
-            vsini1: p.0[3],
-            teff2: p.0[4],
-            m2: p.0[5],
-            logg2: p.0[6],
-            vsini2: p.0[7],
-            light_ratio: p.0[8],
-            cost: p.1,
-        }
-    }
-}
-
-impl Observe<PopulationState<particleswarm::Particle<na::SVector<f64, 9>, f64>, f64>>
-    for PSObserver
-{
-    fn observe_iter(
-        &mut self,
-        state: &PopulationState<particleswarm::Particle<na::SVector<f64, 9>, f64>, f64>,
-        _kv: &KV,
-    ) -> Result<()> {
-        let iter = state.get_iter();
-        let particles = state
-            .get_population()
-            .ok_or(argmin::core::Error::msg("No particles"))?;
-        let values: Vec<BinaryWithoutRVParticleInfo> = particles
-            .iter()
-            .map(|p| (p.position, p.cost).into())
-            .collect();
-        let filename = self.dir.join(format!("{}_{}.json", self.file_prefix, iter));
-        let f = BufWriter::new(File::create(filename)?);
-        serde_json::to_writer(f, &values)?;
-        Ok(())
-    }
-}
 /// Cost function used in the PSO fitting
 struct CostFunction<'a, I: Interpolator, T: WavelengthDispersion, F: ContinuumFitter> {
     interpolator: &'a I,
@@ -485,7 +393,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> SingleFitter<T, F> {
         &self,
         interpolator: &impl Interpolator,
         observed_spectrum: &ObservedSpectrum,
-        trace_directory: Option<String>,
+        observer: impl Observer<5>,
         parallelize: bool,
         constraints: Vec<BoundsConstraint>,
     ) -> Result<OptimizationResult> {
@@ -504,12 +412,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> SingleFitter<T, F> {
         let solver = setup_pso(bounds, self.settings.clone());
         let fitter = Executor::new(cost_function, solver)
             .configure(|state| state.max_iters(self.settings.max_iters));
-        let result = if let Some(dir) = trace_directory {
-            let observer = PSObserver::new(&dir, "iteration");
-            fitter.add_observer(observer, ObserverMode::Always).run()?
-        } else {
-            fitter.run()?
-        };
+        let result = fitter.add_observer(observer, ObserverMode::Always).run()?;
 
         let best_param = result
             .state
@@ -721,12 +624,12 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
         }
     }
 
-    pub fn fit<I: Interpolator>(
+    pub fn fit<I: Interpolator, O: Observer<11>>(
         &self,
         interpolator: &I,
         continuum_interpolator: &I,
         observed_spectrum: &ObservedSpectrum,
-        trace_directory: Option<String>,
+        observer: O,
         parallelize: bool,
         constraints: Vec<BoundsConstraint>,
     ) -> Result<BinaryOptimizationResult> {
@@ -749,12 +652,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryFitter<T, F> {
         let fitter = Executor::new(cost_function, solver)
             .configure(|state| state.max_iters(self.settings.max_iters));
 
-        let result = if let Some(dir) = trace_directory {
-            let observer = PSObserver::new(&dir, "iteration");
-            fitter.add_observer(observer, ObserverMode::Always).run()?
-        } else {
-            fitter.run()?
-        };
+        let result = fitter.add_observer(observer, ObserverMode::Always).run()?;
 
         let best_param = result
             .state
@@ -903,7 +801,7 @@ impl<F: ContinuumFitter, D: WavelengthDispersion> BinaryRVFitter<F, D> {
         continuum2: &na::DVector<FluxFloat>,
         light_ratio: f64,
         observed_spectrum: &ObservedSpectrum,
-        trace_directory: Option<String>,
+        observer: impl Observer<2>,
         constraints: Vec<BoundsConstraint>,
     ) -> Result<BinaryRVOptimizationResult> {
         let cost_function = RVCostFunction {
@@ -922,12 +820,7 @@ impl<F: ContinuumFitter, D: WavelengthDispersion> BinaryRVFitter<F, D> {
         let fitter = Executor::new(cost_function.clone(), solver)
             .configure(|state| state.max_iters(self.settings.max_iters));
 
-        let result = if let Some(dir) = trace_directory {
-            let observer = PSObserver::new(&dir, "iteration");
-            fitter.add_observer(observer, ObserverMode::Always).run()?
-        } else {
-            fitter.run()?
-        };
+        let result = fitter.add_observer(observer, ObserverMode::Always).run()?;
 
         let time = match result.state.time {
             Some(t) => t.as_secs_f64(),
@@ -1071,13 +964,13 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryTimeriesKnownRVFitter<T,
         }
     }
 
-    pub fn fit<I: Interpolator>(
+    pub fn fit<I: Interpolator, O: Observer<9>>(
         &self,
         interpolator: &I,
         continuum_interpolator: &I,
         observed_spectra: &Vec<ObservedSpectrum>,
         rvs: &Vec<[f64; 2]>,
-        trace_directory: Option<String>,
+        observer: O,
         parallelize: bool,
         constraints: Vec<BoundsConstraint>,
     ) -> Result<BinaryTimeseriesOptimizationResult> {
@@ -1098,12 +991,7 @@ impl<T: WavelengthDispersion, F: ContinuumFitter> BinaryTimeriesKnownRVFitter<T,
         let fitter = Executor::new(cost_function, solver)
             .configure(|state| state.max_iters(self.settings.max_iters));
 
-        let result = if let Some(dir) = trace_directory {
-            let observer = PSObserver::new(&dir, "iteration");
-            fitter.add_observer(observer, ObserverMode::Always).run()?
-        } else {
-            fitter.run()?
-        };
+        let result = fitter.add_observer(observer, ObserverMode::Always).run()?;
 
         let best_param = result
             .state
