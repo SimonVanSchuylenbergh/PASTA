@@ -180,6 +180,9 @@ impl<const N: usize>
     Observe<PopulationState<particleswarm::Particle<na::SVector<f64, N>, f64>, f64>>
     for Box<dyn Observer<N>>
 {
+    fn observe_iter(&mut self, state: &PopulationState<particleswarm::Particle<na::SVector<f64, N>, f64>, f64>, kv: &KV) -> std::result::Result<(), anyhow::Error> {
+        self.as_mut().observe_iter(state, kv)
+    }
 }
 
 impl<const N: usize> Observer<N> for Box<dyn Observer<N>> {}
