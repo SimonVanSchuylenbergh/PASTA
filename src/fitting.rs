@@ -180,7 +180,11 @@ impl<const N: usize>
     Observe<PopulationState<particleswarm::Particle<na::SVector<f64, N>, f64>, f64>>
     for Box<dyn Observer<N>>
 {
-    fn observe_iter(&mut self, state: &PopulationState<particleswarm::Particle<na::SVector<f64, N>, f64>, f64>, kv: &KV) -> std::result::Result<(), anyhow::Error> {
+    fn observe_iter(
+        &mut self,
+        state: &PopulationState<particleswarm::Particle<na::SVector<f64, N>, f64>, f64>,
+        kv: &KV,
+    ) -> std::result::Result<(), anyhow::Error> {
         self.as_mut().observe_iter(state, kv)
     }
 }
@@ -755,9 +759,9 @@ impl<F: ContinuumFitter, D: WavelengthDispersion> argmin::core::CostFunction
         let lr =
             self.light_ratio as FluxFloat * shifted_continuum2.mean() / shifted_continuum1.mean();
 
-        let synth_spec = shifted_synth1.component_mul(&shifted_continuum1) * lr
-            + shifted_synth2.component_mul(&shifted_continuum2);
-        let continuum = shifted_continuum1 * lr + shifted_continuum2;
+        let synth_spec = shifted_synth1.component_mul(&shifted_continuum1)
+            + shifted_synth2.component_mul(&shifted_continuum2) * lr;
+        let continuum = shifted_continuum1 + shifted_continuum2 * lr;
         let synth_spec_norm = synth_spec.component_div(&continuum);
 
         let (_, ls) = self

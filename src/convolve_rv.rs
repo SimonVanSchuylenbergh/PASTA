@@ -603,7 +603,7 @@ pub fn shift_resample_and_add_binary_components(
         let c2 = (1.0 - weight) * continuum2[j] + weight * continuum2[j + 1];
 
         // Weighted sum of fluxes divided by weighted sum of continua
-        (light_ratio * n1 * c1 + n2 * c2) / (light_ratio * c1 + c2)
+        (n1 * c1 + light_ratio * n2 * c2) / (c1 + light_ratio * c2)
     };
 
     Ok(match input_wl {

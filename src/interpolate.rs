@@ -816,7 +816,7 @@ pub trait Interpolator: Send + Sync {
             star2_parameters[3],
             star2_parameters[4],
         )?;
-        Ok(model1 * light_ratio + model2 * (1.0 - light_ratio))
+        Ok(model1 * (1.0 - light_ratio) + model2 * (light_ratio))
     }
 
     fn produce_binary_components(
@@ -855,7 +855,7 @@ pub trait Interpolator: Send + Sync {
             star2_parameters[2],
         )?;
 
-        let lr = light_ratio * continuum2.mean() / continuum1.mean();
+        let lr = light_ratio * continuum1.mean() / continuum2.mean();
         Ok(BinaryComponents {
             norm_model1,
             norm_model2,
