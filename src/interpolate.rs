@@ -914,7 +914,7 @@ impl<F: ModelFetcher> GridInterpolator<F> {
     }
 }
 
-const BATCH_SIZE: usize = 128;
+const BATCH_SIZE: usize = 32;
 
 impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
     type GB = Grid;
