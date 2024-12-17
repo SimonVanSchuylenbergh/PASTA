@@ -1,12 +1,12 @@
 #![allow(non_snake_case, clippy::too_many_arguments, non_upper_case_globals)]
-mod bounds;
-mod continuum_fitting;
-mod convolve_rv;
-mod cubic;
-mod fitting;
-mod interpolate;
-mod model_fetchers;
-mod particleswarm;
+pub mod bounds;
+pub mod continuum_fitting;
+pub mod convolve_rv;
+pub mod cubic;
+pub mod fitting;
+pub mod interpolate;
+pub mod model_fetchers;
+pub mod particleswarm;
 
 use anyhow::Result;
 use bounds::{BoundsConstraint, Constraint};
