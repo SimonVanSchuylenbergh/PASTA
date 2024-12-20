@@ -1,40 +1,55 @@
 use crate::interpolate::{CowVector, Grid, ModelFetcher};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use indicatif::ProgressBar;
 use nalgebra as na;
 use npy::NpyData;
 use rayon::prelude::*;
 use std::cmp::Eq;
 use std::collections::VecDeque;
+use std::fs::{read_dir, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use tar::Archive;
+use zstd::stream::copy_decode;
 
-pub fn read_npy_file(file_path: PathBuf) -> Result<Vec<u16>> {
-    let mut file = std::fs::File::open(file_path.clone())
-        .context(format!("Error loading {}", file_path.to_str().unwrap()))?;
+pub fn read_npy_file(mut file: impl Read) -> Result<Vec<u16>> {
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)?;
-    let data: NpyData<u16> = NpyData::from_bytes(&buf)
-        .context(format!("Error loading {}", file_path.to_str().unwrap()))?;
+    let data: NpyData<u16> = NpyData::from_bytes(&buf)?;
     Ok(data.to_vec())
 }
 
-pub fn read_spectrum(
-    dir: &Path,
-    teff: f64,
-    m: f64,
-    logg: f64,
-    includes_factor: bool,
-) -> Result<(na::DVector<u16>, Option<f32>)> {
+fn label_from_filename(filename: &str) -> Result<[f64; 3]> {
+    // e.g. lp0020_08000_0430.npy
+    let parts: Vec<&str> = filename.split('.').next().unwrap().split('_').collect();
+    if parts.len() != 3 || parts[0].len() != 6 || parts[1].len() != 5 || parts[2].len() != 4 {
+        bail!("Invalid filename: {}", filename);
+    }
+    let sign = if parts[0].starts_with("lm") {
+        -1.0
+    } else {
+        1.0
+    };
+    let m = sign * parts[0][2..].parse::<f64>()? / 100.0;
+    let teff = parts[1].parse::<f64>()?;
+    let logg = parts[2].parse::<f64>()? / 100.0;
+    Ok([teff, m, logg])
+}
+fn filename_from_labels(teff: f64, m: f64, logg: f64) -> String {
     // e.g. 00027_lm0050_07000_0350_0020_0000_Vsini_0000.npy
     let _teff = teff.round() as i32;
     let _m = (m * 100.0).round() as i32;
     let _logg = (logg * 100.0).round() as i32;
     let sign = if _m < 0 { "m" } else { "p" };
-    let filename = format!("l{}{:04}_{:05}_{:04}", sign, _m.abs(), _teff, _logg);
-    let file_path = dir.join(format!("{}.npy", filename));
-    let result = read_npy_file(file_path.clone())?;
+    format!("l{}{:04}_{:05}_{:04}", sign, _m.abs(), _teff, _logg)
+}
+
+pub fn read_spectrum(
+    file: impl Read,
+    includes_factor: bool,
+) -> Result<(na::DVector<u16>, Option<f32>)> {
+    let result = read_npy_file(file)?;
     if includes_factor {
         let bytes1 = result[0].to_le_bytes();
         let bytes2 = result[1].to_le_bytes();
@@ -51,30 +66,27 @@ pub fn read_spectrum(
     }
 }
 
-fn labels_from_filename(filename: &str) -> Result<[f64; 3]> {
-    // e.g. lp0020_08000_0430.npy
-    let parts: Vec<&str> = filename.split('.').next().unwrap().split('_').collect();
-    if parts.len() != 3 || parts[0].len() != 6 || parts[1].len() != 5 || parts[2].len() != 4 {
-        bail!("Invalid filename: {}", filename);
-    }
-    let sign = if parts[0].starts_with("lm") {
-        -1.0
-    } else {
-        1.0
-    };
-    let m = sign * parts[0][2..].parse::<f64>()? / 100.0;
-    let teff = parts[1].parse::<f64>()?;
-    let logg = parts[2].parse::<f64>()? / 100.0;
-    Ok([teff, m, logg])
+pub fn read_spectrum_from_dir(
+    dir: &Path,
+    teff: f64,
+    m: f64,
+    logg: f64,
+    includes_factor: bool,
+) -> Result<(na::DVector<u16>, Option<f32>)> {
+    let filename = filename_from_labels(teff, m, logg);
+    let file_path = dir.join(format!("{}.npy", filename));
+    let file = File::open(file_path.clone())
+        .context(format!("Error loading {}", file_path.to_str().unwrap()))?;
+    read_spectrum(file, includes_factor).with_context(|| format!("Error reading {}", filename))
 }
 
 fn get_model_labels_in_dir(dir: &PathBuf) -> Result<Vec<[f64; 3]>> {
-    std::fs::read_dir(dir)
+    read_dir(dir)
         .with_context(|| format!("Not found {:?}", dir))?
         .map(|entry| {
             let path = entry?.path();
             let filename = path.file_name().unwrap().to_str().unwrap();
-            labels_from_filename(filename)
+            label_from_filename(filename)
         })
         .collect()
 }
@@ -107,9 +119,8 @@ impl ModelFetcher for OnDiskFetcher {
         let teff = self.grid.teff.get(i)?;
         let m = self.grid.m.get(j)?;
         let logg = self.grid.logg.get(k)?;
-        // println!("Finding i={}, j={}, k={}", i, j, k);
-        // println!("teff={}, m={}, logg={}", teff, m, logg);
-        let (spec, factor) = read_spectrum(&self.dir, teff, m, logg, self.includes_factor)?;
+        let (spec, factor) =
+            read_spectrum_from_dir(&self.dir, teff, m, logg, self.includes_factor)?;
         Ok((CowVector::Owned(spec), factor.unwrap_or(1.0)))
     }
 }
@@ -121,46 +132,109 @@ pub struct InMemFetcher {
     pub factors: Option<na::DVector<f32>>,
 }
 
-fn load_spectra(
-    dir: PathBuf,
-    includes_factor: bool,
-    grid: &Grid,
-) -> Result<(na::DMatrix<u16>, Option<na::DVector<f32>>)> {
-    let combinations = grid.list_gridpoints();
-
-    let bar = ProgressBar::new(combinations.len() as u64);
-    let vec_of_spectra_and_factors = combinations
-        .into_par_iter()
-        .map(|[teff, m, logg]| {
-            bar.inc(1);
-            read_spectrum(&dir, teff, m, logg, includes_factor)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let (spectra, factors): (Vec<_>, Vec<_>) = vec_of_spectra_and_factors.into_iter().unzip();
-    if includes_factor {
-        Ok((
-            na::DMatrix::from_columns(&spectra),
-            factors
-                .into_iter()
-                .collect::<Option<Vec<_>>>()
-                .map(|v| na::DVector::from_iterator(v.len(), v)),
-        ))
-    } else {
-        Ok((na::DMatrix::from_columns(&spectra), None))
-    }
-}
-
 impl InMemFetcher {
     pub fn new(dir: &str, includes_factor: bool) -> Result<Self> {
         let model_labels = get_model_labels_in_dir(&PathBuf::from(dir))?;
         let grid = Grid::new(model_labels)?;
-        let (loaded_spectra, factors) = load_spectra(PathBuf::from(dir), includes_factor, &grid)?;
+        let combinations = grid.list_gridpoints();
+        let bar = ProgressBar::new(combinations.len() as u64);
+        let vec_of_spectra_and_factors = combinations
+            .into_par_iter()
+            .map(|[teff, m, logg]| {
+                bar.inc(1);
+                read_spectrum_from_dir(&PathBuf::from(dir), teff, m, logg, includes_factor)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (spectra, factors): (Vec<_>, Vec<_>) = vec_of_spectra_and_factors.into_iter().unzip();
+        let (loaded_spectra, factors) = if includes_factor {
+            (
+                na::DMatrix::from_columns(&spectra),
+                factors
+                    .into_iter()
+                    .collect::<Option<Vec<_>>>()
+                    .map(|v| na::DVector::from_iterator(v.len(), v)),
+            )
+        } else {
+            (na::DMatrix::from_columns(&spectra), None)
+        };
         let _n = loaded_spectra.shape().0;
         Ok(Self {
             grid,
             loaded_spectra,
             factors,
         })
+    }
+
+    pub fn from_tar_zstd(file_path: PathBuf, includes_factor: bool) -> Result<Self> {
+        let file = File::open(file_path.clone())
+            .context(format!("Error loading {}", file_path.to_str().unwrap()))?;
+        let mut buffer = Vec::new();
+        let time = std::time::Instant::now();
+        copy_decode(file, &mut buffer)?;
+        println!("Uncrompressed in {:?}", time.elapsed());
+        let time = std::time::Instant::now();
+        let mut archive = Archive::new(&buffer[..]);
+        let model_labels_files = archive
+            .entries()?
+            .into_iter()
+            .filter_map(|entry| {
+                let binding = entry.unwrap();
+                let path = binding.path().unwrap();
+                let filename = path
+                    .file_name()
+                    .ok_or(anyhow!("no file name"))
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
+                if !filename.starts_with("l") {
+                    return None;
+                }
+                let label = label_from_filename(filename).unwrap();
+                let spec = read_spectrum(binding, includes_factor).unwrap();
+                Some((label, spec))
+            })
+            .collect::<Vec<_>>();
+        println!("Unpacked in {:?}", time.elapsed());
+        let time = std::time::Instant::now();
+        let (model_labels, spectra): (Vec<_>, Vec<_>) = model_labels_files.into_iter().unzip();
+        println!("Unzipped in {:?}", time.elapsed());
+        let time = std::time::Instant::now();
+        let grid = Grid::new(model_labels.clone())?;
+        let combinations = grid.list_gridpoints();
+        println!("Constructed grid in {:?}", time.elapsed());
+        let time = std::time::Instant::now();
+        let vec_of_spectra_and_factors = combinations
+            .into_iter()
+            .map(|label| {
+                let pos = model_labels
+                    .iter()
+                    .position(|l| *l == label)
+                    .ok_or(anyhow!("{:?} not found in archive", label))?;
+                let spec: na::DVectorView<u16> = spectra[pos].0.as_view();
+                let factor = spectra[pos].1;
+                Ok((spec, factor))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        println!("Mapped spectra in {:?}", time.elapsed());
+        let time = std::time::Instant::now();
+        let (spectra, factors): (Vec<_>, Vec<_>) = vec_of_spectra_and_factors.into_iter().unzip();
+        let loaded_spectra = na::DMatrix::from_columns(&spectra);
+        let factors = if includes_factor {
+            factors
+                .into_iter()
+                .collect::<Option<Vec<_>>>()
+                .map(|v| na::DVector::from_iterator(v.len(), v))
+        } else {
+            None
+        };
+        println!("Constructed matrix in {:?}", time.elapsed());
+        let _n = loaded_spectra.shape().0;
+        Ok(Self {
+            grid,
+            loaded_spectra,
+            factors,
+        })
+        // panic!("not implemented")
     }
 }
 
@@ -260,7 +334,8 @@ impl ModelFetcher for CachedFetcher {
             let teff = self.grid.teff.get(i)?;
             let m = self.grid.m.get(j)?;
             let logg = self.grid.logg.get(k)?;
-            let (spec, factor) = read_spectrum(&self.dir, teff, m, logg, self.includes_factor)?;
+            let (spec, factor) =
+                read_spectrum_from_dir(&self.dir, teff, m, logg, self.includes_factor)?;
             let mut shard = self.shards[shard_idx].write().unwrap();
             shard.put((i, j, k), (spec.clone(), factor.unwrap_or(1.0)));
             Ok((CowVector::Owned(spec), factor.unwrap_or(1.0)))

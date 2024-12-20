@@ -707,7 +707,9 @@ impl PyWavelengthDispersion {
             if out_file.exists() {
                 return;
             }
-            let arr: na::DVector<u16> = read_npy_file(file).unwrap().into();
+            let arr: na::DVector<u16> = read_npy_file(std::fs::File::open(file).unwrap())
+                .unwrap()
+                .into();
             if includes_factor {
                 let bytes1 = arr[0].to_le_bytes();
                 let bytes2 = arr[1].to_le_bytes();
@@ -1883,6 +1885,19 @@ impl InMemInterpolator {
     #[new]
     fn new(dir: &str, includes_factor: bool, wavelength: WlGrid) -> PyResult<InMemInterpolator> {
         let fetcher = InMemFetcher::new(dir, includes_factor)?;
+        Ok(InMemInterpolator(GridInterpolator::new(
+            fetcher,
+            wavelength.0,
+        )))
+    }
+
+    #[staticmethod]
+    fn from_tar_zstd(
+        file_path: &str,
+        includes_factor: bool,
+        wavelength: WlGrid,
+    ) -> PyResult<InMemInterpolator> {
+        let fetcher = InMemFetcher::from_tar_zstd(PathBuf::from(file_path), includes_factor)?;
         Ok(InMemInterpolator(GridInterpolator::new(
             fetcher,
             wavelength.0,

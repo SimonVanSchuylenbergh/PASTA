@@ -26,6 +26,8 @@ numpy = { version= "0.21.0", features = ["nalgebra"]}
 enum_dispatch = "0.3.13"
 num-traits = "0.2.19"
 approx = "0.5.1"
+zstd = "0.13.2"
+tar = "0.4.43"
 
 [dependencies.pyo3]
 version = "0.21.1"
