@@ -169,10 +169,7 @@ impl InMemFetcher {
         let file = File::open(file_path.clone())
             .context(format!("Error loading {}", file_path.to_str().unwrap()))?;
         let mut buffer = Vec::new();
-        let time = std::time::Instant::now();
         copy_decode(file, &mut buffer)?;
-        println!("Uncrompressed in {:?}", time.elapsed());
-        let time = std::time::Instant::now();
         let mut archive = Archive::new(&buffer[..]);
         let model_labels_files = archive
             .entries()?
@@ -194,15 +191,9 @@ impl InMemFetcher {
                 Some((label, spec))
             })
             .collect::<Vec<_>>();
-        println!("Unpacked in {:?}", time.elapsed());
-        let time = std::time::Instant::now();
         let (model_labels, spectra): (Vec<_>, Vec<_>) = model_labels_files.into_iter().unzip();
-        println!("Unzipped in {:?}", time.elapsed());
-        let time = std::time::Instant::now();
         let grid = Grid::new(model_labels.clone())?;
         let combinations = grid.list_gridpoints();
-        println!("Constructed grid in {:?}", time.elapsed());
-        let time = std::time::Instant::now();
         let vec_of_spectra_and_factors = combinations
             .into_iter()
             .map(|label| {
@@ -215,8 +206,6 @@ impl InMemFetcher {
                 Ok((spec, factor))
             })
             .collect::<Result<Vec<_>>>()?;
-        println!("Mapped spectra in {:?}", time.elapsed());
-        let time = std::time::Instant::now();
         let (spectra, factors): (Vec<_>, Vec<_>) = vec_of_spectra_and_factors.into_iter().unzip();
         let loaded_spectra = na::DMatrix::from_columns(&spectra);
         let factors = if includes_factor {
@@ -227,7 +216,6 @@ impl InMemFetcher {
         } else {
             None
         };
-        println!("Constructed matrix in {:?}", time.elapsed());
         let _n = loaded_spectra.shape().0;
         Ok(Self {
             grid,
