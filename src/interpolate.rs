@@ -940,7 +940,10 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
                     .iter()
                     .map(move |m_index| match (teff_logg_index, m_index) {
                         (Some((i, j)), Some(k)) => self.fetcher.find_spectrum(*i, *k, *j),
-                        _ => Ok((CowVector::Owned(na::DVector::zeros(self.synth_wl.n())), 1.0)),
+                        _ => Ok((
+                            CowVector::Owned(na::DVector::zeros(self.synth_wl.n())),
+                            1.0 / 65535.0,
+                        )),
                     })
             })
             .collect::<Result<Vec<(CowVector, f32)>>>()?;
@@ -956,7 +959,7 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
                     j,
                     &column
                         .fixed_rows::<BATCH_SIZE>(start)
-                        .map(|x| (x as FluxFloat) / 65535.0 * factor),
+                        .map(|x| (x as FluxFloat) * factor),
                 );
             }
 

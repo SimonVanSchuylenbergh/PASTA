@@ -36,7 +36,7 @@ pub fn benchmark(c: &mut Criterion) {
     let dispersion = NoConvolutionDispersionTarget::new(wl.clone(), &wl_grid);
     let interpolated = interpolator.interpolate(8000.0, 0.0, 3.5).unwrap();
     let convolved_for_rotation = convolve_rotation(&wl_grid, &interpolated, 20.0).unwrap();
-    let model = dispersion.convolve(convolved_for_rotation.clone()).unwrap();
+    let model = dispersion.convolve_segment(convolved_for_rotation.clone()).unwrap();
     let output = shift_and_resample(&wl_grid, &model, &dispersion, 1.0).unwrap();
     c.bench_function("produce_model", |b| {
         b.iter(|| {
@@ -52,7 +52,7 @@ pub fn benchmark(c: &mut Criterion) {
         b.iter(|| convolve_rotation(&wl_grid, &interpolated, 20.0).unwrap())
     });
     c.bench_function("convolve resolution", |b| {
-        b.iter(|| dispersion.convolve(convolved_for_rotation.clone()).unwrap())
+        b.iter(|| dispersion.convolve_segment(convolved_for_rotation.clone()).unwrap())
     });
     c.bench_function("resample", |b| {
         b.iter(|| shift_and_resample(&wl_grid, &model, &dispersion, 1.0).unwrap())

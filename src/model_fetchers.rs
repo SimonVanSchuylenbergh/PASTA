@@ -59,7 +59,7 @@ pub fn read_spectrum(
         }
         Ok((
             na::DVector::from_iterator(result.len() - 2, result.into_iter().skip(2)),
-            Some(factor),
+            Some(factor / 65535.0),
         ))
     } else {
         Ok((na::DVector::from_iterator(result.len(), result), None))
@@ -121,7 +121,7 @@ impl ModelFetcher for OnDiskFetcher {
         let logg = self.grid.logg.get(k)?;
         let (spec, factor) =
             read_spectrum_from_dir(&self.dir, teff, m, logg, self.includes_factor)?;
-        Ok((CowVector::Owned(spec), factor.unwrap_or(1.0)))
+        Ok((CowVector::Owned(spec), factor.unwrap_or(1.0 / 65535.0)))
     }
 }
 
@@ -237,7 +237,10 @@ impl ModelFetcher for InMemFetcher {
             + j;
         Ok((
             CowVector::Borrowed(self.loaded_spectra.column(idx)),
-            self.factors.as_ref().map(|fac| fac[idx]).unwrap_or(1.0),
+            self.factors
+                .as_ref()
+                .map(|fac| fac[idx])
+                .unwrap_or(1.0 / 65535.0),
         ))
     }
 }
@@ -325,8 +328,8 @@ impl ModelFetcher for CachedFetcher {
             let (spec, factor) =
                 read_spectrum_from_dir(&self.dir, teff, m, logg, self.includes_factor)?;
             let mut shard = self.shards[shard_idx].write().unwrap();
-            shard.put((i, j, k), (spec.clone(), factor.unwrap_or(1.0)));
-            Ok((CowVector::Owned(spec), factor.unwrap_or(1.0)))
+            shard.put((i, j, k), (spec.clone(), factor.unwrap_or(1.0 / 65535.0)));
+            Ok((CowVector::Owned(spec), factor.unwrap_or(1.0 / 65535.0)))
         }
     }
 }
