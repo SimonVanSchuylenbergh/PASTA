@@ -1,5 +1,5 @@
 use crate::convolve_rv::{
-    convolve_rotation, shift_and_resample, shift_resample_and_add_binary_components,
+    convolve_rotation, shift_and_resample, shift_resample_and_add_binary_components, ArraySegment,
     WavelengthDispersion,
 };
 use crate::cubic::{
@@ -744,10 +744,10 @@ impl WlGrid {
 }
 
 pub struct BinaryComponents {
-    pub norm_model1: na::DVector<FluxFloat>,
-    pub continuum1: na::DVector<FluxFloat>,
-    pub norm_model2: na::DVector<FluxFloat>,
-    pub continuum2: na::DVector<FluxFloat>,
+    pub norm_model1: ArraySegment,
+    pub continuum1: ArraySegment,
+    pub norm_model2: ArraySegment,
+    pub continuum2: ArraySegment,
     pub lr: f32,
 }
 
@@ -765,7 +765,7 @@ pub trait Interpolator: Send + Sync {
         m: f64,
         logg: f64,
         vsini: f64,
-    ) -> Result<na::DVector<FluxFloat>>;
+    ) -> Result<ArraySegment>;
     fn interpolate_linear_and_convolve(
         &self,
         target_dispersion: &impl WavelengthDispersion,
@@ -773,7 +773,7 @@ pub trait Interpolator: Send + Sync {
         m: f64,
         logg: f64,
         vsini: f64,
-    ) -> Result<na::DVector<FluxFloat>>;
+    ) -> Result<ArraySegment>;
     fn produce_model(
         &self,
         target_dispersion: &impl WavelengthDispersion,
@@ -816,7 +816,7 @@ pub trait Interpolator: Send + Sync {
             star2_parameters[3],
             star2_parameters[4],
         )?;
-        Ok(model1 * (1.0 - light_ratio) + model2 * (light_ratio))
+        Ok(model1 * light_ratio + model2 * (1.0 - light_ratio))
     }
 
     fn produce_binary_components(
@@ -855,12 +855,12 @@ pub trait Interpolator: Send + Sync {
             star2_parameters[2],
         )?;
 
-        let lr = light_ratio * continuum1.mean() / continuum2.mean();
+        let lr = light_ratio * continuum2.mean() / continuum1.mean();
         Ok(BinaryComponents {
             norm_model1,
             norm_model2,
-            continuum1,
-            continuum2,
+            continuum1: continuum1.into(),
+            continuum2: continuum2.into(),
             lr,
         })
     }
@@ -914,7 +914,7 @@ impl<F: ModelFetcher> GridInterpolator<F> {
     }
 }
 
-const BATCH_SIZE: usize = 32;
+const BATCH_SIZE: usize = 128;
 
 impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
     type GB = Grid;
@@ -1031,17 +1031,16 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         m: f64,
         logg: f64,
         vsini: f64,
-    ) -> Result<na::DVector<FluxFloat>> {
+    ) -> Result<ArraySegment> {
         let interpolated = self
             .interpolate(teff, m, logg)
             .with_context(|| format!("Error while interpolating at ({}, {}, {})", teff, m, logg))?;
 
         let convolved_for_rotation = convolve_rotation(&self.synth_wl, &interpolated, vsini)
             .with_context(|| format!("Error during rotational broadening, vsini={}", vsini))?;
-        let model = target_dispersion
-            .convolve(convolved_for_rotation)
-            .context("Error during instrument resolution convolution")?;
-        Ok(model)
+        target_dispersion
+            .convolve_segment(convolved_for_rotation)
+            .context("Error during instrument resolution convolution")
     }
 
     fn interpolate_linear_and_convolve(
@@ -1051,17 +1050,16 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         m: f64,
         logg: f64,
         vsini: f64,
-    ) -> Result<na::DVector<FluxFloat>> {
+    ) -> Result<ArraySegment> {
         let interpolated = self
             .interpolate_linear(teff, m, logg)
             .with_context(|| format!("Error while interpolating at ({}, {}, {})", teff, m, logg))?;
 
         let convolved_for_rotation = convolve_rotation(&self.synth_wl, &interpolated, vsini)
             .with_context(|| format!("Error during rotational broadening, vsini={}", vsini))?;
-        let model = target_dispersion
-            .convolve(convolved_for_rotation)
-            .context("Error during instrument resolution convolution")?;
-        Ok(model)
+        target_dispersion
+            .convolve_segment(convolved_for_rotation)
+            .context("Error during instrument resolution convolution")
     }
 
     fn produce_model(
@@ -1080,7 +1078,7 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         let convolved_for_rotation = convolve_rotation(&self.synth_wl, &interpolated, vsini)
             .with_context(|| format!("Error during rotational broadening, vsini={}", vsini))?;
         let model = target_dispersion
-            .convolve(convolved_for_rotation)
+            .convolve_segment(convolved_for_rotation)
             .context("Error during instrument resolution convolution")?;
         let output = shift_and_resample(&self.synth_wl, &model, target_dispersion, rv)
             .context("error during RV shifting / resampling")?;
@@ -1130,7 +1128,7 @@ impl<F: ModelFetcher> Interpolator for GridInterpolator<F> {
         )
         .with_context(|| format!("Error during rotational broadening, vsini={}", vsini))?;
         let model = target_dispersion
-            .convolve(convolved_for_rotation)
+            .convolve_segment(convolved_for_rotation)
             .context("Error during instrument resolution convolution")?;
         let output = shift_and_resample(&self.synth_wl, &model, target_dispersion, rv)
             .context("error during RV shifting / resampling")?;

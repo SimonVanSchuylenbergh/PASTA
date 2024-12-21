@@ -5,7 +5,7 @@ use itertools::Itertools;
 use nalgebra as na;
 use realfft::RealFftPlanner;
 use std::iter::once;
-use std::ops::AddAssign;
+use std::ops::{AddAssign, Index};
 
 /// Trait for wavelength dispersion of the instrument. It provides the wavelength grid and
 /// spectral resolution.
@@ -14,6 +14,56 @@ pub trait WavelengthDispersion: Sync + Send + Clone {
     fn wavelength(&self) -> &na::DVector<f64>;
     fn float_indices_in_synth_grid(&self) -> &na::DVector<f64>;
     fn convolve(&self, flux: na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>>;
+    fn convolve_segment(&self, flux: ArraySegment) -> Result<ArraySegment> {
+        Ok(self.convolve(flux.as_array())?.into())
+    }
+}
+
+#[derive(Clone)]
+pub struct ArraySegment {
+    array: na::DVector<FluxFloat>,
+    start: usize,
+    len: usize,
+}
+
+impl ArraySegment {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn as_view(&self) -> na::DVectorView<FluxFloat> {
+        self.array.rows(self.start, self.len)
+    }
+
+    pub fn as_array(&self) -> na::DVector<FluxFloat> {
+        self.as_view().into_owned()
+    }
+}
+
+impl From<na::DVector<FluxFloat>> for ArraySegment {
+    fn from(value: na::DVector<FluxFloat>) -> Self {
+        Self {
+            start: 0,
+            len: value.len(),
+            array: value,
+        }
+    }
+}
+
+impl From<Vec<FluxFloat>> for ArraySegment {
+    fn from(value: Vec<FluxFloat>) -> Self {
+        Self {
+            start: 0,
+            len: value.len(),
+            array: na::DVector::from_vec(value),
+        }
+    }
+}
+impl Index<usize> for ArraySegment {
+    type Output = FluxFloat;
+    fn index(&self, index: usize) -> &Self::Output {
+        self.array.index(index + self.start)
+    }
 }
 
 /// Used when the models are already convolved with the instrument resolution.
@@ -46,6 +96,10 @@ impl WavelengthDispersion for NoConvolutionDispersionTarget {
 
     /// Convolve the input flux with the instrument resolution dispersion kernel.
     fn convolve(&self, flux: na::DVector<FluxFloat>) -> Result<na::DVector<FluxFloat>> {
+        Ok(flux)
+    }
+
+    fn convolve_segment(&self, flux: ArraySegment) -> Result<ArraySegment> {
         Ok(flux)
     }
 }
@@ -431,7 +485,7 @@ pub fn convolve_rotation(
     input_wl: &WlGrid,
     input_flux: &na::DVector<FluxFloat>,
     vsini: f64,
-) -> Result<na::DVector<FluxFloat>> {
+) -> Result<ArraySegment> {
     if vsini < 0.0 {
         return Err(anyhow!("vsini must be positive"));
     }
@@ -453,7 +507,7 @@ pub fn convolve_rotation(
     };
     let kernel = build_rotation_kernel(vsini, dvelo);
     if vsini == 0.0 || kernel.len() <= 2 {
-        return Ok(input_flux.clone());
+        return Ok(input_flux.clone().into());
     }
     if kernel.len() > FFTSIZE {
         return Err(anyhow!(
@@ -464,15 +518,20 @@ pub fn convolve_rotation(
         ));
     }
     let convolved = oa_convolve(input_flux, &kernel)?;
-    Ok(convolved
-        .rows(kernel.len() / 2, input_flux.len())
-        .into_owned())
+    Ok(ArraySegment {
+        array: convolved,
+        start: kernel.len() / 2,
+        len: input_flux.len(),
+    })
+    // Ok(convolved
+    //     .rows(kernel.len() / 2, input_flux.len())
+    //     .into_owned())
 }
 
 /// Shift the input spectrum by rv and resample it to the target wavelength grid.
 pub fn shift_and_resample(
     input_wl: &WlGrid,
-    input_flux: &na::DVector<FluxFloat>,
+    input_flux: &ArraySegment,
     target_dispersion: &impl WavelengthDispersion,
     rv: f64,
 ) -> Result<na::DVector<FluxFloat>> {

@@ -3,7 +3,7 @@ use crate::bounds::{
 };
 use crate::continuum_fitting::ContinuumFitter;
 use crate::convolve_rv::{
-    shift_and_resample, shift_resample_and_add_binary_components, WavelengthDispersion,
+    shift_and_resample, shift_resample_and_add_binary_components, ArraySegment, WavelengthDispersion
 };
 use crate::interpolate::{FluxFloat, Interpolator, WlGrid};
 use crate::particleswarm::{self};
@@ -722,10 +722,10 @@ struct RVCostFunction<'a, F: ContinuumFitter, D: WavelengthDispersion> {
     observed_dispersion: &'a D,
     observed_spectrum: &'a ObservedSpectrum,
     synth_wl: &'a WlGrid,
-    model1: &'a na::DVector<FluxFloat>,
-    model2: &'a na::DVector<FluxFloat>,
-    continuum1: &'a na::DVector<FluxFloat>,
-    continuum2: &'a na::DVector<FluxFloat>,
+    model1: &'a ArraySegment,
+    model2: &'a ArraySegment,
+    continuum1: &'a ArraySegment,
+    continuum2: &'a ArraySegment,
     light_ratio: f64,
 }
 
@@ -739,19 +739,27 @@ impl<F: ContinuumFitter, D: WavelengthDispersion> argmin::core::CostFunction
         let rv1 = param[0];
         let rv2 = param[1];
 
-        let shifted_synth1 =
-            shift_and_resample(self.synth_wl, self.model1, self.observed_dispersion, rv1)?;
-        let shifted_synth2 =
-            shift_and_resample(self.synth_wl, self.model2, self.observed_dispersion, rv2)?;
+        let shifted_synth1 = shift_and_resample(
+            self.synth_wl,
+            &self.model1.clone(),
+            self.observed_dispersion,
+            rv1,
+        )?;
+        let shifted_synth2 = shift_and_resample(
+            self.synth_wl,
+            &self.model2.clone(),
+            self.observed_dispersion,
+            rv2,
+        )?;
         let shifted_continuum1 = shift_and_resample(
             self.synth_wl,
-            self.continuum1,
+            &self.continuum1.clone(),
             self.observed_dispersion,
             rv1,
         )?;
         let shifted_continuum2 = shift_and_resample(
             self.synth_wl,
-            self.continuum2,
+            &self.continuum2.clone(),
             self.observed_dispersion,
             rv2,
         )?;
@@ -802,10 +810,10 @@ impl<F: ContinuumFitter, D: WavelengthDispersion> BinaryRVFitter<F, D> {
 
     pub fn fit(
         &self,
-        model1: &na::DVector<FluxFloat>,
-        model2: &na::DVector<FluxFloat>,
-        continuum1: &na::DVector<FluxFloat>,
-        continuum2: &na::DVector<FluxFloat>,
+        model1: &ArraySegment,
+        model2: &ArraySegment,
+        continuum1: &ArraySegment,
+        continuum2: &ArraySegment,
         light_ratio: f64,
         observed_spectrum: &ObservedSpectrum,
         observer: impl Observer<2>,
@@ -863,10 +871,10 @@ impl<F: ContinuumFitter, D: WavelengthDispersion> BinaryRVFitter<F, D> {
 
     pub fn chi2(
         &self,
-        model1: &na::DVector<FluxFloat>,
-        model2: &na::DVector<FluxFloat>,
-        continuum1: &na::DVector<FluxFloat>,
-        continuum2: &na::DVector<FluxFloat>,
+        model1: &ArraySegment,
+        model2: &ArraySegment,
+        continuum1: &ArraySegment,
+        continuum2: &ArraySegment,
         light_ratio: f64,
         observed_spectrum: &ObservedSpectrum,
         label: na::SVector<f64, 2>,

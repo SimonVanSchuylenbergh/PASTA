@@ -15,7 +15,7 @@ use continuum_fitting::{
     FixedContinuum as RsFixedContinuum, LinearModelFitter,
 };
 use convolve_rv::{
-    shift_and_resample, FixedTargetDispersionLogSpace, FixedTargetDispersionNonLog,
+    shift_and_resample, ArraySegment, FixedTargetDispersionLogSpace, FixedTargetDispersionNonLog,
     NoConvolutionDispersionTarget, VariableTargetDispersion, WavelengthDispersion,
 };
 use cubic::{calculate_interpolation_coefficients, calculate_interpolation_coefficients_flat};
@@ -720,7 +720,8 @@ impl PyWavelengthDispersion {
                     .map(|x| (x as FluxFloat) / 65535.0 * factor);
                 let convolved = self.0.convolve(spectrum_float).unwrap();
                 let resampled =
-                    shift_and_resample(&input_wavelength.0, &convolved, &self.0, 0.0).unwrap();
+                    shift_and_resample(&input_wavelength.0, &convolved.into(), &self.0, 0.0)
+                        .unwrap();
 
                 let max = resampled.max();
                 let max_bytes = max.to_le_bytes();
@@ -740,7 +741,8 @@ impl PyWavelengthDispersion {
                 let spectrum_float = arr.map(|x| (x as FluxFloat) / 65535.0);
                 let convolved = self.0.convolve(spectrum_float).unwrap();
                 let resampled =
-                    shift_and_resample(&input_wavelength.0, &convolved, &self.0, 0.0).unwrap();
+                    shift_and_resample(&input_wavelength.0, &convolved.into(), &self.0, 0.0)
+                        .unwrap();
                 let resampled_u16 = resampled
                     .into_iter()
                     .map(|x| (x.clamp(0.0, 1.0) * 65535.0) as u16)
@@ -1150,7 +1152,7 @@ macro_rules! implement_methods {
                         .interpolate_and_convolve(&dispersion.0, teff, m, logg, vsini)?;
                 Ok(PyArray::from_vec_bound(
                     py,
-                    interpolated.iter().copied().collect(),
+                    interpolated.as_view().iter().copied().collect(),
                 ))
             }
 
@@ -1351,7 +1353,7 @@ macro_rules! implement_methods {
                     ));
                 }
                 let flux = na::DVector::from_vec(observed_flux);
-                let model_spectrum = self.0.interpolate(teff, m, logg).unwrap();
+                let model_spectrum = self.0.interpolate(teff, m, logg).unwrap().into();
                 Ok(PyArray::from_vec_bound(
                     py,
                     vs.into_par_iter()
@@ -1748,10 +1750,10 @@ macro_rules! implement_methods {
                 allow_nan: Option<bool>,
             ) -> PyResult<Vec<f64>> {
                 let observed_spectrum = ObservedSpectrum::from_vecs(observed_flux, observed_var);
-                let model1 = na::DVector::from_vec(model1);
-                let model2 = na::DVector::from_vec(model2);
-                let continuum1 = na::DVector::from_vec(continuum1);
-                let continuum2 = na::DVector::from_vec(continuum2);
+                let model1 = ArraySegment::from(model1);
+                let model2 = ArraySegment::from(model2);
+                let continuum1 = ArraySegment::from(continuum1);
+                let continuum2 = ArraySegment::from(continuum2);
                 Ok(labels
                     .into_par_iter()
                     .map(|label| {
