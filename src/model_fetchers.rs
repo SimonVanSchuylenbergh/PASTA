@@ -173,7 +173,6 @@ impl InMemFetcher {
         let mut archive = Archive::new(&buffer[..]);
         let model_labels_files = archive
             .entries()?
-            .into_iter()
             .filter_map(|entry| {
                 let binding = entry.unwrap();
                 let path = binding.path().unwrap();

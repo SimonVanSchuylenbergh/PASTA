@@ -134,7 +134,7 @@ impl Label {
     }
 
     #[staticmethod]
-    fn from_dict<'a>(py: Python<'a>, dict: &PyDict) -> PyResult<Self> {
+    fn from_dict(py: Python<'_>, dict: &PyDict) -> PyResult<Self> {
         Ok(Self {
             teff: dict
                 .get_item("teff")?
@@ -262,7 +262,7 @@ impl OptimizationResult {
     }
 
     #[staticmethod]
-    fn from_dict<'a>(py: Python<'a>, dict: &PyDict) -> PyResult<Self> {
+    fn from_dict(py: Python<'_>, dict: &PyDict) -> PyResult<Self> {
         Ok(Self {
             label: Label::from_dict(
                 py,
@@ -353,7 +353,7 @@ impl BinaryOptimizationResult {
     }
 
     #[staticmethod]
-    fn from_dict<'a>(py: Python<'a>, dict: &PyDict) -> PyResult<Self> {
+    fn from_dict(py: Python<'_>, dict: &PyDict) -> PyResult<Self> {
         Ok(Self {
             label1: Label::from_dict(
                 py,
@@ -495,7 +495,7 @@ impl RvLessLabel {
     }
 
     #[staticmethod]
-    fn from_dict<'a>(py: Python<'a>, dict: &PyDict) -> PyResult<Self> {
+    fn from_dict(py: Python<'_>, dict: &PyDict) -> PyResult<Self> {
         Ok(Self {
             teff: dict
                 .get_item("teff")?
@@ -578,7 +578,7 @@ impl BinaryTimeseriesOptimizationResult {
     }
 
     #[staticmethod]
-    fn from_dict<'a>(py: Python<'a>, dict: &PyDict) -> PyResult<Self> {
+    fn from_dict(py: Python<'_>, dict: &PyDict) -> PyResult<Self> {
         Ok(Self {
             label1: RvLessLabel::from_dict(
                 py,

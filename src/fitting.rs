@@ -13,10 +13,10 @@ use argmin::core::{CostFunction as _, Executor, PopulationState, State, KV};
 use argmin::solver::brent::BrentRoot;
 use itertools::Itertools;
 use nalgebra::{self as na, Storage};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Observed specrum with flux and variance
 #[derive(Clone, Debug)]

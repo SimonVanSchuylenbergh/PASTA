@@ -12,7 +12,7 @@ use rayon::prelude::*;
 use std::io::Read;
 use std::path::PathBuf;
 
-const SMALL_GRID_PATH: &str = "/Users/ragnar/Documents/hermesnet/hermes_norm_convolved_u16_small";
+const SMALL_GRID_PATH: &str = "/STER/hermesnet/hermes_norm_convolved_u16_small";
 
 pub fn read_npy_file(file_path: PathBuf) -> Result<na::DVector<f64>> {
     let mut file = std::fs::File::open(file_path.clone())?;
@@ -25,18 +25,16 @@ pub fn read_npy_file(file_path: PathBuf) -> Result<na::DVector<f64>> {
 pub fn benchmark(c: &mut Criterion) {
     let wl_grid = WlGrid::Logspace(3.6020599913, 2e-6, 76_145);
     let interpolator = GridInterpolator::new(
-        InMemFetcher::new(
-            "/Users/ragnar/Documents/hermesnet/hermes_norm_convolved_u16_small",
-            false,
-        )
-        .unwrap(),
+        InMemFetcher::new(SMALL_GRID_PATH, false).unwrap(),
         wl_grid.clone(),
     );
     let wl = read_npy_file("wl_hermes.npy".into()).unwrap();
     let dispersion = NoConvolutionDispersionTarget::new(wl.clone(), &wl_grid);
     let interpolated = interpolator.interpolate(8000.0, 0.0, 3.5).unwrap();
     let convolved_for_rotation = convolve_rotation(&wl_grid, &interpolated, 20.0).unwrap();
-    let model = dispersion.convolve_segment(convolved_for_rotation.clone()).unwrap();
+    let model = dispersion
+        .convolve_segment(convolved_for_rotation.clone())
+        .unwrap();
     let output = shift_and_resample(&wl_grid, &model, &dispersion, 1.0).unwrap();
     c.bench_function("produce_model", |b| {
         b.iter(|| {
@@ -52,7 +50,11 @@ pub fn benchmark(c: &mut Criterion) {
         b.iter(|| convolve_rotation(&wl_grid, &interpolated, 20.0).unwrap())
     });
     c.bench_function("convolve resolution", |b| {
-        b.iter(|| dispersion.convolve_segment(convolved_for_rotation.clone()).unwrap())
+        b.iter(|| {
+            dispersion
+                .convolve_segment(convolved_for_rotation.clone())
+                .unwrap()
+        })
     });
     c.bench_function("resample", |b| {
         b.iter(|| shift_and_resample(&wl_grid, &model, &dispersion, 1.0).unwrap())
