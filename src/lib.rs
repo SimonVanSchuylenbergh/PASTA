@@ -1548,7 +1548,7 @@ macro_rules! implement_methods {
                 observed_flux: Vec<FluxFloat>,
                 observed_var: Vec<FluxFloat>,
                 spec_res: f64,
-                label: Label,
+                label: [f64; 5],
                 search_radius: Option<[f64; 5]>,
             ) -> PyResult<LabelUncertainties> {
                 let search_radius = search_radius.unwrap_or([2000.0, 0.3, 0.3, 40.0, 40.0]);
@@ -1559,7 +1559,7 @@ macro_rules! implement_methods {
                         &interpolator.0,
                         &observed_spectrum,
                         spec_res,
-                        label.into(),
+                        fitting::Label::from_array(label).into(),
                         fitting::Label::from_array(search_radius).into(),
                     )?
                     .into())
@@ -1573,7 +1573,7 @@ macro_rules! implement_methods {
                 observed_fluxes: Vec<Vec<FluxFloat>>,
                 observed_vars: Vec<Vec<FluxFloat>>,
                 spec_res: f64,
-                labels: Vec<Label>,
+                labels: Vec<[f64; 5]>,
                 search_radius: Option<[f64; 5]>,
             ) -> Vec<LabelUncertainties> {
                 let search_radius = search_radius.unwrap_or([2000.0, 0.3, 0.3, 40.0, 40.0]);
@@ -1590,7 +1590,7 @@ macro_rules! implement_methods {
                                 &interpolator.0,
                                 &obs,
                                 spec_res,
-                                params.into(),
+                                fitting::Label::from_array(params).into(),
                                 fitting::Label::from_array(search_radius).into(),
                             )
                             .unwrap()
